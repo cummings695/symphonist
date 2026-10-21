@@ -40,6 +40,7 @@ Less of the developer per ticket. Low-risk work flows through with few or no tou
 ## 2. Goals
 
 - Run locally on the developer's machine as a single install; act as that developer.
+- Cross-platform from v1: Windows, macOS, and Linux are all first-class.
 - Own a tracker-independent **ticket** model and **pipeline state** model; map each source system onto it.
 - Configurable pipeline per project: stages, order, and which stages are gates.
 - Risk-aware gates: an agent reviewer auto-approves low-risk stage output; high-risk output waits for the developer.
@@ -61,6 +62,7 @@ These were decided in conversation and should be treated as fixed:
 | Topic | Decision |
 |---|---|
 | Where it runs | Local app on the developer's machine, not a hosted server. |
+| Platforms | Not platform specific: must run on Windows, macOS, and Linux. |
 | Identity | Acts as the developer: tickets assigned to them, actions under their accounts. |
 | States | Symphonist owns its own pipeline states; source systems are mapped onto them. Cards progress on Symphonist's board even when the source has no matching status (e.g. Jira with no "To prod"). |
 | Approvals | Both work: moving the card in the source system (when a mapped status exists) **and** approving in Symphonist's dashboard/CLI. |
@@ -169,7 +171,7 @@ Each stage is one **short agent run**:
 - Toolchain image: the repo's `devcontainer.json` if present, otherwise a Symphonist default image (.NET SDK, Node, git, headless browser for evidence screenshots) that the project can override.
 - Evidence runs (build, tests, running the app) happen inside the container.
 - Project onboarding includes a check that the image builds and the repo's build/tests pass inside it.
-- Docker Desktop (or an equivalent Docker engine) is required on the developer's machine for this mode.
+- A Docker-compatible engine is required on the developer's machine for this mode (Docker Desktop on Windows/macOS; Docker Engine, Docker Desktop, or Podman with Docker API compatibility on Linux; Colima/OrbStack also acceptable on macOS).
 
 **Host mode (per-project fallback).** For repos that won't containerize. The agent runs directly on the host in the worktree with a per-stage allowlist of tools/commands (no blanket permission bypass). The project config must opt into host mode explicitly, and the dashboard marks such projects.
 
@@ -226,12 +228,13 @@ Following from the anti-goal:
 - .NET 10. One local process hosting the background worker, local web API, and dashboard.
 - Dashboard: Blazor Server with live updates over SignalR (keeps the stack all C#).
 - CLI: a separate small .NET tool that talks to the local API.
-- Tray app: small Windows app, later.
+- Tray app: later, cross-platform (e.g. Avalonia tray icon).
 - Storage: SQLite in the user's profile folder (tickets, states, runs, gate decisions, stats).
-- Secrets: OS credential store (Windows Credential Manager first), never in config files.
+- Secrets: OS credential store on each platform (Windows Credential Manager, macOS Keychain, Linux Secret Service/libsecret), never in plain config files. On Linux without a Secret Service (headless), fall back to an encrypted file protected by the user's account.
 - Project config: human-editable files (YAML or JSON), also editable through the setup screen.
 - Aspire AppHost + ServiceDefaults + OpenTelemetry for development; each agent run traced.
-- Windows first; avoid anything that blocks macOS/Linux later.
+- Windows, macOS, and Linux supported in v1. No Windows-only APIs in the core; platform-specific pieces (secrets, notifications, tray, autostart) sit behind small abstractions. Paths, shells, line endings, and process launching must work on all three. CI builds and tests on all three.
+- Distributed as a .NET tool and/or self-contained per-platform builds — builder's choice.
 - Local API bound to localhost only.
 - Containers driven through the Docker Engine API (e.g. Docker.DotNet) or the `docker` CLI — builder's choice.
 
@@ -251,7 +254,7 @@ Following from the anti-goal:
 - **Production promotion (v1 project):** "To prod" = Symphonist opens a PR from main into the production branch and merges it once the gate passes, matching today's manual process. "Deploy succeeded" = the Bitbucket Pipelines run (deployment step) on the production branch for that merge commit succeeds; failure moves the ticket to Blocked. Other projects may configure a release pipeline trigger instead.
 - **One repo per ticket in v1.** A project may list several repos, but each ticket works in exactly one (chosen at triage). The data model should not preclude multi-repo tickets later.
 - **Cost guardrails** limit wall-clock time and agent turns always, and dollars when the agent reports cost. Hitting an agent usage/rate limit pauses the queue (a distinct "Paused: usage limit" status on the dashboard) rather than marking tickets Blocked.
-- **Notifications:** Windows toast notification when a gate starts waiting on the developer or a ticket goes Blocked; daily digest shown in the dashboard and as a toast summary. Email/Slack/Teams are later options. Jira's own comment emails continue as they do today.
+- **Notifications:** native desktop notification (Windows toast, macOS Notification Center, Linux freedesktop notifications) when a gate starts waiting on the developer or a ticket goes Blocked; daily digest shown in the dashboard and as a notification summary. Email/Slack/Teams are later options. Jira's own comment emails continue as they do today.
 
 ## 13. Open items
 
