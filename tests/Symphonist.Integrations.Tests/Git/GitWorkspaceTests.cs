@@ -120,6 +120,35 @@ public sealed class GitWorkspaceTests : IDisposable
     public async Task Failing_git_command_throws_with_stderr()
     {
         var ex = await Assert.ThrowsAsync<GitCommandException>(() => git.PushAsync(dev, "no-such-branch", default));
-        Assert.False(string.IsNullOrWhiteSpace(ex.Message));
+        Assert.Contains("does not match any", ex.Message);
+    }
+
+    private sealed class FailFetchOnce(IProcessRunner inner) : IProcessRunner
+    {
+        public bool Failed;
+        public Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct)
+        {
+            if (!Failed && spec.Arguments.Contains("fetch"))
+            {
+                Failed = true;
+                return Task.FromResult(new ProcessResult(128, "", "simulated network failure", false));
+            }
+            return inner.RunAsync(spec, ct);
+        }
+    }
+
+    [Fact]
+    public async Task Prepare_failing_midway_leaves_no_workspace_and_retry_succeeds()
+    {
+        var flaky = new FailFetchOnce(new ProcessRunner());
+        var g = new GitWorkspace(flaky, workRoot);
+        var ex = await Assert.ThrowsAsync<GitCommandException>(() => g.PrepareAsync(project, "ORD-2", "symphonist/ORD-2", default));
+        Assert.Contains("simulated network failure", ex.Message);
+        Assert.False(Directory.Exists(Path.Combine(workRoot, "proj", "ORD-2")));
+        Assert.Empty(Directory.GetDirectories(Path.Combine(workRoot, "proj")));
+
+        var ws = await g.PrepareAsync(project, "ORD-2", "symphonist/ORD-2", default);
+        Assert.Equal("symphonist/ORD-2", Git(ws, "branch --show-current"));
+        Assert.Equal(Norm(bare), Norm(Git(ws, "remote get-url origin")));
     }
 }

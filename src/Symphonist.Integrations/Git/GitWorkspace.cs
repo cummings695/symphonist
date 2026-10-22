@@ -5,7 +5,7 @@ using Symphonist.Integrations.Processes;
 
 namespace Symphonist.Integrations.Git;
 
-public sealed class GitCommandException(string message) : Exception(message);
+public sealed class GitCommandException(string message, Exception? inner = null) : Exception(message, inner);
 
 public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitWorkspace
 {
@@ -17,14 +17,26 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
         if (!Directory.Exists(ws))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ws)!);
-            await GitAsync(null, ct, "clone", repo.LocalPath, ws);
-            var originUrl = (await GitAsync(repo.LocalPath, ct, "remote", "get-url", "origin")).Trim();
-            await GitAsync(ws, ct, "remote", "set-url", "origin", originUrl);
-            await GitAsync(ws, ct, "fetch", "origin");
+            // Prepare in a temp sibling and move into place only when every step succeeded,
+            // so a failure never leaves a half-prepared workspace behind.
+            var tmp = ws + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                await GitAsync(null, ct, "clone", repo.LocalPath, tmp);
+                var originUrl = (await GitAsync(repo.LocalPath, ct, "remote", "get-url", "origin")).Trim();
+                await GitAsync(tmp, ct, "remote", "set-url", "origin", originUrl);
+                await GitAsync(tmp, ct, "fetch", "origin");
 
-            var remoteBranch = await RemoteBranchExistsAsync(ws, branch, ct);
-            await GitAsync(ws, ct, "checkout", "-B", branch,
-                remoteBranch ? $"origin/{branch}" : $"origin/{repo.MainBranch}");
+                var remoteBranch = await RemoteBranchExistsAsync(tmp, branch, ct);
+                await GitAsync(tmp, ct, "checkout", "-B", branch,
+                    remoteBranch ? $"origin/{branch}" : $"origin/{repo.MainBranch}");
+                Directory.Move(tmp, ws);
+            }
+            catch
+            {
+                DeleteQuietly(tmp);
+                throw;
+            }
         }
         else
         {
@@ -52,15 +64,31 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
         return r.ExitCode == 0;
     }
 
+    private static void DeleteQuietly(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(dir, true);
+        }
+        catch { /* best effort */ }
+    }
+
+    private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(10);
+    private static readonly IReadOnlyDictionary<string, string?> GitEnv =
+        new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" };
+
     private async Task<ProcessResult> RunAsync(string? dir, CancellationToken ct, params string[] args)
     {
         try
         {
-            return await runner.RunAsync(new ProcessSpec("git", args, dir), ct);
+            return await runner.RunAsync(new ProcessSpec("git", args, dir, Environment: GitEnv, Timeout: GitTimeout), ct);
         }
         catch (Win32Exception ex)
         {
-            throw new GitCommandException($"Could not run 'git'; is git installed and on PATH? ({ex.Message})");
+            throw new GitCommandException($"Could not run 'git'; is git installed and on PATH? ({ex.Message})", ex);
         }
     }
 
