@@ -1,0 +1,17 @@
+{
+  "pagelen": 10,
+  "page": 1,
+  "size": 1,
+  "values": [
+    {
+      "type": "pullrequest",
+      "id": 42,
+      "title": "ORD-1: Add login throttling",
+      "state": "OPEN",
+      "merge_commit": null,
+      "source": { "branch": { "name": "symphonist/ORD-1" } },
+      "destination": { "branch": { "name": "main" } },
+      "links": { "html": { "href": "https://bitbucket.org/acme/orders/pull-requests/42" } }
+    }
+  ]
+}
