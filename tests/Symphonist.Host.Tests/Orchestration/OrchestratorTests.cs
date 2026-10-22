@@ -430,6 +430,48 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Empty(tracker.Transitions);
     }
 
+    [Fact] public async Task Approval_stored_during_runs_that_end_blocked_does_not_approve_after_unblock()
+    {
+        Source("ORD-1", "Planned");
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : Task.FromResult(FakeAgentRunner.Fail("boom"));
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);         // first plan run starts and waits
+        tracker.Move("ORD-1", "In Progress");
+        await o.TickAsync(CancellationToken.None);         // approval stored
+        release.SetResult(FakeAgentRunner.Fail("boom"));    // attempt 1 fails
+        await o.WhenIdleAsync();
+        await TickIdle(o);                                  // attempt 2 fails
+        await TickIdle(o);                                  // attempt 3 fails -> Blocked
+        Assert.Equal(StageStatus.Blocked, store.Single("ORD-1").Status);
+
+        tracker.Move("ORD-1", "Planned");                   // developer takes the approval back
+        await TickIdle(o);
+        await o.UnblockAsync("orders", "ORD-1", CancellationToken.None);
+        agent.OnRunAsync = null;                            // the next run succeeds
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Null(t.PendingSourceStatus);
+    }
+
+    [Fact] public async Task Restart_recovery_keeps_a_deferred_approval()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Running, "In Progress", t => t.PendingSourceStatus = "In Progress");
+        var o = Create();
+        agent.OnRunAsync = r => agent.Requests.Count == 1
+            ? Task.FromResult(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")))
+            : new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.RecoverAsync(CancellationToken.None);
+        Assert.Equal("In Progress", store.Single("ORD-1").PendingSourceStatus);
+        await o.TickAsync(CancellationToken.None);
+        await o.WhenIdleAsync();
+
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
     [Fact] public async Task Status_at_pickup_is_not_an_approval()
     {
         Source("ORD-1", "Planned");

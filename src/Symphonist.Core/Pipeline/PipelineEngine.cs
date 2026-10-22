@@ -35,18 +35,31 @@ public static class PipelineEngine
         t.PendingSourceStatus = null;
         t.Feedback = null;
 
+        // Apply the decision only while the card still says so; a later move (e.g. back again) overrides it.
+        string? discarded = null;
+        if (pending is not null && !Same(t.LastSourceStatus, pending))
+        {
+            discarded = $"discarded source move to '{pending}' (card is now '{t.LastSourceStatus}'); ";
+            pending = null;
+        }
+
         if (pending is not null && EarlierStageFor(p, t.StageId, pending) is { } target)
             return Deferred(pending, SendBackTo(t, target, latestFeedback, now));
 
+        TransitionOutcome outcome;
         if (stage.Gate == GatePolicy.Human)
         {
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = now;
             t.UpdatedAt = now;
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
-            return new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
+            outcome = new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
         }
-        return Advance(p, t, stage, now);
+        else
+        {
+            outcome = Advance(p, t, stage, now);
+        }
+        return discarded is null ? outcome : outcome with { Message = discarded + outcome.Message };
     }
 
     public static TransitionOutcome StageFailed(ProjectConfig p, Ticket t, string error, DateTimeOffset now)
@@ -56,6 +69,7 @@ public static class PipelineEngine
         if (t.Attempts >= p.MaxAttemptsPerStage)
         {
             t.Status = StageStatus.Blocked;
+            t.PendingSourceStatus = null; // a decision about this run must not outlive the block
             t.BlockedReason = $"{t.StageId} failed {t.Attempts} times: {error}";
             return new(true, null, $"blocked: {t.BlockedReason}");
         }
@@ -126,6 +140,7 @@ public static class PipelineEngine
     {
         t.Status = StageStatus.Blocked;
         t.BlockedReason = reason;
+        t.PendingSourceStatus = null;
         t.UpdatedAt = now;
         return new(true, null, $"blocked: {reason}");
     }
@@ -136,6 +151,7 @@ public static class PipelineEngine
         t.Status = StageStatus.Pending;
         t.Attempts = 0;
         t.BlockedReason = null;
+        t.PendingSourceStatus = null;
         t.StageStartedAt = now; // a fresh start: build/deploy timeouts count from here, not from the original entry
         t.UpdatedAt = now;
         return new(true, null, "unblocked");

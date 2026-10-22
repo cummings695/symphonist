@@ -255,4 +255,52 @@ public class PipelineEngineTests
         PipelineEngine.StageSucceeded(P, t, Now);
         Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
     }
+    [Fact] public void Stale_approval_never_survives_block_and_unblock()
+    {
+        var t = At("plan", StageStatus.Running); t.LastSourceStatus = "Planned";
+        PipelineEngine.SourceStatusChanged(P, t, "In Progress", null, Now); // approval while running: stored
+        for (var i = 0; i < P.MaxAttemptsPerStage; i++) PipelineEngine.StageFailed(P, t, "boom", Now);
+        Assert.Equal(StageStatus.Blocked, t.Status);
+        Assert.Null(t.PendingSourceStatus);
+
+        PipelineEngine.SourceStatusChanged(P, t, "Planned", null, Now); // developer moves the card back
+        PipelineEngine.Unblock(t, Now);
+        PipelineEngine.StageSucceeded(P, t, Now);
+
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+    }
+
+    [Fact] public void Block_clears_a_deferred_decision()
+    {
+        var t = At("plan", StageStatus.Running); t.PendingSourceStatus = "In Progress";
+        PipelineEngine.Block(t, "no longer matches tracker query", Now);
+        Assert.Null(t.PendingSourceStatus);
+    }
+
+    [Fact] public void Unblock_clears_a_deferred_decision()
+    {
+        var t = At("plan", StageStatus.Blocked); t.PendingSourceStatus = "In Progress";
+        PipelineEngine.Unblock(t, Now);
+        Assert.Null(t.PendingSourceStatus);
+    }
+
+    [Fact] public void Deferred_decision_no_longer_matching_the_card_is_discarded()
+    {
+        var t = At("plan", StageStatus.Running); t.LastSourceStatus = "Planned"; t.PendingSourceStatus = "In Progress";
+
+        var o = PipelineEngine.StageSucceeded(P, t, Now);
+
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Equal("discarded source move to 'In Progress' (card is now 'Planned'); plan awaiting approval", o.Message);
+    }
+
+    [Fact] public void Failure_that_does_not_block_keeps_the_deferred_decision()
+    {
+        var t = At("plan", StageStatus.Running); t.LastSourceStatus = "In Progress"; t.PendingSourceStatus = "In Progress";
+        PipelineEngine.StageFailed(P, t, "boom", Now);
+        Assert.Equal((StageStatus.Pending, "In Progress"), (t.Status, t.PendingSourceStatus));
+        PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal("implement", t.StageId);
+    }
 }
