@@ -64,4 +64,20 @@ public class PromptRendererTests
         }
         finally { File.Delete(path); }
     }
+    [Theory]
+    [InlineData(StageKind.Plan)]
+    [InlineData(StageKind.Implement)]
+    public void Default_prompts_say_git_is_read_only_and_Symphonist_commits(StageKind kind)
+    {
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml")) with
+        {
+            PromptOverrides = new Dictionary<StageKind, string>(),
+        };
+
+        var prompt = PromptLibrary.Get(p, kind);
+
+        Assert.Contains("`.git` is read-only", prompt);
+        Assert.Contains("Symphonist makes the commits", prompt);
+        Assert.Contains("do not run `git commit` or `git push`", prompt);
+    }
 }
