@@ -29,10 +29,11 @@ public class DockerLauncherTests
     {
         public List<ProcessSpec> Calls { get; } = [];
         public Func<ProcessSpec, int> ExitCode { get; set; } = _ => 0;
+        public Func<ProcessSpec, string> Stdout { get; set; } = _ => "";
         public Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct)
         {
             Calls.Add(spec);
-            return Task.FromResult(new ProcessResult(ExitCode(spec), "", "", false));
+            return Task.FromResult(new ProcessResult(ExitCode(spec), Stdout(spec), "", false));
         }
     }
 
@@ -116,7 +117,7 @@ public class DockerLauncherTests
     public async Task Cleanup_force_removes_the_container()
     {
         var spec = launcher.Wrap(new("claude", []), Request("/w"));
-        await launcher.CleanupAsync(spec, default);
+        await launcher.CleanupAsync(spec, Request("/w"), default);
         var call = Assert.Single(fake.Calls);
         Assert.Equal("docker", call.FileName);
         Assert.Equal(["rm", "-f", DockerLauncher.ContainerName(spec)!], call.Arguments);
@@ -125,7 +126,7 @@ public class DockerLauncherTests
     [Fact]
     public async Task Cleanup_ignores_specs_it_did_not_wrap()
     {
-        await launcher.CleanupAsync(new ProcessSpec("claude", ["-p"]), default);
+        await launcher.CleanupAsync(new ProcessSpec("claude", ["-p"]), Request("/w"), default);
         Assert.Empty(fake.Calls);
     }
 
@@ -168,30 +169,135 @@ public class DockerLauncherTests
         Assert.False(spec.Environment!.ContainsKey("SYMPHONIST_UID"));
     }
 
-    [Fact]
-    public async Task EnsureImage_does_nothing_when_image_exists()
+    private const string HashFormat = "{{index .Config.Labels \"symphonist.context-hash\"}}";
+
+    /// <summary>A launcher over a real (temporary) build context, as EnsureImage hashes it.</summary>
+    private sealed class Context : IDisposable
     {
-        await launcher.EnsureImageAsync(DockerLauncher.DefaultImage, default);
-        var call = Assert.Single(fake.Calls);
-        Assert.Equal(["image", "inspect", DockerLauncher.DefaultImage], call.Arguments);
+        public string Directory { get; } = Path.Combine(Path.GetTempPath(), "symphonist-ctx-" + Guid.NewGuid().ToString("N"));
+
+        public Context()
+        {
+            System.IO.Directory.CreateDirectory(Path.Combine(Directory, "sub"));
+            Write("Dockerfile", "FROM ubuntu:24.04\n");
+            Write(Path.Combine("sub", "init.sh"), "echo hi\n");
+        }
+
+        public void Write(string relative, string text) => File.WriteAllText(Path.Combine(Directory, relative), text);
+
+        public void Dispose() => System.IO.Directory.Delete(Directory, true);
     }
 
     [Fact]
-    public async Task EnsureImage_builds_default_image_from_context_when_missing()
+    public void Context_hash_is_stable_and_tracks_contents_and_names()
     {
-        fake.ExitCode = s => s.Arguments[0] == "image" ? 1 : 0;
-        await launcher.EnsureImageAsync(DockerLauncher.DefaultImage, default);
+        using var a = new Context();
+        using var b = new Context();
+        var hash = DockerLauncher.ContextHash(a.Directory);
+        Assert.Matches("^[0-9a-f]{64}$", hash);
+        Assert.Equal(hash, DockerLauncher.ContextHash(a.Directory));
+        Assert.Equal(hash, DockerLauncher.ContextHash(b.Directory)); // independent of location
+
+        b.Write("Dockerfile", "FROM ubuntu:24.04\nRUN true\n");
+        var changed = DockerLauncher.ContextHash(b.Directory);
+        Assert.NotEqual(hash, changed);
+
+        File.Move(Path.Combine(b.Directory, "sub", "init.sh"), Path.Combine(b.Directory, "sub", "init2.sh"));
+        Assert.NotEqual(changed, DockerLauncher.ContextHash(b.Directory));
+    }
+
+    [Fact]
+    public async Task EnsureImage_does_nothing_when_default_image_matches_the_context()
+    {
+        using var ctx = new Context();
+        var docker = new DockerLauncher(fake, ctx.Directory, _ => null);
+        fake.Stdout = _ => DockerLauncher.ContextHash(ctx.Directory) + "\n";
+
+        await docker.EnsureImageAsync(DockerLauncher.DefaultImage, default);
+
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal(["image", "inspect", "--format", HashFormat, DockerLauncher.DefaultImage], call.Arguments);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("stale")]
+    [InlineData("unlabeled")]
+    public async Task EnsureImage_builds_labeled_default_image_when_missing_or_stale(string state)
+    {
+        using var ctx = new Context();
+        var docker = new DockerLauncher(fake, ctx.Directory, _ => null);
+        var hash = DockerLauncher.ContextHash(ctx.Directory);
+        fake.ExitCode = s => state == "missing" && s.Arguments[0] == "image" ? 1 : 0;
+        fake.Stdout = s => s.Arguments[0] != "image" ? "" : state == "stale" ? new string('0', 64) : "<no value>";
+
+        await docker.EnsureImageAsync(DockerLauncher.DefaultImage, default);
+
         Assert.Equal(2, fake.Calls.Count);
         Assert.Equal("docker", fake.Calls[1].FileName);
-        Assert.Equal(["build", "-t", DockerLauncher.DefaultImage, "/ctx"], fake.Calls[1].Arguments);
+        Assert.Equal(["build", "-t", DockerLauncher.DefaultImage, "--label", $"symphonist.context-hash={hash}", ctx.Directory],
+            fake.Calls[1].Arguments);
+    }
+
+    [Fact]
+    public async Task EnsureImage_only_checks_custom_images_exist()
+    {
+        await launcher.EnsureImageAsync("acme/agent:7", default);
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal(["image", "inspect", "acme/agent:7"], call.Arguments);
+    }
+
+    [Fact]
+    public async Task Leftover_agent_containers_are_force_removed()
+    {
+        fake.Stdout = s => s.Arguments[0] == "ps" ? "abc123\r\ndef456\n\n" : "";
+
+        var removed = await launcher.RemoveLeftoverContainersAsync(default);
+
+        Assert.Equal(2, removed);
+        Assert.Equal(["ps", "-aq", "--filter", "label=symphonist=agent"], fake.Calls[0].Arguments);
+        Assert.Equal(["rm", "-f", "abc123"], fake.Calls[1].Arguments);
+        Assert.Equal(["rm", "-f", "def456"], fake.Calls[2].Arguments);
+    }
+
+    [Fact]
+    public async Task Leftover_listing_failure_throws()
+    {
+        fake.ExitCode = _ => 1;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => launcher.RemoveLeftoverContainersAsync(default));
+        Assert.Single(fake.Calls);
+    }
+
+    [Fact]
+    public async Task Availability_asks_the_docker_daemon()
+    {
+        Assert.True(await launcher.IsAvailableAsync(default));
+        Assert.Equal(["version", "--format", "{{.Server.Version}}"], Assert.Single(fake.Calls).Arguments);
+        fake.ExitCode = _ => 1;
+        Assert.False(await launcher.IsAvailableAsync(default));
+    }
+
+    [Fact]
+    public async Task Availability_is_false_when_docker_cannot_be_started()
+    {
+        var missing = new DockerLauncher(new ThrowingProcessRunner(), "/ctx", _ => null);
+        Assert.False(await missing.IsAvailableAsync(default));
+    }
+
+    private sealed class ThrowingProcessRunner : IProcessRunner
+    {
+        public Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct) =>
+            throw new System.ComponentModel.Win32Exception(2, "The system cannot find the file specified");
     }
 
     [Fact]
     public async Task EnsureImage_throws_when_build_fails()
     {
+        using var ctx = new Context();
+        var docker = new DockerLauncher(fake, ctx.Directory, _ => null);
         fake.ExitCode = _ => 1;
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => launcher.EnsureImageAsync(DockerLauncher.DefaultImage, default));
+            () => docker.EnsureImageAsync(DockerLauncher.DefaultImage, default));
     }
 
     [Fact]

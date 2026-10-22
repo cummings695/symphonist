@@ -25,9 +25,9 @@ public class ClaudeCodeRunnerTests
     private sealed class PassthroughLauncher(bool providesIsolation) : IAgentLauncher
     {
         public List<ProcessSpec> CleanedUp { get; } = [];
-        public bool ProvidesIsolation => providesIsolation;
+        public bool ProvidesIsolation(AgentRunRequest request) => providesIsolation;
         public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request) => agentCommand;
-        public Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct)
+        public Task CleanupAsync(ProcessSpec wrapped, AgentRunRequest request, CancellationToken ct)
         {
             CleanedUp.Add(wrapped);
             return Task.CompletedTask;
@@ -161,8 +161,8 @@ public class ClaudeCodeRunnerTests
     [Fact]
     public void Launcher_isolation_capabilities()
     {
-        Assert.False(new HostLauncher().ProvidesIsolation);
-        Assert.True(new DockerLauncher(fake, "/ctx", _ => null).ProvidesIsolation);
+        Assert.False(new HostLauncher().ProvidesIsolation(Request(Isolation.Host)));
+        Assert.True(new DockerLauncher(fake, "/ctx", _ => null).ProvidesIsolation(Request(Isolation.Container)));
     }
 
     [Fact]

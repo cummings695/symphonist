@@ -137,7 +137,8 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         Assert.True(r.TimedOut);
         Assert.NotEmpty(await ContainersNamed(name)); // killing the docker CLI leaves the container running
 
-        await fixture.Launcher.CleanupAsync(spec, CancellationToken.None);
+        await fixture.Launcher.CleanupAsync(spec, new AgentRunRequest(workspace, "",
+            new AgentSettings("claude-code", Isolation.Container, [], [], 5, null, null)), CancellationToken.None);
         Assert.Empty(await ContainersNamed(name));
     }
 

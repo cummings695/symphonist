@@ -16,7 +16,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         var settings = request.Settings;
         var args = new List<string> { "-p", "--output-format", "json", "--json-schema", StageOutputSchema.Json };
         // Bypass permission prompts only when the launcher actually sandboxes the run; config alone is not enough.
-        if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation)
+        if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation(request))
             args.Add(HostLauncher.PermissionBypassFlag);
         else { args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools)); }
         if (!string.IsNullOrWhiteSpace(settings.Model)) { args.Add("--model"); args.Add(settings.Model); }
@@ -33,11 +33,11 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         }
         catch (OperationCanceledException)
         {
-            await launcher.CleanupAsync(spec, CancellationToken.None);
+            await launcher.CleanupAsync(spec, request, CancellationToken.None);
             throw;
         }
         sw.Stop();
-        if (result.TimedOut) await launcher.CleanupAsync(spec, CancellationToken.None);
+        if (result.TimedOut) await launcher.CleanupAsync(spec, request, CancellationToken.None);
 
         var rawLog = result.StandardOutput + "\n--- stderr ---\n" + result.StandardError;
         return Parse(result, settings, sw.Elapsed, rawLog);

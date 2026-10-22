@@ -27,7 +27,10 @@ public sealed class ProjectRegistry
     public ProjectConfig Get(string id) =>
         Projects.FirstOrDefault(p => p.Id == id) ?? throw new KeyNotFoundException($"Project '{id}' not found");
 
-    /// <summary>Reloads all project files; on an invalid file throws and keeps the previously loaded projects.</summary>
+    /// <summary>
+    /// Reloads all project files. A file that cannot be read or is invalid is logged and skipped, as are all files
+    /// that declare the same project id (which of them is meant is ambiguous); the other projects still load.
+    /// </summary>
     public void Reload()
     {
         var dir = SymphonistPaths.Resolve("projects");
@@ -38,10 +41,39 @@ public sealed class ProjectRegistry
             return;
         }
 
-        var loaded = ProjectConfigLoader.LoadAll(dir);
-        var duplicate = loaded.GroupBy(p => p.Id).FirstOrDefault(g => g.Count() > 1);
-        if (duplicate is not null) throw new ProjectConfigException($"{dir}: duplicate project id '{duplicate.Key}'");
+        var loaded = new List<ProjectConfig>();
+        foreach (var file in ProjectFiles(dir))
+        {
+            try
+            {
+                loaded.Add(ProjectConfigLoader.Load(file));
+            }
+            catch (Exception e) when (e is ProjectConfigException or IOException or UnauthorizedAccessException
+                                           or UriFormatException) // malformed tracker.site
+            {
+                log.LogError("Skipping project file {File}: {Error}", file, e.Message);
+            }
+        }
+
+        foreach (var duplicate in loaded.GroupBy(p => p.Id).Where(g => g.Count() > 1).ToList())
+        {
+            log.LogError("Skipping project id '{Id}': declared by {Count} project files", duplicate.Key, duplicate.Count());
+            loaded.RemoveAll(p => p.Id == duplicate.Key);
+        }
         Volatile.Write(ref projects, loaded);
+    }
+
+    private IReadOnlyList<string> ProjectFiles(string dir)
+    {
+        try
+        {
+            return ProjectConfigLoader.ProjectFiles(dir);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            log.LogError("Cannot list project files in {Directory}: {Error}", dir, e.Message);
+            return [];
+        }
     }
 
     public bool IsPaused(string id)
@@ -69,7 +101,7 @@ public sealed class ProjectRegistry
         {
             return JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(PausedPath)) ?? [];
         }
-        catch (JsonException e)
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
             log.LogWarning(e, "Ignoring unreadable {Path}; no projects paused", PausedPath);
             return [];

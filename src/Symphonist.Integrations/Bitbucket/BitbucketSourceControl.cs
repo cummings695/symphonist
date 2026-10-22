@@ -60,6 +60,10 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
         return new MergeResult(true, MergeHash(doc.RootElement), null);
     }
 
+    /// <summary>The web page of pull request <paramref name="id"/> (no API call needed).</summary>
+    public static Uri PullRequestUrl(RepoConfig repo, long id) =>
+        new($"https://bitbucket.org/{Uri.EscapeDataString(repo.Workspace)}/{Uri.EscapeDataString(repo.Slug)}/pull-requests/{id}");
+
     public Uri BranchFileUrl(string branch, string path) =>
         new($"https://bitbucket.org/{Uri.EscapeDataString(config.Workspace)}/{Uri.EscapeDataString(config.Slug)}/src/{branch}/{path}");
 

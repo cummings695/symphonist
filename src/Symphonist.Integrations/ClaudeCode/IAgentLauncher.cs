@@ -8,18 +8,19 @@ namespace Symphonist.Integrations.ClaudeCode;
 public interface IAgentLauncher
 {
     /// <summary>
-    /// True only when the wrapped command runs inside a sandbox (container + network allowlist). Permission prompts
-    /// may be bypassed only when this is true.
+    /// True only when <see cref="Wrap"/> would run <paramref name="request"/>'s command inside a sandbox (container +
+    /// network allowlist). Permission prompts may be bypassed only when this is true. Asked per request because a
+    /// launcher may delegate different requests to different launchers.
     /// </summary>
-    bool ProvidesIsolation { get; }
+    bool ProvidesIsolation(AgentRunRequest request);
 
     ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request);
 
     /// <summary>
-    /// Releases whatever a <paramref name="wrapped"/> run may have left behind after it timed out or was cancelled
-    /// (killing the launching process alone may not stop it, e.g. a container).
+    /// Releases whatever a <paramref name="wrapped"/> run of <paramref name="request"/> may have left behind after it
+    /// timed out or was cancelled (killing the launching process alone may not stop it, e.g. a container).
     /// </summary>
-    Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct);
+    Task CleanupAsync(ProcessSpec wrapped, AgentRunRequest request, CancellationToken ct);
 }
 
 /// <summary>
@@ -33,7 +34,7 @@ public sealed class HostLauncher : IAgentLauncher
     private const string PermissionModeOption = "--permission-mode";
     private const string BypassPermissionsMode = "bypassPermissions";
 
-    public bool ProvidesIsolation => false;
+    public bool ProvidesIsolation(AgentRunRequest request) => false;
 
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
     {
@@ -44,7 +45,7 @@ public sealed class HostLauncher : IAgentLauncher
         return agentCommand with { WorkingDirectory = request.WorkingDirectory };
     }
 
-    public Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct) => Task.CompletedTask;
+    public Task CleanupAsync(ProcessSpec wrapped, AgentRunRequest request, CancellationToken ct) => Task.CompletedTask;
 
     private static bool BypassesPermissions(IReadOnlyList<string> args)
     {

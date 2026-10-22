@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using Symphonist.Core.Agents;
 using Symphonist.Integrations.ClaudeCode;
 using Symphonist.Integrations.Processes;
@@ -22,6 +24,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     private const string UidVar = "SYMPHONIST_UID";
     private const string GidVar = "SYMPHONIST_GID";
     private const string NameOption = "--name";
+    private const string AgentLabel = "symphonist=agent";
+    private const string ContextHashLabel = "symphonist.context-hash";
     private static readonly TimeSpan InspectTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RemoveTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(45);
@@ -30,19 +34,47 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     public static readonly IReadOnlyList<string> BaseAllowedDomains =
         ["api.anthropic.com", "statsig.anthropic.com", "sentry.io"];
 
-    public bool ProvidesIsolation => true;
+    public bool ProvidesIsolation(AgentRunRequest request) => true;
 
-    /// <summary>Makes sure <paramref name="image"/> exists locally, building the default image if it is missing.</summary>
+    /// <summary>Whether the docker CLI is installed and its daemon answers.</summary>
+    public async Task<bool> IsAvailableAsync(CancellationToken ct)
+    {
+        try
+        {
+            var version = await runner.RunAsync(new ProcessSpec("docker", ["version", "--format", "{{.Server.Version}}"],
+                Timeout: InspectTimeout), ct);
+            return version.ExitCode == 0;
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        {
+            return false; // docker CLI not installed / not startable
+        }
+    }
+
+    /// <summary>
+    /// Makes sure <paramref name="image"/> exists locally. The default image is (re)built from the build context
+    /// whenever it is missing or was built from a different context (its <c>symphonist.context-hash</c> label differs
+    /// from <see cref="ContextHash"/>), so changes such as firewall fixes reach existing installs.
+    /// </summary>
     public async Task EnsureImageAsync(string image, CancellationToken ct)
     {
         ValidateImage(image);
-        var inspect = await runner.RunAsync(new ProcessSpec("docker", ["image", "inspect", image],
-            Timeout: InspectTimeout), ct);
-        if (inspect.ExitCode == 0) return;
         if (image != DefaultImage)
+        {
+            var exists = await runner.RunAsync(new ProcessSpec("docker", ["image", "inspect", image],
+                Timeout: InspectTimeout), ct);
+            if (exists.ExitCode == 0) return;
             throw new InvalidOperationException($"docker image '{image}' not found; build or pull it first");
+        }
 
-        var build = await runner.RunAsync(new ProcessSpec("docker", ["build", "-t", image, agentContextDirectory],
+        var hash = ContextHash(agentContextDirectory);
+        var inspect = await runner.RunAsync(new ProcessSpec("docker",
+            ["image", "inspect", "--format", $"{{{{index .Config.Labels \"{ContextHashLabel}\"}}}}", image],
+            Timeout: InspectTimeout), ct);
+        if (inspect.ExitCode == 0 && inspect.StandardOutput.Trim() == hash) return;
+
+        var build = await runner.RunAsync(new ProcessSpec("docker",
+            ["build", "-t", image, "--label", $"{ContextHashLabel}={hash}", agentContextDirectory],
             Timeout: BuildTimeout), ct);
         if (build.ExitCode != 0)
             throw new InvalidOperationException(build.TimedOut
@@ -59,7 +91,7 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
         {
             // Never pull: a missing image must fail rather than fetch whatever owns the name on a registry.
             "run", "--rm", "-i", "--pull=never",
-            NameOption, $"symphonist-{Guid.NewGuid():N}", "--label", "symphonist=agent",
+            NameOption, $"symphonist-{Guid.NewGuid():N}", "--label", AgentLabel,
             "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
             "-v", $"{request.WorkingDirectory}:/workspace",
             // Read-only .git: the host later runs git in this workspace, so the agent must not be able to plant
@@ -88,8 +120,53 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
             Timeout: agentCommand.Timeout);
     }
 
+    /// <summary>
+    /// SHA-256 (lower-case hex) over every file of the build context: each file's relative path ('/'-separated) and
+    /// length and bytes, in ordinal path order. Independent of where the context lives and of file timestamps.
+    /// </summary>
+    public static string ContextHash(string contextDirectory)
+    {
+        var root = Path.GetFullPath(contextDirectory);
+        var files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Select(f => (Full: f, Relative: Path.GetRelativePath(root, f).Replace('\\', '/')))
+            .OrderBy(f => f.Relative, StringComparer.Ordinal);
+
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> length = stackalloc byte[sizeof(long)];
+        foreach (var (full, relative) in files)
+        {
+            var bytes = File.ReadAllBytes(full);
+            sha.AppendData(Encoding.UTF8.GetBytes(relative));
+            sha.AppendData([0]);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(length, bytes.Length);
+            sha.AppendData(length);
+            sha.AppendData(bytes);
+        }
+        return Convert.ToHexStringLower(sha.GetHashAndReset());
+    }
+
+    /// <summary>
+    /// Force-removes every container labeled <c>symphonist=agent</c> (runs orphaned by a crash or restart). Call only
+    /// while no agent runs are in flight. Returns how many were removed; throws if they cannot be listed.
+    /// </summary>
+    public async Task<int> RemoveLeftoverContainersAsync(CancellationToken ct)
+    {
+        var list = await runner.RunAsync(new ProcessSpec("docker", ["ps", "-aq", "--filter", $"label={AgentLabel}"],
+            Timeout: InspectTimeout), ct);
+        if (list.ExitCode != 0)
+            throw new InvalidOperationException($"listing agent containers failed (exit {list.ExitCode}): {Tail(list.StandardError)}");
+
+        var removed = 0;
+        foreach (var id in list.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var rm = await runner.RunAsync(new ProcessSpec("docker", ["rm", "-f", id], Timeout: RemoveTimeout), ct);
+            if (rm.ExitCode == 0) removed++;
+        }
+        return removed;
+    }
+
     /// <summary>Force-removes the container of a timed-out or cancelled run (killing the docker CLI does not stop it).</summary>
-    public async Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct)
+    public async Task CleanupAsync(ProcessSpec wrapped, AgentRunRequest request, CancellationToken ct)
     {
         if (ContainerName(wrapped) is not { } name) return;
         await runner.RunAsync(new ProcessSpec("docker", ["rm", "-f", name], Timeout: RemoveTimeout), ct);

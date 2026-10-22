@@ -36,14 +36,17 @@ public static class ProjectConfigLoader
         }
     }
 
-    public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory)
+    public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory) =>
+        ProjectFiles(projectsDirectory).Select(Load).ToList();
+
+    /// <summary>The project files (<c>*.yaml</c>, <c>*.yml</c>) in <paramref name="projectsDirectory"/>, in ordinal order.</summary>
+    public static IReadOnlyList<string> ProjectFiles(string projectsDirectory)
     {
         if (!Directory.Exists(projectsDirectory)) return [];
         return Directory.EnumerateFiles(projectsDirectory)
             .Where(f => f.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)
                      || f.EndsWith(".yml", StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.Ordinal)
-            .Select(Load)
             .ToList();
     }
 
