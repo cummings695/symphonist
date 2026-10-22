@@ -6,7 +6,6 @@ using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Prompts;
 using Symphonist.Core.Storage;
-using Symphonist.Integrations.Git;
 
 namespace Symphonist.Host.Orchestration;
 
@@ -41,7 +40,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
                 _ => Completed, // Uat, Done
             };
         }
-        catch (Exception e) when (e is GitCommandException or HttpRequestException or PromptTemplateException)
+        catch (Exception e) when (!ct.IsCancellationRequested)
         {
             return Failed(e.Message);
         }
@@ -58,7 +57,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
                 _ => Completed,
             };
         }
-        catch (Exception e) when (e is HttpRequestException)
+        catch (Exception e) when (!ct.IsCancellationRequested)
         {
             return Failed(e.Message);
         }
@@ -83,7 +82,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         if (string.IsNullOrWhiteSpace(output.SpecPath) || string.IsNullOrWhiteSpace(output.PlanPath))
             return Failed("agent did not report spec_path and plan_path");
 
-        if (!await git.CommitAllAsync(run.Workspace, $"{t.Key}: spec and plan", ct)) return Failed("agent made no changes");
+        if (!await CommitAsync(p, run.Workspace, $"{t.Key}: spec and plan", ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
         t.SpecPath = output.SpecPath;
         t.PlanPath = output.PlanPath;
@@ -103,7 +102,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
 
-        if (!await git.CommitAllAsync(run.Workspace, title, ct)) return Failed("agent made no changes");
+        if (!await CommitAsync(p, run.Workspace, title, ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
 
         if (t.PullRequestId is not null)
@@ -119,6 +118,14 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         await io.Tracker.CommentAsync(t.Key, $"PR ready for review: {pr.WebUrl}", ct);
         return Completed;
     }
+
+    /// <summary>
+    /// Commits the agent's changes. A clean tree still counts as work when the branch already has commits ahead of main
+    /// (an earlier attempt committed, then failed to push / open the PR / comment), so that retry can finish the job.
+    /// </summary>
+    private async Task<bool> CommitAsync(ProjectConfig p, string workspace, string message, CancellationToken ct) =>
+        await git.CommitAllAsync(workspace, message, ct)
+        || await git.HasCommitsAheadAsync(workspace, p.Repo.MainBranch, ct);
 
     private async Task<ExecutionResult> WatchBuildAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, string? commit,
         CancellationToken ct)
@@ -153,7 +160,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         await sc.FindOpenPullRequestAsync(sourceBranch, destination, ct)
         ?? await sc.OpenPullRequestAsync(sourceBranch, destination, title, description, ct);
 
-    private static async Task<ExecutionResult> MergeAsync(ISourceControl sc, long? id, Action<string?> setMergeCommit,
+    private static async Task<ExecutionResult> MergeAsync(ISourceControl sc, long? id, Action<string> setMergeCommit,
         CancellationToken ct)
     {
         if (id is not { } prId) return Failed("no pull request");
@@ -162,15 +169,20 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         switch (pr.State)
         {
             case PullRequestState.Merged:
-                setMergeCommit(pr.MergeCommitHash);
-                return Completed;
+                return MergedAs(pr.MergeCommitHash, setMergeCommit);
             case PullRequestState.Declined:
                 return Failed($"pull request {prId} was declined");
         }
 
         var merge = await sc.MergePullRequestAsync(prId, ct);
         if (!merge.Merged) return new ExecutionResult(ExecutionStatus.InProgress, Event: $"waiting to merge: {merge.Error}");
-        setMergeCommit(merge.MergeCommitHash);
+        return MergedAs(merge.MergeCommitHash, setMergeCommit);
+    }
+
+    private static ExecutionResult MergedAs(string? hash, Action<string> setMergeCommit)
+    {
+        if (string.IsNullOrEmpty(hash)) return Failed("merged but no merge commit hash");
+        setMergeCommit(hash);
         return Completed;
     }
 
@@ -184,7 +196,16 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind), PromptValues(p, t, source, branch));
 
         var startedAt = time.GetUtcNow();
-        var result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent), ct);
+        AgentRunResult result;
+        try
+        {
+            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // The runner itself failed (e.g. missing container image): still record the attempt.
+            result = new AgentRunResult(false, null, null, time.GetUtcNow() - startedAt, e.Message, "");
+        }
 
         var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
         var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-{stamp}.json");

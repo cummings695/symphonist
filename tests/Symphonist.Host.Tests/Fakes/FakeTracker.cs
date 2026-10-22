@@ -23,8 +23,12 @@ public sealed class FakeTracker : ITracker
         return Task.FromResult(OnTransition(key, targetStatus));
     }
 
+    /// <summary>Thrown from CommentAsync when set (e.g. an HttpRequestException).</summary>
+    public Exception? CommentError { get; set; }
+
     public Task CommentAsync(string key, string markdown, CancellationToken ct)
     {
+        if (CommentError is not null) throw CommentError;
         Comments.Add((key, markdown));
         return Task.CompletedTask;
     }

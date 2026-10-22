@@ -18,12 +18,16 @@ public sealed class FakeSourceControl : ISourceControl
     /// <summary>Queued merge results; when empty, merges succeed with hash "merge-{id}".</summary>
     public Queue<MergeResult> MergeResults { get; } = new();
 
+    /// <summary>Thrown from OpenPullRequestAsync when set.</summary>
+    public Exception? OpenError { get; set; }
+
     public static PullRequestInfo Pr(long id, PullRequestState state = PullRequestState.Open, string? hash = null) =>
         new(id, new Uri($"https://scm.example/pr/{id}"), state, hash);
 
     public Task<PullRequestInfo> OpenPullRequestAsync(string sourceBranch, string destinationBranch, string title,
         string description, CancellationToken ct)
     {
+        if (OpenError is not null) throw OpenError;
         Opened.Add((sourceBranch, destinationBranch, title, description));
         while (PullRequests.ContainsKey(nextId)) nextId++;
         var pr = Pr(nextId++);

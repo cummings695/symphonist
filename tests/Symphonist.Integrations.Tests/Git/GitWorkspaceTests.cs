@@ -92,6 +92,20 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Has_commits_ahead_of_main_only_after_a_commit_even_once_pushed()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        Assert.False(await git.HasCommitsAheadAsync(ws, "main", default));
+
+        File.WriteAllText(Path.Combine(ws, "x.txt"), "new");
+        await git.CommitAllAsync(ws, "add x", default);
+        Assert.True(await git.HasCommitsAheadAsync(ws, "main", default));
+
+        await git.PushAsync(ws, "symphonist/ORD-1", default);
+        Assert.True(await git.HasCommitsAheadAsync(ws, "main", default));
+    }
+
+    [Fact]
     public async Task Commit_and_push_puts_branch_on_remote()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);

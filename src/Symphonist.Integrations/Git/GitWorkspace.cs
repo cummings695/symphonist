@@ -55,6 +55,12 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
         return true;
     }
 
+    public async Task<bool> HasCommitsAheadAsync(string workspace, string baseBranch, CancellationToken ct)
+    {
+        var count = await GitAsync(workspace, ct, "rev-list", "--count", $"origin/{baseBranch}..HEAD");
+        return int.Parse(count.Trim(), System.Globalization.CultureInfo.InvariantCulture) > 0;
+    }
+
     public async Task PushAsync(string workspace, string branch, CancellationToken ct) =>
         await GitAsync(workspace, ct, "push", "-u", "origin", branch);
 

@@ -13,6 +13,11 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>Return value of CommitAllAsync per message (false = nothing changed); default true.</summary>
     public Func<string, bool> OnCommit { get; set; } = _ => true;
 
+    /// <summary>Return value of HasCommitsAheadAsync; default: whether any commit returned true so far.</summary>
+    public Func<bool>? OnHasCommitsAhead { get; set; }
+    public List<(string Workspace, string BaseBranch)> AheadChecks { get; } = [];
+    private bool committed;
+
     /// <summary>Thrown from PrepareAsync when set (e.g. a GitCommandException).</summary>
     public Exception? PrepareError { get; set; }
 
@@ -29,7 +34,15 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     public Task<bool> CommitAllAsync(string workspace, string message, CancellationToken ct)
     {
         Commits.Add((workspace, message));
-        return Task.FromResult(OnCommit(message));
+        var changed = OnCommit(message);
+        committed |= changed;
+        return Task.FromResult(changed);
+    }
+
+    public Task<bool> HasCommitsAheadAsync(string workspace, string baseBranch, CancellationToken ct)
+    {
+        AheadChecks.Add((workspace, baseBranch));
+        return Task.FromResult(OnHasCommitsAhead?.Invoke() ?? committed);
     }
 
     public Task PushAsync(string workspace, string branch, CancellationToken ct)

@@ -8,13 +8,6 @@ using Symphonist.Integrations.Git;
 
 namespace Symphonist.Host.Tests.Orchestration;
 
-/// <summary>Tests that set the process-global SYMPHONIST_HOME run in this collection, never in parallel.</summary>
-[CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class SymphonistHomeCollection
-{
-    public const string Name = "SYMPHONIST_HOME";
-}
-
 [Collection(SymphonistHomeCollection.Name)]
 public sealed class StageExecutorTests : IDisposable
 {
@@ -117,7 +110,89 @@ public sealed class StageExecutorTests : IDisposable
         var r = await executor.ExecuteAsync(project, io, At("triage"), null, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Completed, r.Status);
-        Assert.DoesNotContain("{{", Assert.Single(agent.Prompts));
+        var prompt = Assert.Single(agent.Prompts).ReplaceLineEndings("\n");
+        Assert.DoesNotContain("{{", prompt);
+        Assert.Contains("\"Add export\" ()", prompt);
+        Assert.Contains("Description:\n\n\nComments:\n\n\n", prompt);
+    }
+
+    [Fact] public async Task Missing_source_ticket_omits_ticket_link_from_pr()
+    {
+        agent.Results.Enqueue(FakeAgentRunner.Ok(FakeAgentRunner.Output(prDescription: "Adds CSV export")));
+
+        await executor.ExecuteAsync(project, io, At("implement"), null, CancellationToken.None);
+
+        Assert.Equal("Adds CSV export", Assert.Single(scm.Opened).Description);
+    }
+
+    [Fact] public async Task Plan_push_failure_is_recovered_on_retry_without_new_changes()
+    {
+        agent.OnRun = _ => FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md"));
+        git.PushError = new GitCommandException("git push failed: network");
+        var t = At("plan");
+
+        var first = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        git.PushError = null;
+        git.OnCommit = _ => false;
+        git.OnHasCommitsAhead = () => true;
+        var retry = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "git push failed: network"), first);
+        Assert.Equal(ExecutionStatus.Completed, retry.Status);
+        Assert.Equal([(git.WorkspacePath, "symphonist/ORD-1")], git.Pushes);
+        Assert.Equal([(git.WorkspacePath, "main")], git.AheadChecks);
+        Assert.Equal("s.md", t.SpecPath);
+        Assert.Single(tracker.Comments);
+    }
+
+    [Fact] public async Task Implement_pr_open_failure_is_recovered_on_retry_without_new_changes()
+    {
+        scm.OpenError = new HttpRequestException("503 Service Unavailable");
+        var t = At("implement");
+
+        var first = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        scm.OpenError = null;
+        git.OnCommit = _ => false;
+        git.OnHasCommitsAhead = () => true;
+        var retry = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "503 Service Unavailable"), first);
+        Assert.Equal(ExecutionStatus.Completed, retry.Status);
+        Assert.Single(scm.Opened);
+        Assert.Equal(1, t.PullRequestId);
+        Assert.Equal(2, git.Pushes.Count);
+        Assert.Equal("PR ready for review: https://scm.example/pr/1", Assert.Single(tracker.Comments).Markdown);
+    }
+
+    [Fact] public async Task Tracker_failure_returns_failed_with_message()
+    {
+        tracker.CommentError = new HttpRequestException("401 Unauthorized");
+
+        var r = await executor.ExecuteAsync(project, io, At("triage"), source, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "401 Unauthorized"), r);
+    }
+
+    [Fact] public async Task Agent_runner_exception_returns_failed_and_records_run()
+    {
+        agent.OnRun = _ => throw new InvalidOperationException("image symphonist-agent not found");
+        var t = At("triage");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "image symphonist-agent not found"), r);
+        var run = Assert.Single(store.AgentRuns);
+        Assert.False(run.Succeeded);
+        Assert.Equal("image symphonist-agent not found", run.Error);
+    }
+
+    [Fact] public async Task Caller_cancellation_propagates()
+    {
+        using var cts = new CancellationTokenSource();
+        agent.OnRun = _ => { cts.Cancel(); throw new OperationCanceledException(cts.Token); };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            executor.ExecuteAsync(project, io, At("triage"), source, cts.Token));
     }
 
     [Fact] public async Task Agent_run_is_recorded_with_raw_log()
@@ -426,6 +501,24 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(ExecutionStatus.Completed, r.Status);
         Assert.Equal("r5", t.ReleaseMergeCommit);
         Assert.Equal("feature", t.MergeCommit);
+    }
+
+    [Fact] public async Task Merged_without_hash_fails()
+    {
+        var t = At("implement");
+        t.PullRequestId = 3;
+        scm.PullRequests[3] = FakeSourceControl.Pr(3);
+        scm.MergeResults.Enqueue(new MergeResult(true, null, null));
+        var byHand = At("release");
+        byHand.ReleasePullRequestId = 4;
+        scm.PullRequests[4] = FakeSourceControl.Pr(4, PullRequestState.Merged);
+
+        var merged = await executor.PostApprovalAsync(project, io, t, CancellationToken.None);
+        var mergedByHand = await executor.PostApprovalAsync(project, io, byHand, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "merged but no merge commit hash"), merged);
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, "merged but no merge commit hash"), mergedByHand);
+        Assert.Null(t.MergeCommit);
     }
 
     [Fact] public async Task Merge_declined_pr_fails()
