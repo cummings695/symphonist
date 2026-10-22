@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -20,6 +20,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Symphonist.Integrations\Symphonist.Integrations.csproj" />
+    <ProjectReference Include="..\Sleeper\Sleeper.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopySleeper" AfterTargets="Build">
+    <ItemGroup>
+      <SleeperFiles Include="$(MSBuildThisFileDirectory)../Sleeper/bin/$(Configuration)/net10.0/Sleeper.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SleeperFiles)" DestinationFolder="$(OutDir)Sleeper" />
+  </Target>
 
 </Project>

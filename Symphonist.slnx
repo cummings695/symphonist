@@ -12,5 +12,6 @@
     <Project Path="tests/Symphonist.Core.Tests/Symphonist.Core.Tests.csproj" />
     <Project Path="tests/Symphonist.Host.Tests/Symphonist.Host.Tests.csproj" />
     <Project Path="tests/Symphonist.Integrations.Tests/Symphonist.Integrations.Tests.csproj" />
+    <Project Path="tests/Sleeper/Sleeper.csproj" />
   </Folder>
 </Solution>
