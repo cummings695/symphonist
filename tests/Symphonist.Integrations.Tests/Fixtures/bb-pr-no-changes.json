@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "error": {
+    "message": "There are no changes to be pulled",
+    "fields": {}
+  }
+}

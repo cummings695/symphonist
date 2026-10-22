@@ -451,6 +451,7 @@ public sealed class StageExecutorTests : IDisposable
     {
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
+        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "main");
         var t = At("release");
 
         var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
@@ -465,6 +466,35 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(ExecutionStatus.Completed, approved.Status);
         Assert.Equal("prod-head", t.ReleaseMergeCommit);
         Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Release_no_changes_claim_that_does_not_verify_fails_closed()
+    {
+        scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
+        scm.BranchHeads["production"] = "prod-head";
+        scm.OnBranchContains = (_, _) => false; // main has commits production lacks
+        var t = At("release");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Failed, r.Status);
+        Assert.Equal("There are no changes to be pulled (but production does not contain main)", r.Error);
+        Assert.Null(t.ReleaseMergeCommit);
+        Assert.Empty(tracker.Comments);
+    }
+
+    [Fact] public async Task Release_unrelated_open_error_fails()
+    {
+        scm.OpenError = new HttpRequestException("Bitbucket POST pullrequests failed: 400 BadRequest. branch not found",
+            null, System.Net.HttpStatusCode.BadRequest);
+        scm.OnBranchContains = (_, _) => true;
+        var t = At("release");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Failed, r.Status);
+        Assert.Null(t.ReleaseMergeCommit);
+        Assert.Null(t.ReleasePullRequestId);
     }
 
     [Fact] public async Task Release_reentered_after_its_pr_merged_opens_a_new_pr()

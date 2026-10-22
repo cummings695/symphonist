@@ -22,9 +22,9 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
             close_source_branch = false,
         }, ct);
 
-        // Bitbucket answers 400 "There are no changes to be pulled" when the destination already has everything.
-        if (status == HttpStatusCode.BadRequest && ErrorMessage(text) is { } message
-            && message.Contains("no changes to be pull", StringComparison.OrdinalIgnoreCase))
+        // Bitbucket answers 400 {"type":"error","error":{"message":"There are no changes to be pulled"}} when the
+        // destination already has everything. Matched exactly: callers treat it as "nothing to release".
+        if (status == HttpStatusCode.BadRequest && NoChangesMessage(text) is { } message)
             throw new NoChangesToPullException(message);
         if ((int)status is < 200 or > 299) throw BitbucketApi.Failure(HttpMethod.Post, path, status, text);
 
@@ -69,6 +69,16 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
         return new MergeResult(true, MergeHash(doc.RootElement), null);
     }
 
+    /// <summary>Asks for commits on <paramref name="other"/> that are not on <paramref name="branch"/>; none means contained.</summary>
+    public async Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct)
+    {
+        var path = $"{_api.RepoPath}/commits?include={Uri.EscapeDataString(other)}&exclude={Uri.EscapeDataString(branch)}&pagelen=1";
+        using var doc = await _api.SendAsync(HttpMethod.Get, path, null, ct);
+        return doc.RootElement.TryGetProperty("values", out var values) && values.ValueKind == JsonValueKind.Array
+            ? values.GetArrayLength() == 0
+            : throw new HttpRequestException($"Bitbucket GET {path} returned no commit list");
+    }
+
     public async Task<string> GetBranchHeadAsync(string branch, CancellationToken ct)
     {
         var path = $"{_api.RepoPath}/refs/branches/{Uri.EscapeDataString(branch)}";
@@ -85,6 +95,26 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
 
     public Uri BranchFileUrl(string branch, string path) =>
         new($"https://bitbucket.org/{Uri.EscapeDataString(config.Workspace)}/{Uri.EscapeDataString(config.Slug)}/src/{branch}/{path}");
+
+    private const string NoChangesText = "There are no changes to be pulled";
+
+    private static string? NoChangesMessage(string text)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                   && root.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String
+                   && type.GetString() == "error"
+                   && ErrorMessage(text) is { } message && message.StartsWith(NoChangesText, StringComparison.Ordinal)
+                ? message : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private static string? ErrorMessage(string text)
     {

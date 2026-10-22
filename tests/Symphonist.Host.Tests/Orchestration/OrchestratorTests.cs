@@ -477,6 +477,7 @@ public sealed class OrchestratorTests : IDisposable
         await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "merge-1");
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
+        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "main");
         builds.Statuses["prod-head"] = BuildStatus.Succeeded;
         var o = Create();
 

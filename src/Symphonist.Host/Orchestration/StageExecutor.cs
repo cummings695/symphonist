@@ -162,9 +162,21 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         {
             pr = await FindOrOpenAsync(sc, main, production, title, $"{title}: {t.Title}", ct);
         }
-        catch (NoChangesToPullException)
+        catch (NoChangesToPullException e)
         {
             // Production already contains main (e.g. released together with another ticket): deploy watches its head.
+            // Fail closed: completing here moves the ticket towards Done, so check the host's claim independently.
+            string? doubt;
+            try
+            {
+                doubt = await sc.BranchContainsAsync(production, main, ct) ? null : $"{production} does not contain {main}";
+            }
+            catch (Exception verify) when (!ct.IsCancellationRequested)
+            {
+                doubt = $"could not verify that {production} contains {main}: {verify.Message}";
+            }
+            if (doubt is not null) return Failed($"{e.Message} (but {doubt})");
+
             var head = await sc.GetBranchHeadAsync(production, ct);
             t.ReleaseMergeCommit = head;
             await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Nothing to release: {production} already contains {main}."), ct);

@@ -62,5 +62,11 @@ public sealed class FakeSourceControl : ISourceControl
             ? Task.FromResult(hash)
             : throw new HttpRequestException($"branch {branch} not found");
 
+    /// <summary>BranchContainsAsync(branch, other); default false (nothing verified).</summary>
+    public Func<string, string, bool> OnBranchContains { get; set; } = (_, _) => false;
+
+    public Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct) =>
+        Task.FromResult(OnBranchContains(branch, other));
+
     public Uri BranchFileUrl(string branch, string path) => new($"https://scm.example/src/{branch}/{path}");
 }

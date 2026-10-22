@@ -49,24 +49,59 @@ public class BitbucketTests
     public async Task Open_pr_without_changes_throws_no_changes_exception()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.BadRequest,
-            "{\"type\":\"error\",\"error\":{\"message\":\"There are no changes to be pulled\"}}");
+            Fixture("bb-pr-no-changes.json"));
 
         var ex = await Assert.ThrowsAsync<NoChangesToPullException>(() =>
             Scm(stub).OpenPullRequestAsync("main", "production", "Release ORD-1", "d", CancellationToken.None));
 
-        Assert.Contains("There are no changes to be pulled", ex.Message);
+        Assert.Equal("There are no changes to be pulled", ex.Message);
     }
 
-    [Fact]
-    public async Task Open_pr_other_400_still_throws_http_error()
+    [Theory]
+    [InlineData("{\"type\":\"error\",\"error\":{\"message\":\"source branch not found\"}}")]
+    [InlineData("{\"type\":\"error\",\"error\":{\"message\":\"Rejected: there are no changes to be pulled from fork\"}}")]
+    [InlineData("{\"error\":{\"message\":\"There are no changes to be pulled\"}}")] // not Bitbucket's error shape
+    [InlineData("There are no changes to be pulled")] // not JSON
+    public async Task Open_pr_other_400_still_throws_http_error(string body)
     {
-        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.BadRequest,
-            "{\"type\":\"error\",\"error\":{\"message\":\"source branch not found\"}}");
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.BadRequest, body);
 
         var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
             Scm(stub).OpenPullRequestAsync("x", "main", "t", "d", CancellationToken.None));
 
         Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task Open_pr_no_changes_message_with_other_status_is_not_no_changes()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.Conflict,
+            Fixture("bb-pr-no-changes.json"));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            Scm(stub).OpenPullRequestAsync("main", "production", "t", "d", CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("{\"pagelen\":1,\"values\":[]}", true)]
+    [InlineData("{\"pagelen\":1,\"values\":[{\"hash\":\"abc\"}],\"next\":\"https://x\"}", false)]
+    public async Task Branch_contains_checks_for_commits_missing_from_it(string body, bool expected)
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/commits?", HttpStatusCode.OK, body);
+
+        Assert.Equal(expected, await Scm(stub).BranchContainsAsync("production", "main", CancellationToken.None));
+        var query = Assert.Single(stub.Requests).PathAndQuery;
+        Assert.Contains("include=main", query);
+        Assert.Contains("exclude=production", query);
+    }
+
+    [Fact]
+    public async Task Branch_contains_throws_on_unexpected_response()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/commits?", HttpStatusCode.OK, "{\"pagelen\":1}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            Scm(stub).BranchContainsAsync("production", "main", CancellationToken.None));
     }
 
     [Fact]

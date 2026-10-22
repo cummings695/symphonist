@@ -19,6 +19,9 @@ public interface ISourceControl
     /// <summary>Merged=false + Error when the host refuses (e.g. missing approvals) or the merge is still in progress.</summary>
     Task<MergeResult> MergePullRequestAsync(long id, CancellationToken ct);
 
+    /// <summary>True when <paramref name="branch"/> already contains every commit of <paramref name="other"/>.</summary>
+    Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct);
+
     /// <summary>The commit hash at the tip of <paramref name="branch"/>.</summary>
     Task<string> GetBranchHeadAsync(string branch, CancellationToken ct);
 
