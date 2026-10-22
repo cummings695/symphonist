@@ -26,8 +26,18 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         var spec = launcher.Wrap(command, request);
 
         var sw = Stopwatch.StartNew();
-        var result = await runner.RunAsync(spec, ct);
+        ProcessResult result;
+        try
+        {
+            result = await runner.RunAsync(spec, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            await launcher.CleanupAsync(spec, CancellationToken.None);
+            throw;
+        }
         sw.Stop();
+        if (result.TimedOut) await launcher.CleanupAsync(spec, CancellationToken.None);
 
         var rawLog = result.StandardOutput + "\n--- stderr ---\n" + result.StandardError;
         return Parse(result, settings, sw.Elapsed, rawLog);

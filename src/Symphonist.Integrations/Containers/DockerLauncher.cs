@@ -21,7 +21,9 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     private const string DomainsVar = "SYMPHONIST_ALLOWED_DOMAINS";
     private const string UidVar = "SYMPHONIST_UID";
     private const string GidVar = "SYMPHONIST_GID";
+    private const string NameOption = "--name";
     private static readonly TimeSpan InspectTimeout = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan RemoveTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(45);
 
     /// <summary>Domains Claude Code itself needs; always allowed (init-firewall.sh mirrors this list).</summary>
@@ -33,6 +35,7 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     /// <summary>Makes sure <paramref name="image"/> exists locally, building the default image if it is missing.</summary>
     public async Task EnsureImageAsync(string image, CancellationToken ct)
     {
+        ValidateImage(image);
         var inspect = await runner.RunAsync(new ProcessSpec("docker", ["image", "inspect", image],
             Timeout: InspectTimeout), ct);
         if (inspect.ExitCode == 0) return;
@@ -50,10 +53,19 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
     {
         var settings = request.Settings;
+        var image = settings.Image ?? DefaultImage;
+        ValidateImage(image);
         var args = new List<string>
         {
-            "run", "--rm", "-i", "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
-            "-v", $"{request.WorkingDirectory}:/workspace", "-w", "/workspace",
+            // Never pull: a missing image must fail rather than fetch whatever owns the name on a registry.
+            "run", "--rm", "-i", "--pull=never",
+            NameOption, $"symphonist-{Guid.NewGuid():N}", "--label", "symphonist=agent",
+            "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
+            "-v", $"{request.WorkingDirectory}:/workspace",
+            // Read-only .git: the host later runs git in this workspace, so the agent must not be able to plant
+            // hooks or config that would execute there.
+            "-v", $"{Path.Combine(request.WorkingDirectory, ".git")}:/workspace/.git:ro",
+            "-w", "/workspace",
             "-e", TokenVar, "-e", DomainsVar,
         };
         var env = new Dictionary<string, string?>
@@ -68,12 +80,33 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
             env[UidVar] = getuid().ToString(CultureInfo.InvariantCulture);
             env[GidVar] = getgid().ToString(CultureInfo.InvariantCulture);
         }
-        args.Add(settings.Image ?? DefaultImage);
+        args.Add(image);
         args.Add(agentCommand.FileName);
         args.AddRange(agentCommand.Arguments);
 
         return new ProcessSpec("docker", args, StandardInput: agentCommand.StandardInput, Environment: env,
             Timeout: agentCommand.Timeout);
+    }
+
+    /// <summary>Force-removes the container of a timed-out or cancelled run (killing the docker CLI does not stop it).</summary>
+    public async Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct)
+    {
+        if (ContainerName(wrapped) is not { } name) return;
+        await runner.RunAsync(new ProcessSpec("docker", ["rm", "-f", name], Timeout: RemoveTimeout), ct);
+    }
+
+    /// <summary>The container name a <see cref="Wrap"/>ped spec runs under, or null if it is not one.</summary>
+    public static string? ContainerName(ProcessSpec wrapped)
+    {
+        if (wrapped.FileName != "docker" || wrapped.Arguments.Count == 0 || wrapped.Arguments[0] != "run") return null;
+        var i = wrapped.Arguments.ToList().IndexOf(NameOption);
+        return i >= 0 && i + 1 < wrapped.Arguments.Count ? wrapped.Arguments[i + 1] : null;
+    }
+
+    private static void ValidateImage(string image)
+    {
+        if (string.IsNullOrWhiteSpace(image) || image.StartsWith('-'))
+            throw new ArgumentException($"invalid docker image name '{image}'", nameof(image));
     }
 
     private static string Tail(string text) =>

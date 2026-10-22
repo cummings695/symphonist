@@ -1,7 +1,8 @@
 #!/bin/bash
 # Default-deny outbound firewall for the agent container.
 # Adapted from Claude Code's reference devcontainer firewall (iptables + ipset).
-# Allows: loopback, DNS, established/related traffic, and the A records of each allowed domain.
+# Allows: loopback, DNS to the configured resolvers only, established/related traffic, and HTTP(S) to the A records
+# of each allowed domain.
 # Any failure exits non-zero; entrypoint.sh then refuses to start the agent.
 set -euo pipefail
 IFS=$'\n\t'
@@ -10,6 +11,14 @@ IFS=$'\n\t'
 BASE_DOMAINS=(api.anthropic.com statsig.anthropic.com sentry.io)
 IPV4_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
 DOMAIN_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+
+# Resolvers this container is configured to use (plus Docker's embedded DNS); port 53 is open to these only, so
+# it cannot be used as a general egress channel.
+NAMESERVERS=$( (grep -E '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf | awk '{ print $2 }'; echo 127.0.0.11)     | grep -E "$IPV4_RE" | sort -u)
+if [ -z "$NAMESERVERS" ]; then
+    echo "init-firewall: no IPv4 nameserver in /etc/resolv.conf" >&2
+    exit 1
+fi
 
 # Keep Docker's embedded-DNS NAT rules (127.0.0.11) across the flush.
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
@@ -32,11 +41,14 @@ fi
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -d 127.0.0.11 -j ACCEPT
-# DNS.
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-iptables -A INPUT -p udp --sport 53 -j ACCEPT
-iptables -A INPUT -p tcp --sport 53 -j ACCEPT
+# DNS, to the configured resolvers only.
+for ns in $NAMESERVERS; do
+    for proto in udp tcp; do
+        iptables -A OUTPUT -p "$proto" -d "$ns" --dport 53 -j ACCEPT
+        iptables -A INPUT -p "$proto" -s "$ns" --sport 53 -j ACCEPT
+    done
+    echo "init-firewall: DNS via $ns"
+done
 # Replies to connections we were allowed to open.
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -93,7 +105,8 @@ for domain in "${EXTRA_DOMAINS[@]}"; do
     add_domain "$domain" 0
 done
 
-iptables -A OUTPUT -m set --match-set allowed dst -j ACCEPT
+# Allowed hosts are reachable over HTTP(S) only.
+iptables -A OUTPUT -p tcp -m multiport --dports 80,443 -m set --match-set allowed dst -j ACCEPT
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP

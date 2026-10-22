@@ -14,6 +14,12 @@ public interface IAgentLauncher
     bool ProvidesIsolation { get; }
 
     ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request);
+
+    /// <summary>
+    /// Releases whatever a <paramref name="wrapped"/> run may have left behind after it timed out or was cancelled
+    /// (killing the launching process alone may not stop it, e.g. a container).
+    /// </summary>
+    Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct);
 }
 
 /// <summary>
@@ -24,14 +30,35 @@ public sealed class HostLauncher : IAgentLauncher
 {
     public const string PermissionBypassFlag = "--dangerously-skip-permissions";
 
+    private const string PermissionModeOption = "--permission-mode";
+    private const string BypassPermissionsMode = "bypassPermissions";
+
     public bool ProvidesIsolation => false;
 
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
     {
         if (request.Settings.Isolation == Isolation.Container)
             throw new InvalidOperationException("container isolation requested but HostLauncher cannot provide it");
-        if (agentCommand.Arguments.Contains(PermissionBypassFlag))
-            throw new InvalidOperationException($"HostLauncher refuses to run a command with {PermissionBypassFlag}");
+        if (BypassesPermissions(agentCommand.Arguments))
+            throw new InvalidOperationException("HostLauncher refuses to run a command that bypasses permission prompts");
         return agentCommand with { WorkingDirectory = request.WorkingDirectory };
+    }
+
+    public Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct) => Task.CompletedTask;
+
+    private static bool BypassesPermissions(IReadOnlyList<string> args)
+    {
+        for (var i = 0; i < args.Count; i++)
+        {
+            var a = args[i];
+            if (a == PermissionBypassFlag || a.StartsWith(PermissionBypassFlag + "=", StringComparison.Ordinal))
+                return true;
+            if (a == PermissionModeOption && i + 1 < args.Count
+                && args[i + 1].Equals(BypassPermissionsMode, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (a.Equals($"{PermissionModeOption}={BypassPermissionsMode}", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 }

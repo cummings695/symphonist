@@ -14,6 +14,15 @@ public sealed class NonWindowsFactAttribute : FactAttribute
     }
 }
 
+/// <summary>A fact that only runs on Windows.</summary>
+public sealed class WindowsFactAttribute : FactAttribute
+{
+    public WindowsFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows()) Skip = "Windows only";
+    }
+}
+
 public class DockerLauncherTests
 {
     private sealed class FakeProcessRunner : IProcessRunner
@@ -42,8 +51,12 @@ public class DockerLauncherTests
     {
         var spec = launcher.Wrap(new("claude", ["-p"]), Request(@"C:\work\orders\ORD 1"));
         Assert.Equal("docker", spec.FileName);
-        Assert.Equal(1, spec.Arguments.Count(a => a == "-v"));
-        Assert.Contains(@"C:\work\orders\ORD 1:/workspace", spec.Arguments);
+        var mounts = spec.Arguments.Select((a, i) => (a, i)).Where(x => x.a == "-v")
+            .Select(x => spec.Arguments[x.i + 1]).ToList();
+        Assert.Equal(2, mounts.Count);
+        Assert.Equal(@"C:\work\orders\ORD 1:/workspace", mounts[0]);
+        Assert.Equal(Path.Combine(@"C:\work\orders\ORD 1", ".git") + ":/workspace/.git:ro", mounts[1]);
+        Assert.DoesNotContain(spec.Arguments, a => a.StartsWith("--mount") || a.StartsWith("--volume"));
         Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", spec.Arguments);
         Assert.DoesNotContain(spec.Arguments, a => a.Contains("tok-123"));
         Assert.Equal("tok-123", spec.Environment!["CLAUDE_CODE_OAUTH_TOKEN"]);
@@ -57,10 +70,14 @@ public class DockerLauncherTests
     {
         var spec = launcher.Wrap(new("claude", ["-p", "--x"], "/elsewhere", "the prompt",
             Timeout: TimeSpan.FromMinutes(3)), Request("/work/t1"));
+        var name = DockerLauncher.ContainerName(spec);
+        Assert.Matches("^symphonist-[0-9a-f]{32}$", name);
         string[] expectedPrefix =
         [
-            "run", "--rm", "-i", "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
-            "-v", "/work/t1:/workspace", "-w", "/workspace",
+            "run", "--rm", "-i", "--pull=never", "--name", name!, "--label", "symphonist=agent",
+            "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
+            "-v", "/work/t1:/workspace", "-v", Path.Combine("/work/t1", ".git") + ":/workspace/.git:ro",
+            "-w", "/workspace",
             "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-e", "SYMPHONIST_ALLOWED_DOMAINS",
         ];
         Assert.Equal(expectedPrefix, spec.Arguments.Take(expectedPrefix.Length));
@@ -76,6 +93,40 @@ public class DockerLauncherTests
         Assert.Contains("acme/agent:7", spec.Arguments);
         Assert.DoesNotContain(DockerLauncher.DefaultImage, spec.Arguments);
         Assert.Equal(["acme/agent:7", "claude", "-p"], spec.Arguments.TakeLast(3));
+    }
+
+    [Fact]
+    public void Wrap_never_pulls_and_names_each_container_uniquely()
+    {
+        var a = launcher.Wrap(new("claude", []), Request("/w"));
+        var b = launcher.Wrap(new("claude", []), Request("/w"));
+        Assert.Contains("--pull=never", a.Arguments);
+        Assert.NotEqual(DockerLauncher.ContainerName(a), DockerLauncher.ContainerName(b));
+    }
+
+    [Theory]
+    [InlineData("-v")]
+    [InlineData("--privileged")]
+    public void Wrap_rejects_image_names_that_look_like_options(string image)
+    {
+        Assert.Throws<ArgumentException>(() => launcher.Wrap(new("claude", []), Request("/w", image)));
+    }
+
+    [Fact]
+    public async Task Cleanup_force_removes_the_container()
+    {
+        var spec = launcher.Wrap(new("claude", []), Request("/w"));
+        await launcher.CleanupAsync(spec, default);
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal("docker", call.FileName);
+        Assert.Equal(["rm", "-f", DockerLauncher.ContainerName(spec)!], call.Arguments);
+    }
+
+    [Fact]
+    public async Task Cleanup_ignores_specs_it_did_not_wrap()
+    {
+        await launcher.CleanupAsync(new ProcessSpec("claude", ["-p"]), default);
+        Assert.Empty(fake.Calls);
     }
 
     [Fact]
@@ -109,10 +160,9 @@ public class DockerLauncherTests
         Assert.False(string.IsNullOrEmpty(spec.Environment["SYMPHONIST_GID"]));
     }
 
-    [Fact]
+    [WindowsFact]
     public void Wrap_passes_no_uid_on_windows()
     {
-        if (!OperatingSystem.IsWindows()) return;
         var spec = launcher.Wrap(new("claude", []), Request("/w"));
         Assert.DoesNotContain("SYMPHONIST_UID", spec.Arguments);
         Assert.False(spec.Environment!.ContainsKey("SYMPHONIST_UID"));
@@ -142,6 +192,13 @@ public class DockerLauncherTests
         fake.ExitCode = _ => 1;
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => launcher.EnsureImageAsync(DockerLauncher.DefaultImage, default));
+    }
+
+    [Fact]
+    public async Task EnsureImage_rejects_image_names_that_look_like_options()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(() => launcher.EnsureImageAsync("-q", default));
+        Assert.Empty(fake.Calls);
     }
 
     [Fact]

@@ -24,14 +24,27 @@ public class ClaudeCodeRunnerTests
     /// <summary>Passes the command through unchanged, reporting the given isolation capability.</summary>
     private sealed class PassthroughLauncher(bool providesIsolation) : IAgentLauncher
     {
+        public List<ProcessSpec> CleanedUp { get; } = [];
         public bool ProvidesIsolation => providesIsolation;
         public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request) => agentCommand;
+        public Task CleanupAsync(ProcessSpec wrapped, CancellationToken ct)
+        {
+            CleanedUp.Add(wrapped);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CancelingProcessRunner : IProcessRunner
+    {
+        public Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct) =>
+            throw new OperationCanceledException(ct);
     }
 
     private readonly FakeProcessRunner fake = new();
+    private readonly PassthroughLauncher launcher = new(true);
     private readonly ClaudeCodeRunner runner;
 
-    public ClaudeCodeRunnerTests() => runner = new ClaudeCodeRunner(fake, new PassthroughLauncher(true));
+    public ClaudeCodeRunnerTests() => runner = new ClaudeCodeRunner(fake, launcher);
 
     private static AgentRunRequest Request(Isolation isolation = Isolation.Container, string[]? tools = null,
         string? model = null) =>
@@ -101,12 +114,53 @@ public class ClaudeCodeRunnerTests
         Assert.Contains(DockerLauncher.DefaultImage, args);
     }
 
-    [Fact]
-    public void Host_launcher_rejects_permission_bypass()
+    [Theory]
+    [InlineData("--dangerously-skip-permissions")]
+    [InlineData("--dangerously-skip-permissions=true")]
+    [InlineData("--permission-mode", "bypassPermissions")]
+    [InlineData("--permission-mode=bypassPermissions")]
+    [InlineData("--permission-mode", "BYPASSPERMISSIONS")]
+    public void Host_launcher_rejects_permission_bypass(params string[] bypass)
     {
-        var ex = Assert.Throws<InvalidOperationException>(() => new HostLauncher().Wrap(
-            new ProcessSpec("claude", ["-p", "--dangerously-skip-permissions"]), Request(Isolation.Host)));
-        Assert.Contains("--dangerously-skip-permissions", ex.Message);
+        Assert.Throws<InvalidOperationException>(() => new HostLauncher().Wrap(
+            new ProcessSpec("claude", ["-p", .. bypass]), Request(Isolation.Host)));
+    }
+
+    [Fact]
+    public void Host_launcher_allows_other_permission_modes()
+    {
+        var spec = new HostLauncher().Wrap(new ProcessSpec("claude", ["-p", "--permission-mode", "plan"]),
+            Request(Isolation.Host));
+        Assert.Equal("/work", spec.WorkingDirectory);
+    }
+
+    [Fact]
+    public async Task Timed_out_run_is_cleaned_up_by_the_launcher()
+    {
+        fake.Returns(-1, "", "", timedOut: true);
+        await runner.RunAsync(Request(), default);
+        Assert.Same(fake.Last, Assert.Single(launcher.CleanedUp));
+    }
+
+    [Fact]
+    public async Task Canceled_run_is_cleaned_up_by_the_launcher()
+    {
+        var canceling = new ClaudeCodeRunner(new CancelingProcessRunner(), launcher);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceling.RunAsync(Request(), default));
+        Assert.Single(launcher.CleanedUp);
+    }
+
+    [Fact]
+    public async Task Completed_run_needs_no_cleanup()
+    {
+        fake.Returns(0, Fixture("claude-success.json"));
+        await runner.RunAsync(Request(), default);
+        Assert.Empty(launcher.CleanedUp);
+    }
+
+    [Fact]
+    public void Launcher_isolation_capabilities()
+    {
         Assert.False(new HostLauncher().ProvidesIsolation);
         Assert.True(new DockerLauncher(fake, "/ctx", _ => null).ProvidesIsolation);
     }

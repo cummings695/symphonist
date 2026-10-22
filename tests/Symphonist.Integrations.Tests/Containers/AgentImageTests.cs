@@ -56,20 +56,33 @@ public sealed class AgentImageFixture : IAsyncLifetime
 [Trait("Category", "Docker")]
 public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentImageFixture>, IDisposable
 {
-    private readonly string workspace = Directory.CreateTempSubdirectory("symphonist-docker-").FullName;
+    private readonly string workspace = CreateWorkspace();
+
+    private static string CreateWorkspace()
+    {
+        var ws = Directory.CreateTempSubdirectory("symphonist-docker-").FullName;
+        Directory.CreateDirectory(Path.Combine(ws, ".git", "hooks"));
+        return ws;
+    }
 
     public void Dispose()
     {
         try { Directory.Delete(workspace, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
-    private Task<ProcessResult> RunInContainer(string fileName, params string[] args)
+    private ProcessSpec Wrap(string fileName, string[] args, TimeSpan timeout)
     {
         var request = new AgentRunRequest(workspace, "",
             new AgentSettings("claude-code", Isolation.Container, ["api.nuget.org"], [], 5, null, null));
-        var spec = fixture.Launcher.Wrap(new ProcessSpec(fileName, args, Timeout: TimeSpan.FromMinutes(3)), request);
-        return fixture.Runner.RunAsync(spec, CancellationToken.None);
+        return fixture.Launcher.Wrap(new ProcessSpec(fileName, args, Timeout: timeout), request);
     }
+
+    private Task<ProcessResult> RunInContainer(string fileName, params string[] args) =>
+        fixture.Runner.RunAsync(Wrap(fileName, args, TimeSpan.FromMinutes(3)), CancellationToken.None);
+
+    private async Task<string> ContainersNamed(string name) =>
+        (await fixture.Runner.RunAsync(new ProcessSpec("docker", ["ps", "-a", "-q", "--filter", $"name=^{name}$"]),
+            CancellationToken.None)).StandardOutput.Trim();
 
     private static void AssertExit(int expected, ProcessResult r) =>
         Assert.True(r.ExitCode == expected, $"exit {r.ExitCode}\nstdout: {r.StandardOutput}\nstderr: {r.StandardError}");
@@ -91,6 +104,41 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         Assert.Contains("init-firewall: ready", blocked.StandardError); // the curl itself ran, after the firewall
         AssertExit(0, await RunInContainer("curl", "-sS", "-m", "10", "-o", "/dev/null",
             "https://api.nuget.org/v3/index.json"));
+    }
+
+    [DockerFact]
+    public async Task Port_53_is_open_only_to_the_configured_resolver()
+    {
+        // A public resolver that accepts TCP on 53: must be unreachable (port 53 is not a general egress channel).
+        var arbitrary = await RunInContainer("bash", "-c", "timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53'");
+        Assert.True(arbitrary.ExitCode != 0, $"tcp 1.1.1.1:53 should be blocked\n{arbitrary.StandardError}");
+
+        // An allowed domain's IP is reachable over HTTPS only, not on 53.
+        var allowedIp = await RunInContainer("bash", "-c",
+            "ip=$(getent ahostsv4 api.nuget.org | awk 'NR==1 { print $1 }') && timeout 5 bash -c \"exec 3<>/dev/tcp/$ip/53\"");
+        Assert.True(allowedIp.ExitCode != 0, $"tcp <api.nuget.org>:53 should be blocked\n{allowedIp.StandardError}");
+    }
+
+    [DockerFact]
+    public async Task Git_directory_is_read_only_inside_the_container()
+    {
+        var r = await RunInContainer("touch", "/workspace/.git/hooks/pre-commit");
+        Assert.NotEqual(0, r.ExitCode);
+        Assert.False(File.Exists(Path.Combine(workspace, ".git", "hooks", "pre-commit")));
+        AssertExit(0, await RunInContainer("touch", "/workspace/still-writable"));
+    }
+
+    [DockerFact]
+    public async Task Timed_out_container_is_removed_by_cleanup()
+    {
+        var spec = Wrap("sleep", ["300"], TimeSpan.FromSeconds(2));
+        var name = DockerLauncher.ContainerName(spec)!;
+        var r = await fixture.Runner.RunAsync(spec, CancellationToken.None);
+        Assert.True(r.TimedOut);
+        Assert.NotEmpty(await ContainersNamed(name)); // killing the docker CLI leaves the container running
+
+        await fixture.Launcher.CleanupAsync(spec, CancellationToken.None);
+        Assert.Empty(await ContainersNamed(name));
     }
 
     [DockerFact]
