@@ -23,6 +23,10 @@
     <ProjectReference Include="..\Sleeper\Sleeper.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <Target Name="CopySleeper" AfterTargets="Build">
     <ItemGroup>
       <SleeperFiles Include="$(MSBuildThisFileDirectory)../Sleeper/bin/$(Configuration)/net10.0/Sleeper.*" />
