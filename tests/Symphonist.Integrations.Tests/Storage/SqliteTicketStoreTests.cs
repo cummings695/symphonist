@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
 using Symphonist.Integrations.Storage;
@@ -16,7 +17,7 @@ public sealed class SqliteTicketStoreTests : IDisposable
     public void Dispose()
     {
         SqliteConnection.ClearAllPools();
-        try { Directory.Delete(_dir, true); } catch (IOException) { }
+        Directory.Delete(_dir, true);
     }
 
     private static Ticket NewTicket(string key, string stage, StageStatus status) => new()
@@ -82,8 +83,24 @@ public sealed class SqliteTicketStoreTests : IDisposable
         await _store.SaveAsync(t, default);
         await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "plan", Now, TimeSpan.FromSeconds(5), true, 0.12m, null, "log.txt"), default);
         await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "plan", Now, TimeSpan.FromSeconds(1), false, null, "boom", "log2.txt"), default);
-        // no exception and a second store on the same file still opens
-        Assert.Single(await new SqliteTicketStore(Path.Combine(_dir, "symphonist.db")).ListAsync(null, default));
+        await using var db = new SymphonistDbContext(new DbContextOptionsBuilder<SymphonistDbContext>()
+            .UseSqlite($"Data Source={Path.Combine(_dir, "symphonist.db")}").Options);
+        var runs = await db.AgentRuns.AsNoTracking().OrderBy(r => r.Id).ToListAsync();
+
+        Assert.Equal(2, runs.Count);
+        Assert.Equal(t.Id, runs[0].TicketId);
+        Assert.Equal("plan", runs[0].StageId);
+        Assert.Equal(Now, runs[0].StartedAt);
+        Assert.Equal(TimeSpan.FromSeconds(5), runs[0].Duration);
+        Assert.True(runs[0].Succeeded);
+        Assert.Equal(0.12m, runs[0].CostUsd);
+        Assert.Null(runs[0].Error);
+        Assert.Equal("log.txt", runs[0].RawLogPath);
+        Assert.False(runs[1].Succeeded);
+        Assert.Null(runs[1].CostUsd);
+        Assert.Equal("boom", runs[1].Error);
+        Assert.Equal(TimeSpan.FromSeconds(1), runs[1].Duration);
+        Assert.Equal("log2.txt", runs[1].RawLogPath);
     }
 
     [Fact]
