@@ -8,9 +8,16 @@ public sealed class FakeBuildWatcher : IBuildWatcher
     public Dictionary<string, BuildStatus> Statuses { get; } = [];
     public List<string> Calls { get; } = [];
 
+    /// <summary>Scripted statuses per commit, reported one per call; the last one sticks (overrides <see cref="Statuses"/>).</summary>
+    public Dictionary<string, Queue<BuildStatus>> Scripts { get; } = [];
+
+    public void Script(string commitHash, params BuildStatus[] statuses) => Scripts[commitHash] = new(statuses);
+
     public Task<BuildStatus> GetStatusAsync(string commitHash, CancellationToken ct)
     {
         Calls.Add(commitHash);
+        if (Scripts.TryGetValue(commitHash, out var script) && script.Count > 0)
+            return Task.FromResult(script.Count > 1 ? script.Dequeue() : script.Peek());
         return Task.FromResult(Statuses.GetValueOrDefault(commitHash, BuildStatus.NotFound));
     }
 }

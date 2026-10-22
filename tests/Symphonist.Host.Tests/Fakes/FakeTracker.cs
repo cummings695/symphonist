@@ -14,13 +14,27 @@ public sealed class FakeTracker : ITracker
     /// <summary>Decides whether a transition exists; default true.</summary>
     public Func<string, string, bool> OnTransition { get; set; } = (_, _) => true;
 
+    /// <summary>Thrown from TransitionAsync when set.</summary>
+    public Exception? TransitionError { get; set; }
+
     public Task<IReadOnlyList<SourceTicket>> QueryAsync(CancellationToken ct) =>
         Task.FromResult(OnQuery?.Invoke() ?? Tickets.ToList());
 
+    /// <summary>Like the real tracker, a successful transition changes the ticket's status in later query results.</summary>
     public Task<bool> TransitionAsync(string key, string targetStatus, CancellationToken ct)
     {
+        if (TransitionError is not null) throw TransitionError;
         Transitions.Add((key, targetStatus));
-        return Task.FromResult(OnTransition(key, targetStatus));
+        var ok = OnTransition(key, targetStatus);
+        if (ok) Move(key, targetStatus);
+        return Task.FromResult(ok);
+    }
+
+    /// <summary>Simulates the developer (or a transition) moving the card to <paramref name="status"/>.</summary>
+    public void Move(string key, string status)
+    {
+        var index = Tickets.FindIndex(t => t.Key == key);
+        if (index >= 0) Tickets[index] = Tickets[index] with { Status = status };
     }
 
     /// <summary>Thrown from CommentAsync when set (e.g. an HttpRequestException).</summary>
