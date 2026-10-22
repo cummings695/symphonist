@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Symphonist.AppHost/Symphonist.AppHost.csproj" />
+    <Project Path="src/Symphonist.Cli/Symphonist.Cli.csproj" />
+    <Project Path="src/Symphonist.Core/Symphonist.Core.csproj" />
+    <Project Path="src/Symphonist.Host/Symphonist.Host.csproj" />
+    <Project Path="src/Symphonist.Integrations/Symphonist.Integrations.csproj" />
+    <Project Path="src/Symphonist.ServiceDefaults/Symphonist.ServiceDefaults.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Symphonist.Cli.Tests/Symphonist.Cli.Tests.csproj" />
+    <Project Path="tests/Symphonist.Core.Tests/Symphonist.Core.Tests.csproj" />
+    <Project Path="tests/Symphonist.Host.Tests/Symphonist.Host.Tests.csproj" />
+    <Project Path="tests/Symphonist.Integrations.Tests/Symphonist.Integrations.Tests.csproj" />
+  </Folder>
+</Solution>
