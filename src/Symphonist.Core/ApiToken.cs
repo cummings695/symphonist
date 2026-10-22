@@ -8,6 +8,10 @@ public static class ApiToken
 {
     public const string Header = "X-Symphonist-Token";
 
+    /// <summary>Reads the token without creating it; null when the file is missing or empty (the host never ran).</summary>
+    public static string? TryLoad(string path) =>
+        File.Exists(path) && File.ReadAllText(path).Trim() is { Length: > 0 } token ? token : null;
+
     /// <summary>
     /// Reads the token from <paramref name="path"/>, creating it first if missing or empty: 32 random bytes,
     /// base64url, in a file only the current user can read and write.

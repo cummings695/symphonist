@@ -1,0 +1,155 @@
+using System.CommandLine;
+using System.Text;
+using Symphonist.Core.Integrations;
+
+namespace Symphonist.Cli;
+
+/// <summary>The <c>symphonist</c> command tree. Exit codes: 0 success, 1 API/usage error, 2 host not running.</summary>
+public static class Cli
+{
+    public const int Ok = 0, ApiError = 1, HostDown = 2;
+
+    /// <param name="interactive">True when stdin is a terminal: <c>secret set</c> then prompts and reads without echo.</param>
+    public static Task<int> RunAsync(string[] args, SymphonistClient client, TextWriter stdout, TextWriter stderr,
+        ISecretStore secrets, TextReader stdin, bool interactive = false, TimeProvider? clock = null)
+    {
+        var time = clock ?? TimeProvider.System;
+        var root = new RootCommand("Symphonist command-line client");
+
+        var projectOption = new Option<string?>("--project") { Description = "Only tickets of this project" };
+        var status = new Command("status", "List tickets, those waiting on you first") { projectOption };
+        Run(status, async (r, ct) =>
+        {
+            var tickets = await client.ListTicketsAsync(r.GetValue(projectOption), ct);
+            stdout.Write(StatusTable.Render(tickets, time.GetUtcNow()));
+        });
+        root.Add(status);
+
+        var show = new Command("show", "Show a ticket and its events");
+        var (showProject, showKey) = Ticket(show);
+        Run(show, async (r, ct) =>
+        {
+            var t = await client.GetTicketAsync(r.GetValue(showProject)!, r.GetValue(showKey)!, ct);
+            stdout.Write(StatusTable.RenderDetail(t, time.GetUtcNow()));
+        });
+        root.Add(show);
+
+        var approve = new Command("approve", "Approve the stage a ticket is waiting on");
+        var (approveProject, approveKey) = Ticket(approve);
+        Run(approve, async (r, ct) =>
+            stdout.WriteLine((await client.ApproveAsync(r.GetValue(approveProject)!, r.GetValue(approveKey)!, ct)).Message));
+        root.Add(approve);
+
+        var sendBack = new Command("send-back", "Send a ticket back with feedback");
+        var (sendProject, sendKey) = Ticket(sendBack);
+        var message = new Option<string>("-m", "--message") { Description = "Feedback for the agent", Required = true };
+        var toStage = new Option<string?>("--to") { Description = "Stage to send back to (default: the stage before approval)" };
+        sendBack.Add(message);
+        sendBack.Add(toStage);
+        Run(sendBack, async (r, ct) =>
+            stdout.WriteLine((await client.SendBackAsync(r.GetValue(sendProject)!, r.GetValue(sendKey)!,
+                r.GetValue(message)!, r.GetValue(toStage), ct)).Message));
+        root.Add(sendBack);
+
+        var unblock = new Command("unblock", "Unblock a blocked ticket");
+        var (unblockProject, unblockKey) = Ticket(unblock);
+        Run(unblock, async (r, ct) =>
+            stdout.WriteLine((await client.UnblockAsync(r.GetValue(unblockProject)!, r.GetValue(unblockKey)!, ct)).Message));
+        root.Add(unblock);
+
+        var poll = new Command("poll", "Ask the host to poll now");
+        Run(poll, async (_, ct) =>
+        {
+            await client.PollAsync(ct);
+            stdout.WriteLine("Poll requested");
+        });
+        root.Add(poll);
+
+        var projects = new Command("projects", "List projects, or pause/resume one");
+        Run(projects, async (_, ct) => stdout.Write(StatusTable.RenderProjects(await client.ListProjectsAsync(ct))));
+        foreach (var (name, paused, done) in new[] { ("pause", true, "Paused"), ("resume", false, "Resumed") })
+        {
+            var id = new Argument<string>("id") { Description = "Project id" };
+            var sub = new Command(name, $"{char.ToUpperInvariant(name[0])}{name[1..]} a project") { id };
+            Run(sub, async (r, ct) =>
+            {
+                var project = r.GetValue(id)!;
+                await client.SetPausedAsync(project, paused, ct);
+                stdout.WriteLine($"{done} {project}");
+            });
+            projects.Add(sub);
+        }
+
+        root.Add(projects);
+
+        var secret = new Command("secret", "Manage secrets in the OS credential store");
+        var secretSet = new Command("set", "Store a secret; the value is read from stdin, never from arguments");
+        var secretName = new Argument<string>("name") { Description = "Secret name" };
+        secretSet.Add(secretName);
+        Run(secretSet, (r, _) =>
+        {
+            var name = r.GetValue(secretName)!;
+            var value = interactive ? ReadHidden(stdout, name) : stdin.ReadLine();
+            value = value?.TrimEnd('\r', '\n');
+            if (string.IsNullOrEmpty(value)) throw new ApiException("Secret value must not be empty");
+            secrets.Set(name, value);
+            stdout.WriteLine($"Secret '{name}' saved");
+            return Task.CompletedTask;
+        });
+        secret.Add(secretSet);
+        root.Add(secret);
+
+        return root.Parse(args).InvokeAsync(new InvocationConfiguration { Output = stdout, Error = stderr });
+
+        // Wraps an action: maps client failures to exit codes and messages.
+        void Run(Command command, Func<ParseResult, CancellationToken, Task> action) =>
+            command.SetAction(async (r, ct) =>
+            {
+                try
+                {
+                    await action(r, ct);
+                    return Ok;
+                }
+                catch (HostNotRunningException e)
+                {
+                    stderr.WriteLine(e.Message);
+                    return HostDown;
+                }
+                catch (ApiException e)
+                {
+                    stderr.WriteLine(e.Message);
+                    return ApiError;
+                }
+            });
+    }
+
+    private static (Argument<string> Project, Argument<string> Key) Ticket(Command command)
+    {
+        var project = new Argument<string>("project") { Description = "Project id" };
+        var key = new Argument<string>("key") { Description = "Ticket key" };
+        command.Add(project);
+        command.Add(key);
+        return (project, key);
+    }
+
+    private static string ReadHidden(TextWriter stdout, string name)
+    {
+        stdout.Write($"Value for {name}: ");
+        stdout.Flush();
+        var value = new StringBuilder();
+        while (Console.ReadKey(intercept: true) is var key && key.Key != ConsoleKey.Enter)
+        {
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (value.Length > 0) value.Length--;
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                value.Append(key.KeyChar);
+            }
+        }
+
+        stdout.WriteLine();
+        return value.ToString();
+    }
+}

@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Symphonist.Cli\Symphonist.Cli.csproj" />
+    <Compile Include="..\Symphonist.Integrations.Tests\Http\StubHttpHandler.cs" Link="Http\StubHttpHandler.cs" />
   </ItemGroup>
 
 </Project>

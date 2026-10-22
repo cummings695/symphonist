@@ -1,10 +1,26 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>symphonist</AssemblyName>
+    <RootNamespace>Symphonist.Cli</RootNamespace>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>symphonist</ToolCommandName>
+    <PackageId>Symphonist.Cli</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Command-line client for the Symphonist host.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Symphonist.Core\Symphonist.Core.csproj" />
+    <ProjectReference Include="..\Symphonist.Integrations\Symphonist.Integrations.csproj" />
+  </ItemGroup>
 
 </Project>

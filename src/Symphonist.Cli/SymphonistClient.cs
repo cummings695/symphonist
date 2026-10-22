@@ -1,0 +1,122 @@
+using System.Net.Http.Json;
+using System.Net.Sockets;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Symphonist.Core;
+
+namespace Symphonist.Cli;
+
+public sealed record TicketDto(string Key, string Project, string Title, string Stage, string Status,
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl);
+
+public sealed record TicketEventDto(DateTimeOffset At, string Stage, string Message);
+
+public sealed record TicketDetailDto(string Key, string Project, string Title, string Stage, string Status,
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events);
+
+public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation);
+
+public sealed record OutcomeDto(bool Changed, string Message);
+
+/// <summary>The host is unreachable (not running, or no API token exists yet).</summary>
+public sealed class HostNotRunningException(int port)
+    : Exception($"Symphonist host is not running on 127.0.0.1:{port}");
+
+/// <summary>The host answered with an error; <see cref="Exception.Message"/> is the server's message.</summary>
+public sealed class ApiException(string message) : Exception(message);
+
+/// <summary>Typed client for the host's local HTTP API.</summary>
+public sealed class SymphonistClient : IDisposable
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
+
+    private readonly HttpClient http;
+    private readonly string? token;
+    private readonly int port;
+
+    /// <param name="token">The API token, or null when none exists (every call then reports the host as not running).</param>
+    public SymphonistClient(HttpMessageHandler handler, string? token, int port)
+    {
+        this.token = token;
+        this.port = port;
+        http = new HttpClient(handler, disposeHandler: false) { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+    }
+
+    public Task<List<TicketDto>> ListTicketsAsync(string? project, CancellationToken ct) =>
+        SendAsync<List<TicketDto>>(HttpMethod.Get,
+            project is null ? "/api/tickets" : $"/api/tickets?project={Uri.EscapeDataString(project)}", null, ct);
+
+    public Task<TicketDetailDto> GetTicketAsync(string project, string key, CancellationToken ct) =>
+        SendAsync<TicketDetailDto>(HttpMethod.Get, TicketPath(project, key), null, ct);
+
+    public Task<OutcomeDto> ApproveAsync(string project, string key, CancellationToken ct) =>
+        SendAsync<OutcomeDto>(HttpMethod.Post, TicketPath(project, key) + "/approve", null, ct);
+
+    public Task<OutcomeDto> SendBackAsync(string project, string key, string feedback, string? toStage, CancellationToken ct) =>
+        SendAsync<OutcomeDto>(HttpMethod.Post, TicketPath(project, key) + "/send-back",
+            JsonContent.Create(new { feedback, toStage }, options: Json), ct);
+
+    public Task<OutcomeDto> UnblockAsync(string project, string key, CancellationToken ct) =>
+        SendAsync<OutcomeDto>(HttpMethod.Post, TicketPath(project, key) + "/unblock", null, ct);
+
+    public Task PollAsync(CancellationToken ct) => SendAsync<object>(HttpMethod.Post, "/api/poll", null, ct);
+
+    public Task<List<ProjectDto>> ListProjectsAsync(CancellationToken ct) =>
+        SendAsync<List<ProjectDto>>(HttpMethod.Get, "/api/projects", null, ct);
+
+    public Task SetPausedAsync(string id, bool paused, CancellationToken ct) =>
+        SendAsync<object>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(id)}/{(paused ? "pause" : "resume")}", null, ct);
+
+    public void Dispose() => http.Dispose();
+
+    private static string TicketPath(string project, string key) =>
+        $"/api/tickets/{Uri.EscapeDataString(project)}/{Uri.EscapeDataString(key)}";
+
+    private async Task<T> SendAsync<T>(HttpMethod method, string path, HttpContent? content, CancellationToken ct)
+    {
+        if (token is null) throw new HostNotRunningException(port);
+        using var request = new HttpRequestMessage(method, path) { Content = content };
+        request.Headers.Add(ApiToken.Header, token);
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.SendAsync(request, ct);
+        }
+        catch (HttpRequestException e) when (e.InnerException is SocketException || e.HttpRequestError == HttpRequestError.ConnectionError)
+        {
+            throw new HostNotRunningException(port);
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode) throw new ApiException(await ErrorMessageAsync(response, ct));
+            if (typeof(T) == typeof(object) || response.Content.Headers.ContentLength == 0) return default!;
+            return (await response.Content.ReadFromJsonAsync<T>(Json, ct))!;
+        }
+    }
+
+    /// <summary>The server's message: <c>error</c> (our API), <c>detail</c>/<c>title</c> (problem details), else the body text.</summary>
+    private static async Task<string> ErrorMessageAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        var body = await response.Content.ReadAsStringAsync(ct);
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                foreach (var name in new[] { "error", "detail", "title" })
+                    if (doc.RootElement.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
+                        && !string.IsNullOrWhiteSpace(p.GetString()))
+                        return p.GetString()!;
+        }
+        catch (JsonException)
+        {
+            // Not JSON: fall through to the raw text.
+        }
+
+        return string.IsNullOrWhiteSpace(body) ? $"{(int)response.StatusCode} {response.ReasonPhrase}" : body.Trim();
+    }
+}
