@@ -48,8 +48,7 @@ public sealed class ProjectRegistry
             {
                 loaded.Add(ProjectConfigLoader.Load(file));
             }
-            catch (Exception e) when (e is ProjectConfigException or IOException or UnauthorizedAccessException
-                                           or UriFormatException) // malformed tracker.site
+            catch (Exception e) when (e is not OutOfMemoryException) // one bad file must never stop the host
             {
                 log.LogError("Skipping project file {File}: {Error}", file, e.Message);
             }

@@ -63,7 +63,7 @@ public static class ProjectConfigLoader
         Supported("agent.type", Required(agent.Type, "agent.type"), "claude-code");
 
         var isolation = ParseEnum<Isolation>(agent.Isolation ?? "container", "isolation");
-        IReadOnlyList<string> allowedTools = agent.AllowedTools ?? [];
+        IReadOnlyList<string> allowedTools = Items(agent.AllowedTools, "agent.allowedTools");
         if (isolation == Isolation.Host && allowedTools.Count == 0)
             throw new ProjectConfigException("host isolation requires agent.allowedTools");
 
@@ -71,7 +71,7 @@ public static class ProjectConfigLoader
 
         var prompts = new Dictionary<StageKind, string>();
         foreach (var (kind, path) in d.Prompts ?? [])
-            prompts[ParseEnum<StageKind>(kind, "prompt stage kind")] = Path.GetFullPath(path, dir);
+            prompts[ParseEnum<StageKind>(kind, "prompt stage kind")] = Path.GetFullPath(Required(path, $"prompts.{kind}"), dir);
 
         return new ProjectConfig(
             id,
@@ -85,7 +85,7 @@ public static class ProjectConfigLoader
                 Required(repo.Email, "repo.email"), Required(repo.TokenSecret, "repo.tokenSecret"),
                 repo.MergeStrategy ?? "merge_commit"),
             new BuildConfig(Required(build.Type, "build.type"), build.TimeoutMinutes ?? 45),
-            new AgentSettings(agent.Type!, isolation, agent.AllowedDomains ?? [], allowedTools,
+            new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"), allowedTools,
                 agent.TimeoutMinutes ?? 60, agent.Model, agent.Image),
             d.MaxAttemptsPerStage ?? 3,
             pipeline,
@@ -93,22 +93,24 @@ public static class ProjectConfigLoader
             dir);
     }
 
-    private static List<StageDefinition> MapPipeline(List<StageDto>? stages)
+    private static List<StageDefinition> MapPipeline(List<StageDto?>? stages)
     {
         if (stages is null || stages.Count == 0)
             throw new ProjectConfigException("pipeline must contain at least one stage");
 
         var result = new List<StageDefinition>();
         var seen = new HashSet<string>();
-        foreach (var s in stages)
+        for (var i = 0; i < stages.Count; i++)
         {
+            // A YAML null item ("pipeline: [~]" or a bare "-") deserializes as null.
+            var s = stages[i] ?? throw new ProjectConfigException($"pipeline[{i}] is empty");
             var stageId = Required(s.Id, "pipeline[].id");
             if (!seen.Add(stageId)) throw new ProjectConfigException($"duplicate stage id '{stageId}'");
             result.Add(new StageDefinition(
                 stageId,
                 ParseEnum<StageKind>(Required(s.Kind, $"pipeline stage '{stageId}' kind"), "stage kind"),
                 ParseEnum<GatePolicy>(s.Gate ?? "none", "gate"),
-                s.EntryStatuses ?? [],
+                Items(s.EntryStatuses, $"pipeline stage '{stageId}' entryStatuses"),
                 s.OnEnterStatus, s.OnGateStatus, s.ApprovedWhenStatus));
         }
 
@@ -116,6 +118,12 @@ public static class ProjectConfigLoader
             throw new ProjectConfigException("last stage must be kind 'done'");
         return result;
     }
+
+    /// <summary>The list, or empty when absent; a null/blank item (YAML <c>~</c>) is rejected.</summary>
+    private static List<string> Items(List<string>? items, string field) =>
+        items is null ? []
+        : items.Any(string.IsNullOrWhiteSpace) ? throw new ProjectConfigException($"{field} contains an empty item")
+        : items;
 
     private static T ParseEnum<T>(string value, string what) where T : struct, Enum =>
         Enum.TryParse<T>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)
@@ -141,8 +149,8 @@ public static class ProjectConfigLoader
         public BuildDto? Build { get; set; }
         public AgentDto? Agent { get; set; }
         public int? MaxAttemptsPerStage { get; set; }
-        public List<StageDto>? Pipeline { get; set; }
-        public Dictionary<string, string>? Prompts { get; set; }
+        public List<StageDto?>? Pipeline { get; set; }
+        public Dictionary<string, string?>? Prompts { get; set; }
     }
 
     private sealed class TrackerDto

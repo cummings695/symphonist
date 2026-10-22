@@ -37,6 +37,10 @@ public class ProjectConfigLoaderTests
     [InlineData("last-stage-not-done", "last stage must be kind 'done'")]
     [InlineData("host-without-tools", "host isolation requires agent.allowedTools")]
     [InlineData("unknown-kind", "unknown stage kind 'qa'")]
+    [InlineData("pipeline: [~]", "pipeline[0] is empty")]
+    [InlineData("null-entry-status", "pipeline stage 'triage' entryStatuses contains an empty item")]
+    [InlineData("null-allowed-domain", "agent.allowedDomains contains an empty item")]
+    [InlineData("null-prompt", "missing required 'prompts.plan'")]
     public void Rejects_invalid_config(string variant, string expectedMessage)
     {
         var yaml = File.ReadAllText(Fixture("orders.yaml")).Replace("\r\n", "\n");
@@ -47,6 +51,10 @@ public class ProjectConfigLoaderTests
             "last-stage-not-done" => string.Join('\n', yaml.Split('\n').Where(l => !l.Contains("id: done"))),
             "host-without-tools" => yaml.Replace("  type: claude-code\n", "  type: claude-code\n  isolation: host\n"),
             "unknown-kind" => yaml.Replace("kind: release", "kind: qa"),
+            "pipeline: [~]" => yaml[..yaml.IndexOf("pipeline:", StringComparison.Ordinal)] + "pipeline: [~]\n",
+            "null-entry-status" => yaml.Replace("entryStatuses: [Backlog]", "entryStatuses: [Backlog, ~]"),
+            "null-allowed-domain" => yaml.Replace("allowedDomains: [api.nuget.org,", "allowedDomains: [~, api.nuget.org,"),
+            "null-prompt" => yaml.Replace("plan: prompts/plan.md", "plan: ~"),
             _ => throw new ArgumentException(variant),
         };
         var dir = Directory.CreateTempSubdirectory("symphonist-cfg").FullName;

@@ -23,6 +23,17 @@ public sealed class ProjectRegistryTests : IDisposable
     }
 
     [Fact]
+    public void Null_pipeline_item_or_unexpected_error_skips_only_that_file()
+    {
+        home.WriteProject("a-null-stage.yaml", TestHome.ProjectYaml("nullstage").Split("pipeline:")[0] + "pipeline: [~]\n");
+        // A NUL character in a path makes Path.GetFullPath throw ArgumentException (not a ProjectConfigException).
+        home.WriteProject("b-bad-path.yaml", TestHome.ProjectYaml("badpath").Replace("localPath: ../acme-badpath", "localPath: \"a\\0b\""));
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+
+        Assert.Equal(["orders"], Create().Projects.Select(p => p.Id));
+    }
+
+    [Fact]
     public void Duplicate_project_ids_are_all_skipped()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
