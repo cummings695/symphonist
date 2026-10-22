@@ -53,6 +53,8 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             return p.Stage(t.StageId).Kind switch
             {
                 StageKind.Implement => await MergeAsync(io.SourceControl, t.PullRequestId, hash => t.MergeCommit = hash, ct),
+                // No release PR but a release commit: production already contained main, nothing to merge.
+                StageKind.Release when t is { ReleasePullRequestId: null, ReleaseMergeCommit: not null } => Completed,
                 StageKind.Release => await MergeAsync(io.SourceControl, t.ReleasePullRequestId, hash => t.ReleaseMergeCommit = hash, ct),
                 _ => Completed,
             };
@@ -145,11 +147,31 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
 
     private static async Task<ExecutionResult> ReleaseAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct)
     {
-        if (t.ReleasePullRequestId is not null) return Completed;
+        var sc = io.SourceControl;
+        if (t.ReleasePullRequestId is { } existing && (await sc.GetPullRequestAsync(existing, ct)).State == PullRequestState.Open)
+            return Completed;
 
+        // First release, or re-entered (send-back / unblock) after an earlier release finished: start over.
+        t.ReleasePullRequestId = null;
+        t.ReleaseMergeCommit = null;
+
+        var (main, production) = (p.Repo.MainBranch, p.Repo.ProductionBranch);
         var title = $"Release {t.Key}";
-        var pr = await FindOrOpenAsync(io.SourceControl, p.Repo.MainBranch, p.Repo.ProductionBranch, title,
-            $"{title}: {t.Title}", ct);
+        PullRequestInfo pr;
+        try
+        {
+            pr = await FindOrOpenAsync(sc, main, production, title, $"{title}: {t.Title}", ct);
+        }
+        catch (NoChangesToPullException)
+        {
+            // Production already contains main (e.g. released together with another ticket): deploy watches its head.
+            var head = await sc.GetBranchHeadAsync(production, ct);
+            t.ReleaseMergeCommit = head;
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Nothing to release: {production} already contains {main}."), ct);
+            return new ExecutionResult(ExecutionStatus.Completed,
+                Event: $"already in production: {production} already contains {main} (at {head})");
+        }
+
         t.ReleasePullRequestId = pr.Id;
         await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Release PR: {pr.WebUrl}"), ct);
         return Completed;

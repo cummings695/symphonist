@@ -54,5 +54,13 @@ public sealed class FakeSourceControl : ISourceControl
         return Task.FromResult(result);
     }
 
+    /// <summary>Branch heads for GetBranchHeadAsync; unknown branches throw.</summary>
+    public Dictionary<string, string> BranchHeads { get; } = [];
+
+    public Task<string> GetBranchHeadAsync(string branch, CancellationToken ct) =>
+        BranchHeads.TryGetValue(branch, out var hash)
+            ? Task.FromResult(hash)
+            : throw new HttpRequestException($"branch {branch} not found");
+
     public Uri BranchFileUrl(string branch, string path) => new($"https://scm.example/src/{branch}/{path}");
 }

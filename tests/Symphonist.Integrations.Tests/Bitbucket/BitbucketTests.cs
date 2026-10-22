@@ -46,6 +46,40 @@ public class BitbucketTests
     }
 
     [Fact]
+    public async Task Open_pr_without_changes_throws_no_changes_exception()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.BadRequest,
+            "{\"type\":\"error\",\"error\":{\"message\":\"There are no changes to be pulled\"}}");
+
+        var ex = await Assert.ThrowsAsync<NoChangesToPullException>(() =>
+            Scm(stub).OpenPullRequestAsync("main", "production", "Release ORD-1", "d", CancellationToken.None));
+
+        Assert.Contains("There are no changes to be pulled", ex.Message);
+    }
+
+    [Fact]
+    public async Task Open_pr_other_400_still_throws_http_error()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests", HttpStatusCode.BadRequest,
+            "{\"type\":\"error\",\"error\":{\"message\":\"source branch not found\"}}");
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            Scm(stub).OpenPullRequestAsync("x", "main", "t", "d", CancellationToken.None));
+
+        Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task Branch_head_returns_target_hash()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/refs/branches/production", HttpStatusCode.OK,
+            "{\"name\":\"production\",\"target\":{\"type\":\"commit\",\"hash\":\"0123abcd\"}}");
+
+        Assert.Equal("0123abcd", await Scm(stub).GetBranchHeadAsync("production", CancellationToken.None));
+        Assert.Equal(HttpMethod.Get, Assert.Single(stub.Requests).Method);
+    }
+
+    [Fact]
     public async Task Find_open_pr_encodes_query()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/pullrequests?state=OPEN", HttpStatusCode.OK, Fixture("bb-pr-list.json"));

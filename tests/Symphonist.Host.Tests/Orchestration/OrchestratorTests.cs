@@ -420,6 +420,27 @@ public sealed class OrchestratorTests : IDisposable
             store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Release_with_nothing_to_release_waits_at_gate_then_deploy_watches_production_head()
+    {
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "merge-1");
+        scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
+        scm.BranchHeads["production"] = "prod-head";
+        builds.Statuses["prod-head"] = BuildStatus.Succeeded;
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Contains("already in production: production already contains main (at prod-head)", store.EventMessages("ORD-1"));
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await TickIdle(o); // post-approval: nothing to merge
+        await TickIdle(o); // deploy sees the production head's pipeline
+
+        Assert.Equal(StageStatus.Done, store.Single("ORD-1").Status);
+        Assert.Equal(["prod-head"], builds.Calls);
+        Assert.Empty(scm.MergeCalls);
+    }
+
     [Fact] public async Task Waiting_merge_event_is_recorded_once()
     {
         var pr = await scm.OpenPullRequestAsync("symphonist/ORD-1", "main", "t", "d", CancellationToken.None);

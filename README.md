@@ -144,6 +144,15 @@ repo with a trivial `bitbucket-pipelines.yml`).
 
 - Ticket is `Blocked` (a stage failed `maxAttemptsPerStage` times, or the ticket no longer matches the JQL): run
   `symphonist show <project> <key>` for the reason and events, fix the cause, then `symphonist unblock <project> <key>`.
+- Build or Deploy is `Blocked` with `build failed` or `no pipeline ran for <commit>`: if the pipeline failed for a
+  passing reason (flaky test, runner outage, pipeline not triggered), re-run it in Bitbucket, then
+  `symphonist unblock <project> <key>`; the stage watches the same commit again with a fresh timeout. If the code needs
+  a fix, either land the fix on `main` yourself and `symphonist send-back <project> <key> -m "fixed on main" --to release`
+  (a new release PR is opened), or `symphonist send-back <project> <key> -m "<what broke>" --to implement` to let the
+  agent fix it.
+- Event `already in production`: `production` already contained `main` when the release stage ran (for example it was
+  released together with another ticket), so no release PR was opened. Approve the release gate as usual; deploy then
+  watches the pipeline of the current `production` head.
 - Event `no transition to '<status>' in tracker`: the Jira workflow has no transition from the card's current status to
   that status. Symphonist records it and carries on; fix the status names in the project file or the Jira workflow.
 - Docker not running: container stages fail with a Docker error. Start Docker and restart the host (availability is

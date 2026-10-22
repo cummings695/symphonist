@@ -12,7 +12,8 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
     public async Task<PullRequestInfo> OpenPullRequestAsync(
         string sourceBranch, string destinationBranch, string title, string description, CancellationToken ct)
     {
-        using var doc = await _api.SendAsync(HttpMethod.Post, $"{_api.RepoPath}/pullrequests", new
+        var path = $"{_api.RepoPath}/pullrequests";
+        var (status, text) = await _api.SendRawAsync(HttpMethod.Post, path, new
         {
             title,
             description,
@@ -20,6 +21,14 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
             destination = new { branch = new { name = destinationBranch } },
             close_source_branch = false,
         }, ct);
+
+        // Bitbucket answers 400 "There are no changes to be pulled" when the destination already has everything.
+        if (status == HttpStatusCode.BadRequest && ErrorMessage(text) is { } message
+            && message.Contains("no changes to be pull", StringComparison.OrdinalIgnoreCase))
+            throw new NoChangesToPullException(message);
+        if ((int)status is < 200 or > 299) throw BitbucketApi.Failure(HttpMethod.Post, path, status, text);
+
+        using var doc = JsonDocument.Parse(text);
         return Map(doc.RootElement);
     }
 
@@ -58,6 +67,16 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
 
         using var doc = JsonDocument.Parse(text);
         return new MergeResult(true, MergeHash(doc.RootElement), null);
+    }
+
+    public async Task<string> GetBranchHeadAsync(string branch, CancellationToken ct)
+    {
+        var path = $"{_api.RepoPath}/refs/branches/{Uri.EscapeDataString(branch)}";
+        using var doc = await _api.SendAsync(HttpMethod.Get, path, null, ct);
+        return doc.RootElement.TryGetProperty("target", out var target) && target.ValueKind == JsonValueKind.Object
+               && target.TryGetProperty("hash", out var hash) && hash.GetString() is { Length: > 0 } h
+            ? h
+            : throw new HttpRequestException($"Bitbucket GET {path} returned no target hash");
     }
 
     /// <summary>The web page of pull request <paramref name="id"/> (no API call needed).</summary>

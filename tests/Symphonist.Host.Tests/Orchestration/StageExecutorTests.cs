@@ -447,6 +447,41 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(9, t.ReleasePullRequestId);
     }
 
+    [Fact] public async Task Release_when_production_already_contains_main_completes_at_production_head()
+    {
+        scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
+        scm.BranchHeads["production"] = "prod-head";
+        var t = At("release");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Equal("already in production: production already contains main (at prod-head)", r.Event);
+        Assert.Equal(("prod-head", (long?)null), (t.ReleaseMergeCommit, t.ReleasePullRequestId));
+        Assert.Equal(TrackerComments.Sign("Nothing to release: production already contains main."),
+            Assert.Single(tracker.Comments).Markdown);
+
+        var approved = await executor.PostApprovalAsync(project, io, t, CancellationToken.None);
+        Assert.Equal(ExecutionStatus.Completed, approved.Status);
+        Assert.Equal("prod-head", t.ReleaseMergeCommit);
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Release_reentered_after_its_pr_merged_opens_a_new_pr()
+    {
+        var t = At("release");
+        t.ReleasePullRequestId = 4;
+        t.ReleaseMergeCommit = "old-release";
+        scm.PullRequests[4] = FakeSourceControl.Pr(4, PullRequestState.Merged, "old-release");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Single(scm.Opened);
+        Assert.NotEqual(4, t.ReleasePullRequestId);
+        Assert.Null(t.ReleaseMergeCommit);
+    }
+
     [Fact] public async Task Merge_sets_merge_commit_and_completes()
     {
         var t = At("implement");
