@@ -18,7 +18,12 @@ public static class ApiToken
     /// </summary>
     public static string LoadOrCreate(string path)
     {
-        if (File.Exists(path) && File.ReadAllText(path).Trim() is { Length: > 0 } existing) return existing;
+        if (File.Exists(path) && File.ReadAllText(path).Trim() is { Length: > 0 } existing)
+        {
+            // The file may predate the mode check or have been loosened since: keep it readable by this user only.
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            return existing;
+        }
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32));

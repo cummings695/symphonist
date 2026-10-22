@@ -29,4 +29,22 @@ public sealed class ApiTokenTests
             dir.Delete(true);
         }
     }
+    [UnixFact, System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void LoadOrCreate_tightens_mode_of_an_existing_token_file_on_unix()
+    {
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var path = Path.Combine(dir.FullName, "api-token");
+            File.WriteAllText(path, "existing-token");
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+            Assert.Equal("existing-token", ApiToken.LoadOrCreate(path));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+        }
+        finally
+        {
+            dir.Delete(true);
+        }
+    }
 }
