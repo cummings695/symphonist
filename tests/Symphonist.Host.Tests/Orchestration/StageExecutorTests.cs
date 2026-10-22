@@ -85,7 +85,7 @@ public sealed class StageExecutorTests : IDisposable
         var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Completed, r.Status);
-        Assert.Equal([("ORD-1", "## Triage notes")], tracker.Comments);
+        Assert.Equal([("ORD-1", TrackerComments.Sign("## Triage notes"))], tracker.Comments);
         Assert.Equal([("ORD-1", "symphonist/ORD-1")], git.Prepared);
         Assert.Empty(git.Commits);
         var prompt = Assert.Single(agent.Prompts);
@@ -102,7 +102,7 @@ public sealed class StageExecutorTests : IDisposable
 
         await executor.ExecuteAsync(project, io, At("triage"), source, CancellationToken.None);
 
-        Assert.Equal("just a summary", Assert.Single(tracker.Comments).Markdown);
+        Assert.Equal(TrackerComments.Sign("just a summary"), Assert.Single(tracker.Comments).Markdown);
     }
 
     [Fact] public async Task Missing_source_ticket_renders_empty_values()
@@ -161,7 +161,7 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Single(scm.Opened);
         Assert.Equal(1, t.PullRequestId);
         Assert.Equal(2, git.Pushes.Count);
-        Assert.Equal("PR ready for review: https://scm.example/pr/1", Assert.Single(tracker.Comments).Markdown);
+        Assert.Equal(TrackerComments.Sign("PR ready for review: https://scm.example/pr/1"), Assert.Single(tracker.Comments).Markdown);
     }
 
     [Fact] public async Task Tracker_failure_returns_failed_with_message()
@@ -228,6 +228,7 @@ public sealed class StageExecutorTests : IDisposable
         Assert.StartsWith("Planned it", comment);
         Assert.Contains("Spec: https://scm.example/src/symphonist/ORD-1/docs/specs/a.md", comment);
         Assert.Contains("Plan: https://scm.example/src/symphonist/ORD-1/docs/plans/a.md", comment);
+        Assert.EndsWith(TrackerComments.Sign(""), comment);
     }
 
     [Fact] public async Task Plan_without_changes_fails()
@@ -260,8 +261,8 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(1, t.PullRequestId);
         Assert.Equal(["ORD-1: Export orders", "ORD-1: Export orders"], git.Commits.Select(c => c.Message));
         Assert.Equal(2, git.Pushes.Count);
-        Assert.Equal("PR ready for review: https://scm.example/pr/1", tracker.Comments[0].Markdown);
-        Assert.Equal("PR updated", tracker.Comments[1].Markdown);
+        Assert.Equal(TrackerComments.Sign("PR ready for review: https://scm.example/pr/1"), tracker.Comments[0].Markdown);
+        Assert.Equal(TrackerComments.Sign("PR updated"), tracker.Comments[1].Markdown);
         Assert.Contains("docs/specs/a.md", agent.Prompts[0]);
         Assert.Contains("docs/plans/a.md", agent.Prompts[0]);
     }
@@ -277,7 +278,7 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Empty(scm.Opened);
         Assert.Equal([("symphonist/ORD-1", "main")], scm.FindCalls);
         Assert.Equal(7, t.PullRequestId);
-        Assert.Equal("PR ready for review: https://scm.example/pr/7", Assert.Single(tracker.Comments).Markdown);
+        Assert.Equal(TrackerComments.Sign("PR ready for review: https://scm.example/pr/7"), Assert.Single(tracker.Comments).Markdown);
     }
 
     [Fact] public async Task Implement_commit_falls_back_to_ticket_title()
@@ -432,7 +433,7 @@ public sealed class StageExecutorTests : IDisposable
         var opened = Assert.Single(scm.Opened);
         Assert.Equal(("main", "production", "Release ORD-1"), (opened.Source, opened.Destination, opened.Title));
         Assert.Equal(1, t.ReleasePullRequestId);
-        Assert.Contains("https://scm.example/pr/1", Assert.Single(tracker.Comments).Markdown);
+        Assert.Equal(TrackerComments.Sign("Release PR: https://scm.example/pr/1"), Assert.Single(tracker.Comments).Markdown);
     }
 
     [Fact] public async Task Release_reuses_open_pr_found_on_host()

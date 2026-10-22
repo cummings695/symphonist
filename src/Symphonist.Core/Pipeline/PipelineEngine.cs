@@ -58,6 +58,7 @@ public static class PipelineEngine
         if (HasPostApprovalAction(stage.Kind))
         {
             t.Status = StageStatus.Approved;
+            t.Attempts = 0; // the post-approval action (merge) gets its own retry budget
             t.UpdatedAt = now;
             return new(true, null, $"{stage.Id} approved");
         }

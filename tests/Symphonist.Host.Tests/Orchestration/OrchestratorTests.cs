@@ -268,7 +268,8 @@ public sealed class OrchestratorTests : IDisposable
             new SourceComment("Me", true, Now.AddMinutes(-5), "before the gate"),
             new SourceComment("Me", true, Now.AddMinutes(10), "rethink the API"),
             new SourceComment("Me", true, Now.AddMinutes(5), "older note"),
-            new SourceComment("Ann", false, Now.AddMinutes(20), "not mine"));
+            new SourceComment("Ann", false, Now.AddMinutes(20), "not mine"),
+            new SourceComment("Me", true, Now.AddMinutes(30), TrackerComments.Sign("PR ready for review: https://scm.example/pr/1")));
         var o = Create();
         agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
 
@@ -278,6 +279,37 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal("plan", t.StageId);
         Assert.Equal("rethink the API", t.Feedback);
         Assert.Contains("sent back to plan", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Blocked_ticket_dragged_back_without_developer_comment_has_no_feedback()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Blocked, "In Review");
+        tracker.Tickets.Clear();
+        Source("ORD-1", "Planned",
+            new SourceComment("Me", true, Now.AddMinutes(-30), "an old note from before this stage"),
+            new SourceComment("Me", true, Now.AddMinutes(5), TrackerComments.Sign("PR ready for review: https://scm.example/pr/1")));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal("plan", t.StageId);
+        Assert.Null(t.Feedback);
+    }
+
+    [Fact] public async Task Running_agent_ticket_without_a_run_is_retried()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Running, "Planned");
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal((StageStatus.Pending, 1), (store.Single("ORD-1").Status, store.Single("ORD-1").Attempts));
+        Assert.Contains("run lost; retrying", store.EventMessages("ORD-1"));
+
+        await TickIdle(o);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
     }
 
     [Fact] public async Task Backward_source_move_while_running_is_recorded_and_ignored()

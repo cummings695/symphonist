@@ -92,12 +92,5 @@ public sealed class FakeTicketStore : ITicketStore
         }
     }
 
-    private static Ticket Copy(Ticket t) => new()
-    {
-        Id = t.Id, ProjectId = t.ProjectId, Key = t.Key, Title = t.Title, StageId = t.StageId, Status = t.Status,
-        BlockedReason = t.BlockedReason, Feedback = t.Feedback, Attempts = t.Attempts, LastSourceStatus = t.LastSourceStatus,
-        Branch = t.Branch, SpecPath = t.SpecPath, PlanPath = t.PlanPath, PullRequestId = t.PullRequestId,
-        MergeCommit = t.MergeCommit, ReleasePullRequestId = t.ReleasePullRequestId, ReleaseMergeCommit = t.ReleaseMergeCommit,
-        CreatedAt = t.CreatedAt, UpdatedAt = t.UpdatedAt, StageStartedAt = t.StageStartedAt, WaitingSince = t.WaitingSince,
-    };
+    private static Ticket Copy(Ticket t) => t.Clone();
 }

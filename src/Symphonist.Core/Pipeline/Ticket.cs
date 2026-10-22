@@ -25,4 +25,7 @@ public sealed class Ticket
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? StageStartedAt { get; set; }
     public DateTimeOffset? WaitingSince { get; set; }
+
+    /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
+    public Ticket Clone() => (Ticket)MemberwiseClone();
 }

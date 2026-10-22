@@ -69,6 +69,13 @@ public class PipelineEngineTests
         PipelineEngine.PostApprovalCompleted(P, t, Now); Assert.Equal("build", t.StageId); Assert.Equal(StageStatus.Pending, t.Status);
     }
 
+    [Fact] public void Approve_into_Approved_resets_attempts_for_the_merge()
+    {
+        var t = Awaiting("implement"); t.Attempts = 2;
+        PipelineEngine.Approve(P, t, Now);
+        Assert.Equal((StageStatus.Approved, 0), (t.Status, t.Attempts));
+    }
+
     [Fact] public void Approve_plan_advances_directly()
     {
         var t = Awaiting("plan"); var o = PipelineEngine.Approve(P, t, Now);

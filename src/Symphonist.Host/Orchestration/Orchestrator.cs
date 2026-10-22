@@ -129,6 +129,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 log.LogError(e, "Advancing {Project}/{Key} failed", p.Id, t.Key);
+                await TryAddEventOnceAsync(t, $"{t.StageId} error: {e.Message}");
             }
         }
     }
@@ -153,7 +154,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
             var ignoredBackwardMove = t.Status is StageStatus.Pending or StageStatus.Running
                                       && IsEarlierStageStatus(p, t.StageId, s.Status);
-            var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t.WaitingSince), now);
+            var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t), now);
             await store.SaveAsync(t, ct); // LastSourceStatus changes even when the outcome doesn't
             if (ignoredBackwardMove)
                 await AddEventAsync(t, $"source moved to '{s.Status}' while {t.StageId} is {t.Status}; ignored", ct);
@@ -178,7 +179,16 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 t.Status = StageStatus.Running;
                 t.UpdatedAt = time.GetUtcNow();
                 await store.SaveAsync(t, ct);
-                inFlight[t.Id] = RunAgentStageAsync(p, io, Copy(t), source);
+                inFlight[t.Id] = RunAgentStageAsync(p, io, t.Clone(), source);
+                return;
+
+            case StageStatus.Running when agentStage:
+                // Not in flight (in-flight tickets are skipped), so its run's result was lost: retry like a restart.
+                t.Status = StageStatus.Pending;
+                t.Attempts++;
+                t.UpdatedAt = time.GetUtcNow();
+                await store.SaveAsync(t, ct);
+                await AddEventAsync(t, "run lost; retrying", ct);
                 return;
 
             case StageStatus.Pending or StageStatus.Running when !agentStage:
@@ -252,6 +262,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         catch (Exception e)
         {
             log.LogError(e, "Applying agent run result for {Project}/{Key} failed", p.Id, run.Key);
+            await TryAddEventOnceAsync(run, $"{run.StageId} run result could not be applied: {e.Message}");
         }
         finally
         {
@@ -327,6 +338,19 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await AddEventAsync(t, message, ct);
     }
 
+    /// <summary>Best effort: records an error event, never throws (the store itself may be what failed).</summary>
+    private async Task TryAddEventOnceAsync(Ticket t, string message)
+    {
+        try
+        {
+            await AddEventOnceAsync(t, message, CancellationToken.None);
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Recording event for {Project}/{Key} failed", t.ProjectId, t.Key);
+        }
+    }
+
     private ProjectIntegrations IntegrationsFor(ProjectConfig p)
     {
         if (io.TryGetValue(p.Id, out var cached) && ReferenceEquals(cached.Config, p)) return cached.Io;
@@ -346,21 +370,19 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         p.Pipeline.TakeWhile(s => s.Id != stageId)
             .Any(s => s.EntryStatuses.Any(e => Same(e, status)) || Same(s.OnEnterStatus, status));
 
-    /// <summary>Newest comment of the developer's made since the ticket started waiting (or overall when not waiting).</summary>
-    private static string? LatestFeedback(SourceTicket s, DateTimeOffset? waitingSince) =>
-        s.Comments.Where(c => c.IsMine && (waitingSince is null || c.Created > waitingSince))
+    /// <summary>
+    /// The developer's newest comment since the ticket started waiting (or entered its stage), excluding the comments
+    /// Symphonist posted under the developer's account.
+    /// </summary>
+    private static string? LatestFeedback(SourceTicket s, Ticket t)
+    {
+        var since = t.WaitingSince ?? t.StageStartedAt;
+        return s.Comments
+            .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
             .MaxBy(c => c.Created)?.Body;
+    }
 
     private static bool IsActive(Ticket t) => t.Status is not (StageStatus.Done or StageStatus.Blocked);
 
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-
-    private static Ticket Copy(Ticket t) => new()
-    {
-        Id = t.Id, ProjectId = t.ProjectId, Key = t.Key, Title = t.Title, StageId = t.StageId, Status = t.Status,
-        BlockedReason = t.BlockedReason, Feedback = t.Feedback, Attempts = t.Attempts, LastSourceStatus = t.LastSourceStatus,
-        Branch = t.Branch, SpecPath = t.SpecPath, PlanPath = t.PlanPath, PullRequestId = t.PullRequestId,
-        MergeCommit = t.MergeCommit, ReleasePullRequestId = t.ReleasePullRequestId, ReleaseMergeCommit = t.ReleaseMergeCommit,
-        CreatedAt = t.CreatedAt, UpdatedAt = t.UpdatedAt, StageStartedAt = t.StageStartedAt, WaitingSince = t.WaitingSince,
-    };
 }

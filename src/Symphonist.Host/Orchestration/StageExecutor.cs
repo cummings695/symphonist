@@ -69,7 +69,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         var run = await RunAgentAsync(p, t, source, StageKind.Triage, ct);
         if (run.Failure is not null) return run.Failure;
 
-        await io.Tracker.CommentAsync(t.Key, run.Output!.CommentMarkdown ?? run.Output.Summary, ct);
+        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(run.Output!.CommentMarkdown ?? run.Output.Summary), ct);
         return Completed;
     }
 
@@ -88,8 +88,8 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         t.PlanPath = output.PlanPath;
 
         var sc = io.SourceControl;
-        await io.Tracker.CommentAsync(t.Key,
-            $"{output.Summary}\n\nSpec: {sc.BranchFileUrl(run.Branch, output.SpecPath)}\nPlan: {sc.BranchFileUrl(run.Branch, output.PlanPath)}",
+        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(
+            $"{output.Summary}\n\nSpec: {sc.BranchFileUrl(run.Branch, output.SpecPath)}\nPlan: {sc.BranchFileUrl(run.Branch, output.PlanPath)}"),
             ct);
         return Completed;
     }
@@ -107,7 +107,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
 
         if (t.PullRequestId is not null)
         {
-            await io.Tracker.CommentAsync(t.Key, "PR updated", ct);
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
             return Completed;
         }
 
@@ -115,7 +115,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         if (source is not null) description += $"\n\nTicket: {source.WebUrl}";
         var pr = await FindOrOpenAsync(io.SourceControl, run.Branch, p.Repo.MainBranch, title, description, ct);
         t.PullRequestId = pr.Id;
-        await io.Tracker.CommentAsync(t.Key, $"PR ready for review: {pr.WebUrl}", ct);
+        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"PR ready for review: {pr.WebUrl}"), ct);
         return Completed;
     }
 
@@ -151,7 +151,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         var pr = await FindOrOpenAsync(io.SourceControl, p.Repo.MainBranch, p.Repo.ProductionBranch, title,
             $"{title}: {t.Title}", ct);
         t.ReleasePullRequestId = pr.Id;
-        await io.Tracker.CommentAsync(t.Key, $"Release PR: {pr.WebUrl}", ct);
+        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Release PR: {pr.WebUrl}"), ct);
         return Completed;
     }
 
