@@ -80,11 +80,24 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
     private static readonly IReadOnlyDictionary<string, string?> GitEnv =
         new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" };
 
+    /// <summary>
+    /// The agent can write to the workspace, so never let repo-local config run code on the host: hooks come from an
+    /// empty directory Symphonist owns (outside any mounted workspace) and fsmonitor is off. These <c>-c</c> options
+    /// take precedence over <c>.git/config</c>.
+    /// </summary>
+    private string[] Hardened(string[] args)
+    {
+        var emptyHooks = Path.Combine(workRoot, ".empty-hooks");
+        Directory.CreateDirectory(emptyHooks);
+        return ["-c", $"core.hooksPath={emptyHooks}", "-c", "core.fsmonitor=false", .. args];
+    }
+
     private async Task<ProcessResult> RunAsync(string? dir, CancellationToken ct, params string[] args)
     {
         try
         {
-            return await runner.RunAsync(new ProcessSpec("git", args, dir, Environment: GitEnv, Timeout: GitTimeout), ct);
+            return await runner.RunAsync(
+                new ProcessSpec("git", Hardened(args), dir, Environment: GitEnv, Timeout: GitTimeout), ct);
         }
         catch (Win32Exception ex)
         {

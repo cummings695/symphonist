@@ -123,6 +123,43 @@ public sealed class GitWorkspaceTests : IDisposable
         Assert.Contains("does not match any", ex.Message);
     }
 
+    private static void WriteHook(string path, string body)
+    {
+        File.WriteAllText(path, "#!/bin/sh\n" + body + "\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    private static string ShPath(string p) => p.Replace('\\', '/');
+
+    [Fact]
+    public async Task Hooks_planted_in_the_workspace_never_run_on_the_host()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        var marker = Path.Combine(root, "hook-ran");
+        foreach (var hook in new[] { "pre-commit", "commit-msg", "post-commit", "pre-push" })
+            WriteHook(Path.Combine(ws, ".git", "hooks", hook), $"touch '{ShPath(marker)}'\nexit 1");
+        File.WriteAllText(Path.Combine(ws, "x.txt"), "new");
+
+        Assert.True(await git.CommitAllAsync(ws, "add x", default));
+        await git.PushAsync(ws, "symphonist/ORD-1", default);
+        Assert.False(File.Exists(marker), "a hook from the workspace's .git ran on the host");
+    }
+
+    [Fact]
+    public async Task Fsmonitor_configured_in_the_workspace_never_runs_on_the_host()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        var marker = Path.Combine(root, "fsmonitor-ran");
+        var script = Path.Combine(ws, ".git", "evil-fsmonitor");
+        WriteHook(script, $"touch '{ShPath(marker)}'\nexit 1");
+        Run(ws, "config", "core.fsmonitor", ShPath(script));
+        File.WriteAllText(Path.Combine(ws, "x.txt"), "new");
+
+        Assert.True(await git.CommitAllAsync(ws, "add x", default));
+        Assert.False(File.Exists(marker), "core.fsmonitor from the workspace's .git ran on the host");
+    }
+
     private sealed class FailFetchOnce(IProcessRunner inner) : IProcessRunner
     {
         public bool Failed;
