@@ -62,7 +62,8 @@ public sealed class TicketsApiTests : IDisposable
             s.AddSingleton<ISecretStore>(new NoSecrets());
             foreach (var name in new[] { IntegrationFactory.JiraClient, IntegrationFactory.BitbucketClient })
                 s.AddHttpClient(name).ConfigurePrimaryHttpMessageHandler(() => new UnavailableHandler(this));
-            // Drive the orchestrator only through the API (no background ticks).
+            // Drive the orchestrator only through the API (no background ticks, not even after commands).
+            s.AddSingleton(new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false));
             var service = s.Single(d => d.ImplementationType == typeof(OrchestratorService));
             s.Remove(service);
         }));

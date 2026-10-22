@@ -6,7 +6,9 @@ using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
 
-public sealed record OrchestratorOptions(TimeSpan PollInterval, int MaxConcurrentAgentRuns)
+/// <param name="TickAfterCommands">An approve / send-back / unblock that changed a ticket starts a tick right away
+/// (coalesced) instead of waiting for the next poll.</param>
+public sealed record OrchestratorOptions(TimeSpan PollInterval, int MaxConcurrentAgentRuns, bool TickAfterCommands = true)
 {
     public OrchestratorOptions() : this(TimeSpan.FromMinutes(2), 1) { }
 }
@@ -25,6 +27,20 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
     private readonly CancellationTokenSource shutdown = new();
     private readonly ConcurrentDictionary<string, string> problems = new(StringComparer.Ordinal);
+    private CoalescedTrigger? tickTrigger;
+
+    /// <summary>The background tick requested by commands (created on first use).</summary>
+    private CoalescedTrigger TickTrigger => LazyInitializer.EnsureInitialized(ref tickTrigger, () => new CoalescedTrigger(async () =>
+    {
+        try
+        {
+            await TickAsync(shutdown.Token);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Host shutdown.
+        }
+    }, log));
     private readonly Dictionary<string, (ProjectConfig Config, ProjectIntegrations Io)> io = []; // used under gate only
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
 
@@ -61,11 +77,18 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
     }
 
-    /// <summary>Completes once no agent runs are in flight and all their results have been applied.</summary>
+    /// <summary>
+    /// Completes once no agent runs are in flight, all their results have been applied, and no background tick
+    /// (requested by a command) is running or pending.
+    /// </summary>
     public async Task WhenIdleAsync()
     {
-        while (inFlight.Values.ToArray() is { Length: > 0 } running)
+        while (true)
+        {
+            await (tickTrigger?.WhenIdleAsync() ?? Task.CompletedTask);
+            if (inFlight.Values.ToArray() is not { Length: > 0 } running) return;
             await Task.WhenAll(running);
+        }
     }
 
     public Task<TransitionOutcome> ApproveAsync(string projectId, string key, CancellationToken ct) =>
@@ -91,23 +114,27 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         Func<ProjectConfig, Ticket, DateTimeOffset, TransitionOutcome> apply, CancellationToken ct)
     {
         var p = projects.Get(projectId);
+        TransitionOutcome outcome;
         await gate.WaitAsync(ct);
         try
         {
             var t = await store.FindAsync(projectId, key, ct)
                     ?? throw new KeyNotFoundException($"Ticket '{key}' not found in project '{projectId}'");
-            var outcome = apply(p, t, time.GetUtcNow());
+            outcome = apply(p, t, time.GetUtcNow());
             if (outcome.Changed)
             {
                 await store.SaveAsync(t, ct);
                 await ApplyAsync(IntegrationsFor(p), t, outcome, ct);
             }
-            return outcome;
         }
         finally
         {
             gate.Release();
         }
+
+        // Act on the change now (e.g. start the next stage's run) rather than at the next poll.
+        if (outcome.Changed && options.TickAfterCommands) TickTrigger.Request();
+        return outcome;
     }
 
     private async Task TickProjectAsync(ProjectConfig p, CancellationToken ct)

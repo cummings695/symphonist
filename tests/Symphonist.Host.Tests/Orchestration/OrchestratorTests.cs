@@ -73,10 +73,11 @@ public sealed class OrchestratorTests : IDisposable
 
     private FakeIntegrationFactory? factory;
 
-    private Orchestrator Create(int maxRuns = 1) =>
+    /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
+    private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
             new StageExecutor(git, agent, store, time), time,
-            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns), NullLogger<Orchestrator>.Instance);
+            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
 
     private void Source(string key, string status, params SourceComment[] comments) =>
         tracker.Tickets.Add(new SourceTicket(key, $"Title {key}", $"Description {key}", status, comments,
@@ -262,6 +263,33 @@ public sealed class OrchestratorTests : IDisposable
         await TickIdle(o);
         Assert.Contains("use X", Assert.Single(agent.Prompts));
         Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+    }
+
+    [Fact] public async Task Changing_command_triggers_a_background_tick()
+    {
+        Assert.True(new OrchestratorOptions().TickAfterCommands);
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create(tickAfterCommands: true);
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Single(agent.Requests); // the implement run started without waiting for the poll interval
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
+    [Fact] public async Task Unchanged_command_does_not_tick()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending, "Planned");
+        var queries = 0;
+        tracker.OnQuery = () => { Interlocked.Increment(ref queries); return tracker.Tickets.ToList(); };
+        var o = Create(tickAfterCommands: true);
+
+        var outcome = await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await o.WhenIdleAsync();
+
+        Assert.False(outcome.Changed);
+        Assert.Equal(0, queries);
     }
 
     [Fact] public async Task Commands_on_unknown_ticket_throw()
