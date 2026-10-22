@@ -1,0 +1,66 @@
+# Example Symphonist project. Copy to ~/.symphonist/projects/<anything>.yaml (or $SYMPHONIST_HOME/projects/) and
+# replace the placeholder values. Field names are camelCase. Invalid files are logged and skipped by the host.
+
+id: orders                      # unique project id; used in CLI commands (symphonist show orders ORD-1)
+name: Orders (Acme)             # display name (defaults to id)
+
+tracker:
+  type: jira                    # only "jira" is supported
+  site: https://acme.atlassian.net
+  email: dev@example.com        # Atlassian account email (basic auth with the API token)
+  tokenSecret: jira-acme        # name of the secret holding the Atlassian API token: symphonist secret set jira-acme
+  # Tickets Symphonist works on. A ticket that stops matching is Blocked ("no longer matches tracker query").
+  jql: assignee = currentUser() AND labels = Claude AND statusCategory != Done
+
+repo:
+  type: bitbucket               # only "bitbucket" is supported
+  workspace: acme               # Bitbucket workspace id
+  slug: orders                  # repository slug
+  localPath: ../acme-orders     # existing local clone; relative paths resolve against this file's directory
+  mainBranch: main              # default: main (feature PRs target it)
+  productionBranch: production  # default: production (release PRs target it)
+  email: dev@example.com        # Bitbucket account email
+  tokenSecret: bitbucket-acme   # secret holding the Bitbucket API token: symphonist secret set bitbucket-acme
+  # mergeStrategy: merge_commit # default: merge_commit
+
+build:
+  type: bitbucket-pipelines     # build/release status is read from Bitbucket Pipelines
+  # timeoutMinutes: 45          # default: 45
+
+agent:
+  type: claude-code             # only "claude-code" is supported
+  # isolation: container        # default: container (Docker sandbox). "host" runs claude directly on this machine;
+  #                             # host isolation REQUIRES allowedTools, e.g. allowedTools: [Read, Edit, "Bash(git:*)"]
+  # allowedTools: []            # passed to claude --allowedTools (host mode only)
+  # Extra hosts the container may reach, on top of the built-in Claude Code ones (api.anthropic.com,
+  # statsig.anthropic.com, sentry.io). The firewall only permits HTTPS/HTTP (TCP 443/80) to these hosts.
+  allowedDomains: [api.nuget.org, registry.npmjs.org]
+  # timeoutMinutes: 60          # per agent run; default: 60
+  # model: ""                   # optional Claude model override
+  # image: ""                   # optional Docker image; default: the image built from the bundled Dockerfile
+
+# Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
+# maxAttemptsPerStage: 3
+
+# Stages run in order; the last one must be kind "done".
+#   kind:                triage | plan | implement | build | uat | release | deploy | done
+#   gate:                human = wait for approval (symphonist approve, or move the card to approvedWhenStatus);
+#                        none (default) = continue automatically
+#   entryStatuses:       tracker statuses that mean "start at this stage" when a ticket is first picked up
+#   onEnterStatus:       move the card to this status when the stage starts
+#   onGateStatus:        move the card to this status when the stage is waiting for your approval
+#   approvedWhenStatus:  moving the card to this status approves the stage
+# Moving a card backwards to an earlier stage's status sends it back; your latest comment that does not end with
+# "— posted by Symphonist" is passed to the agent as feedback.
+pipeline:
+  - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
+  - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
+  - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
+  - { id: build,     kind: build }
+  - { id: release,   kind: release,   gate: human }
+  - { id: deploy,    kind: deploy }
+  - { id: done,      kind: done,      onEnterStatus: Done }
+
+# Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
+# prompts:
+#   plan: prompts/plan.md

@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <None Update="Config/orders.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../samples/projects/orders.example.yaml" Link="Config/orders.example.yaml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,16 @@
+using Symphonist.Core.Config;
+
+namespace Symphonist.Core.Tests.Config;
+
+public class SampleConfigTests
+{
+    [Fact]
+    public void Example_project_in_samples_loads()
+    {
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"));
+        Assert.Equal("orders", p.Id);
+        Assert.Equal(Isolation.Container, p.Agent.Isolation);
+        Assert.Equal(7, p.Pipeline.Count);
+        Assert.Equal(StageKind.Done, p.Pipeline[^1].Kind);
+    }
+}
