@@ -573,6 +573,39 @@ public sealed class OrchestratorTests : IDisposable
         Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
     }
 
+    [Fact] public async Task Service_stop_cancels_in_flight_runs_and_waits_for_their_cleanup()
+    {
+        Source("ORD-1", "Planned");
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanedUp = false;
+        agent.OnRunCancellableAsync = async (_, ct) =>
+        {
+            started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+                return FakeAgentRunner.Fail("not cancelled");
+            }
+            finally
+            {
+                await Task.Delay(50, CancellationToken.None); // like ClaudeCodeRunner's docker rm -f
+                Volatile.Write(ref cleanedUp, true);
+            }
+        };
+        var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
+        var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
+            new StageExecutor(git, agent, store, time), time, options, NullLogger<Orchestrator>.Instance);
+        using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
+
+        await service.StartAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.True(Volatile.Read(ref cleanedUp), "StopAsync returned before the agent run was cancelled and cleaned up");
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status); // reset to Pending by recovery at next start
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(1));
+    }
+
     [Fact] public async Task Full_pipeline_end_to_end_with_fakes()
     {
         Source("ORD-1", "Backlog");

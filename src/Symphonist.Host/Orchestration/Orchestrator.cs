@@ -74,8 +74,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     public Task<TransitionOutcome> UnblockAsync(string projectId, string key, CancellationToken ct) =>
         CommandAsync(projectId, key, (_, t, now) => PipelineEngine.Unblock(t, now), ct);
 
-    /// <summary>Cancels in-flight agent runs (their tickets stay Running and are reset by <see cref="RecoverAsync"/>).</summary>
-    public void Dispose() => shutdown.Cancel();
+    /// <summary>
+    /// Cancels in-flight agent runs; their runners clean up (e.g. remove the container) before the runs complete. The
+    /// tickets stay Running and are reset by <see cref="RecoverAsync"/> at the next start. Await
+    /// <see cref="WhenIdleAsync"/> afterwards for the runs to finish.
+    /// </summary>
+    public void CancelRuns() => shutdown.Cancel();
+
+    public void Dispose() => CancelRuns();
 
     private async Task<TransitionOutcome> CommandAsync(string projectId, string key,
         Func<ProjectConfig, Ticket, DateTimeOffset, TransitionOutcome> apply, CancellationToken ct)

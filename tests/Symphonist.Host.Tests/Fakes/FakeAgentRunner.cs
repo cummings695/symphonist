@@ -16,6 +16,9 @@ public sealed class FakeAgentRunner : IAgentRunner
     /// <summary>Asynchronous fallback (e.g. to block a run on a TaskCompletionSource); takes precedence over <see cref="OnRun"/>.</summary>
     public Func<AgentRunRequest, Task<AgentRunResult>>? OnRunAsync { get; set; }
 
+    /// <summary>Like <see cref="OnRunAsync"/>, but sees the run's cancellation token; takes precedence over both.</summary>
+    public Func<AgentRunRequest, CancellationToken, Task<AgentRunResult>>? OnRunCancellableAsync { get; set; }
+
     public static StageOutput Output(string summary = "done", string? comment = null, string? specPath = null,
         string? planPath = null, string? prTitle = null, string? prDescription = null) =>
         new("completed", summary, comment, specPath, planPath, prTitle, prDescription, null);
@@ -30,6 +33,7 @@ public sealed class FakeAgentRunner : IAgentRunner
     {
         lock (Requests) Requests.Add(request);
         if (Results.Count > 0) return Task.FromResult(Results.Dequeue());
+        if (OnRunCancellableAsync is not null) return OnRunCancellableAsync(request, ct);
         return OnRunAsync?.Invoke(request) ?? Task.FromResult(OnRun(request));
     }
 }

@@ -47,6 +47,8 @@ foreach (var client in new[] { IntegrationFactory.JiraClient, IntegrationFactory
 #pragma warning restore EXTEXP0001
 }
 
+// Room for OrchestratorService to cancel agent runs and wait for their containers to be removed.
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = OrchestratorService.RunDrainTimeout + TimeSpan.FromSeconds(15));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new OrchestratorOptions());
 builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
