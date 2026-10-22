@@ -28,6 +28,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     public static readonly IReadOnlyList<string> BaseAllowedDomains =
         ["api.anthropic.com", "statsig.anthropic.com", "sentry.io"];
 
+    public bool ProvidesIsolation => true;
+
     /// <summary>Makes sure <paramref name="image"/> exists locally, building the default image if it is missing.</summary>
     public async Task EnsureImageAsync(string image, CancellationToken ct)
     {

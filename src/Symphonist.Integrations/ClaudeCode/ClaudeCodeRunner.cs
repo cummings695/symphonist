@@ -15,7 +15,9 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
     {
         var settings = request.Settings;
         var args = new List<string> { "-p", "--output-format", "json", "--json-schema", StageOutputSchema.Json };
-        if (settings.Isolation == Isolation.Container) args.Add("--dangerously-skip-permissions");
+        // Bypass permission prompts only when the launcher actually sandboxes the run; config alone is not enough.
+        if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation)
+            args.Add(HostLauncher.PermissionBypassFlag);
         else { args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools)); }
         if (!string.IsNullOrWhiteSpace(settings.Model)) { args.Add("--model"); args.Add(settings.Model); }
 
@@ -56,7 +58,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         var isError = root.TryGetProperty("is_error", out var ie) && ie.ValueKind == JsonValueKind.True;
         var resultText = root.TryGetProperty("result", out var rt) && rt.ValueKind == JsonValueKind.String
             ? rt.GetString() : null;
-        var output = ReadOutput(root, resultText);
+        var output = ReadOutput(root);
 
         if (result.ExitCode != 0 || isError)
             return Fail(FirstNonEmpty(Tail(result.StandardError), resultText,
@@ -68,14 +70,13 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         return new AgentRunResult(true, output, cost, duration, null, rawLog);
     }
 
-    private static StageOutput? ReadOutput(JsonElement root, string? resultText)
+    /// <summary>Stage output comes only from schema-validated <c>structured_output</c>, never from free text.</summary>
+    private static StageOutput? ReadOutput(JsonElement root)
     {
         try
         {
             if (root.TryGetProperty("structured_output", out var so) && so.ValueKind == JsonValueKind.Object)
                 return Validate(so.Deserialize<StageOutput>(Options));
-            if (resultText is not null)
-                return Validate(JsonSerializer.Deserialize<StageOutput>(resultText, Options));
         }
         catch (JsonException) { }
         return null;

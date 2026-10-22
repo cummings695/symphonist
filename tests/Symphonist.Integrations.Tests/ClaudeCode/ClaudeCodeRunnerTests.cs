@@ -1,6 +1,7 @@
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Integrations.ClaudeCode;
+using Symphonist.Integrations.Containers;
 using Symphonist.Integrations.Processes;
 
 namespace Symphonist.Integrations.Tests.ClaudeCode;
@@ -20,10 +21,17 @@ public class ClaudeCodeRunnerTests
         }
     }
 
+    /// <summary>Passes the command through unchanged, reporting the given isolation capability.</summary>
+    private sealed class PassthroughLauncher(bool providesIsolation) : IAgentLauncher
+    {
+        public bool ProvidesIsolation => providesIsolation;
+        public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request) => agentCommand;
+    }
+
     private readonly FakeProcessRunner fake = new();
     private readonly ClaudeCodeRunner runner;
 
-    public ClaudeCodeRunnerTests() => runner = new ClaudeCodeRunner(fake, new HostLauncher());
+    public ClaudeCodeRunnerTests() => runner = new ClaudeCodeRunner(fake, new PassthroughLauncher(true));
 
     private static AgentRunRequest Request(Isolation isolation = Isolation.Container, string[]? tools = null,
         string? model = null) =>
@@ -56,6 +64,51 @@ public class ClaudeCodeRunnerTests
         await runner.RunAsync(Request(Isolation.Host, tools: ["Read", "Bash(dotnet test:*)"]), default);
         Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
         Assert.Equal("Read,Bash(dotnet test:*)", ArgAfter(fake.Last, "--allowedTools"));
+
+        var onHost = new ClaudeCodeRunner(fake, new HostLauncher());
+        await onHost.RunAsync(Request(Isolation.Host, tools: ["Read"]), default);
+        Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
+        Assert.Equal("Read", ArgAfter(fake.Last, "--allowedTools"));
+    }
+
+    [Fact]
+    public async Task Container_settings_with_host_launcher_fail_closed()
+    {
+        var onHost = new ClaudeCodeRunner(fake, new HostLauncher());
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => onHost.RunAsync(Request(Isolation.Container), default));
+        Assert.Equal("container isolation requested but HostLauncher cannot provide it", ex.Message);
+        Assert.Null(fake.Last);
+    }
+
+    [Fact]
+    public async Task Container_settings_without_an_isolating_launcher_never_bypass()
+    {
+        var unisolated = new ClaudeCodeRunner(fake, new PassthroughLauncher(false));
+        await unisolated.RunAsync(Request(Isolation.Container, tools: ["Read"]), default);
+        Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
+        Assert.Equal("Read", ArgAfter(fake.Last, "--allowedTools"));
+    }
+
+    [Fact]
+    public async Task Container_settings_with_docker_launcher_bypass_inside_the_container()
+    {
+        var inDocker = new ClaudeCodeRunner(fake, new DockerLauncher(fake, "/ctx", _ => null));
+        await inDocker.RunAsync(Request(Isolation.Container), default);
+        Assert.Equal("docker", fake.Last.FileName);
+        var args = fake.Last.Arguments.ToList();
+        Assert.True(args.IndexOf("--dangerously-skip-permissions") > args.IndexOf(DockerLauncher.DefaultImage));
+        Assert.Contains(DockerLauncher.DefaultImage, args);
+    }
+
+    [Fact]
+    public void Host_launcher_rejects_permission_bypass()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => new HostLauncher().Wrap(
+            new ProcessSpec("claude", ["-p", "--dangerously-skip-permissions"]), Request(Isolation.Host)));
+        Assert.Contains("--dangerously-skip-permissions", ex.Message);
+        Assert.False(new HostLauncher().ProvidesIsolation);
+        Assert.True(new DockerLauncher(fake, "/ctx", _ => null).ProvidesIsolation);
     }
 
     [Fact]
@@ -79,13 +132,13 @@ public class ClaudeCodeRunnerTests
     }
 
     [Fact]
-    public async Task Falls_back_to_result_string_when_structured_output_absent()
+    public async Task Does_not_trust_a_json_result_string_when_structured_output_absent()
     {
         fake.Returns(0, """{"is_error":false,"result":"{\"status\":\"completed\",\"summary\":\"viaresult\",\"tests_passed\":true}"}""");
         var r = await runner.RunAsync(Request(), default);
-        Assert.True(r.Succeeded);
-        Assert.Equal("viaresult", r.Output!.Summary);
-        Assert.True(r.Output.TestsPassed);
+        Assert.False(r.Succeeded);
+        Assert.Null(r.Output);
+        Assert.Equal("missing structured output", r.Error);
     }
 
     [Fact]
