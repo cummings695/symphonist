@@ -1,0 +1,27 @@
+{
+  "expand": "transitions",
+  "transitions": [
+    {
+      "id": "21",
+      "name": "Start progress",
+      "to": { "self": "https://example.atlassian.net/rest/api/3/status/3", "id": "3", "name": "In Progress",
+              "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+      "hasScreen": false,
+      "isGlobal": false,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false
+    },
+    {
+      "id": "31",
+      "name": "Submit for review",
+      "to": { "self": "https://example.atlassian.net/rest/api/3/status/10002", "id": "10002", "name": "In Review",
+              "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+      "hasScreen": false,
+      "isGlobal": false,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false
+    }
+  ]
+}

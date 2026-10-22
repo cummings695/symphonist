@@ -1,0 +1,61 @@
+{
+  "issues": [
+    {
+      "expand": "",
+      "id": "10001",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10001",
+      "key": "PROJ-1",
+      "fields": {
+        "summary": "Add login throttling",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            { "type": "paragraph", "content": [ { "type": "text", "text": "Throttle failed logins." } ] },
+            { "type": "paragraph", "content": [
+              { "type": "text", "text": "After five attempts" },
+              { "type": "hardBreak" },
+              { "type": "text", "text": "lock for 15 minutes." }
+            ] }
+          ]
+        },
+        "status": { "id": "10000", "name": "Planned" },
+        "comment": {
+          "comments": [
+            {
+              "id": "10102",
+              "author": { "accountId": "5b10a2844c20165700ede21g", "displayName": "Dana Developer" },
+              "body": { "type": "doc", "version": 1, "content": [
+                { "type": "paragraph", "content": [ { "type": "text", "text": "Plan posted." } ] } ] },
+              "created": "2026-03-02T10:15:30.123+0000"
+            },
+            {
+              "id": "10101",
+              "author": { "accountId": "712020:aaaa-bbbb", "displayName": "Pat Product" },
+              "body": { "type": "doc", "version": 1, "content": [
+                { "type": "paragraph", "content": [ { "type": "text", "text": "Please keep it simple." } ] } ] },
+              "created": "2026-03-01T09:00:00.000+0000"
+            }
+          ],
+          "self": "https://example.atlassian.net/rest/api/3/issue/10001/comment",
+          "maxResults": 2,
+          "total": 2,
+          "startAt": 0
+        }
+      }
+    },
+    {
+      "expand": "",
+      "id": "10002",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10002",
+      "key": "PROJ-2",
+      "fields": {
+        "summary": "Fix typo on dashboard",
+        "description": null,
+        "status": { "id": "10001", "name": "To Do" },
+        "comment": { "comments": [], "self": "https://example.atlassian.net/rest/api/3/issue/10002/comment", "maxResults": 0, "total": 0, "startAt": 0 }
+      }
+    }
+  ],
+  "nextPageToken": "p2"
+}

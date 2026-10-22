@@ -1,0 +1,8 @@
+{
+  "self": "https://example.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede21g",
+  "accountId": "5b10a2844c20165700ede21g",
+  "emailAddress": "dev@example.com",
+  "displayName": "Dana Developer",
+  "active": true,
+  "timeZone": "Europe/London"
+}

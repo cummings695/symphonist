@@ -1,0 +1,23 @@
+{
+  "issues": [
+    {
+      "expand": "",
+      "id": "10003",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10003",
+      "key": "PROJ-3",
+      "fields": {
+        "summary": "Export report as CSV",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            { "type": "paragraph", "content": [ { "type": "text", "text": "Users want CSV export." } ] }
+          ]
+        },
+        "status": { "id": "10000", "name": "Planned" },
+        "comment": { "comments": [], "self": "https://example.atlassian.net/rest/api/3/issue/10003/comment", "maxResults": 0, "total": 0, "startAt": 0 }
+      }
+    }
+  ],
+  "isLast": true
+}
