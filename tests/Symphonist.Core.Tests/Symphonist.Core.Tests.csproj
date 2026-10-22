@@ -22,4 +22,8 @@
     <ProjectReference Include="..\..\src\Symphonist.Core\Symphonist.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Config/orders.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

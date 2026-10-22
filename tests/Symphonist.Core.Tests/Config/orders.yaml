@@ -1,0 +1,32 @@
+id: orders
+name: Orders (Acme)
+tracker:
+  type: jira
+  site: https://acme.atlassian.net
+  email: dev@example.com
+  tokenSecret: jira-acme
+  jql: assignee = currentUser() AND labels = Claude AND statusCategory != Done
+repo:
+  type: bitbucket
+  workspace: acme
+  slug: orders
+  localPath: ../acme-orders
+  mainBranch: main
+  productionBranch: production
+  email: dev@example.com
+  tokenSecret: bitbucket-acme
+build:
+  type: bitbucket-pipelines
+agent:
+  type: claude-code
+  allowedDomains: [api.nuget.org, registry.npmjs.org]
+pipeline:
+  - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
+  - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
+  - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
+  - { id: build,     kind: build }
+  - { id: release,   kind: release,   gate: human }
+  - { id: deploy,    kind: deploy }
+  - { id: done,      kind: done,      onEnterStatus: Done }
+prompts:
+  plan: prompts/plan.md
