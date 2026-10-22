@@ -12,5 +12,6 @@ public class SampleConfigTests
         Assert.Equal(Isolation.Container, p.Agent.Isolation);
         Assert.Equal(7, p.Pipeline.Count);
         Assert.Equal(StageKind.Done, p.Pipeline[^1].Kind);
+        Assert.EndsWith("acme-orders", p.Repo.LocalPath);
     }
 }

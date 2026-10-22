@@ -16,7 +16,9 @@ repo:
   type: bitbucket               # only "bitbucket" is supported
   workspace: acme               # Bitbucket workspace id
   slug: orders                  # repository slug
-  localPath: ../acme-orders     # existing local clone; relative paths resolve against this file's directory
+  # Existing local clone (placeholder: replace with yours). Use an absolute path: a relative path resolves against the
+  # projects folder (the folder holding this file), and "~" is not expanded.
+  localPath: C:/src/acme-orders
   mainBranch: main              # default: main (feature PRs target it)
   productionBranch: production  # default: production (release PRs target it)
   email: dev@example.com        # Bitbucket account email
