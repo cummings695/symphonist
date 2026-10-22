@@ -4,7 +4,7 @@ using Symphonist.Core.Integrations;
 
 namespace Symphonist.Cli;
 
-/// <summary>The <c>symphonist</c> command tree. Exit codes: 0 success, 1 API/usage error, 2 host not running.</summary>
+/// <summary>The <c>symphonist</c> command tree. Exit codes: 0 success, 1 API/usage/other error, 2 host not running.</summary>
 public static class Cli
 {
     public const int Ok = 0, ApiError = 1, HostDown = 2;
@@ -92,7 +92,14 @@ public static class Cli
             var value = interactive ? ReadHidden(stdout, name) : stdin.ReadLine();
             value = value?.TrimEnd('\r', '\n');
             if (string.IsNullOrEmpty(value)) throw new ApiException("Secret value must not be empty");
-            secrets.Set(name, value);
+            try
+            {
+                secrets.Set(name, value);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                throw new ApiException($"Could not save secret '{name}': {e.Message}");
+            }
             stdout.WriteLine($"Secret '{name}' saved");
             return Task.CompletedTask;
         });
@@ -118,6 +125,12 @@ public static class Cli
                 catch (ApiException e)
                 {
                     stderr.WriteLine(e.Message);
+                    return ApiError;
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    // Anything else: a one-line message, never a stack trace.
+                    stderr.WriteLine($"Error: {e.Message}");
                     return ApiError;
                 }
             });

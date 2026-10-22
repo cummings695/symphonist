@@ -20,6 +20,19 @@ public sealed class CliTests
         public void Remove(string name) => Values.Remove(name);
     }
 
+    private sealed class BrokenSecrets : ISecretStore
+    {
+        public string? Get(string name) => null;
+        public void Set(string name, string value) => throw new InvalidOperationException("no credential store on this machine");
+        public void Remove(string name) { }
+    }
+
+    private sealed class FailingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            throw new InvalidOperationException("unexpected failure");
+    }
+
     private sealed class ThrowingHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
@@ -246,6 +259,29 @@ public sealed class CliTests
 
         Assert.Equal(1, r.Exit);
         Assert.Empty(secrets.Values);
+    }
+
+    [Fact]
+    public async Task Secret_set_failure_prints_a_message_and_exits_1()
+    {
+        using var client = new SymphonistClient(new StubHttpHandler(), Token, 5199);
+        var (o, e) = (new StringWriter(), new StringWriter());
+
+        var exit = await Cli.RunAsync(["secret", "set", "jira-token"], client, o, e, new BrokenSecrets(),
+            new StringReader("s3cret\n"), clock: new FixedClock());
+
+        Assert.Equal(1, exit);
+        Assert.Equal("Could not save secret 'jira-token': no credential store on this machine", e.ToString().Trim());
+        Assert.DoesNotContain("s3cret", o.ToString() + e);
+    }
+
+    [Fact]
+    public async Task Unexpected_error_prints_a_message_and_exits_1()
+    {
+        var r = await RunAsync(new FailingHandler(), "", "status");
+
+        Assert.Equal(1, r.Exit);
+        Assert.Equal("Error: unexpected failure", r.Err.Trim());
     }
 
     [Theory]

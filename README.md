@@ -96,7 +96,8 @@ symphonist projects pause <id>              stop working on a project (kept in p
 symphonist projects resume <id>
 ```
 
-Exit codes: `0` success, `1` the host rejected the request (or bad usage), `2` the host is not running.
+Exit codes: `0` success, `1` the host rejected the request, bad usage or another error (one-line message), `2` the host
+is not running.
 
 ### Working from Jira instead
 
