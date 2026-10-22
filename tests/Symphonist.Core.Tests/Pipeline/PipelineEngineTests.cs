@@ -179,6 +179,13 @@ public class PipelineEngineTests
         Assert.Equal(Now, t.UpdatedAt);
     }
 
+    [Fact] public void Unblock_restarts_the_stage_clock()
+    {
+        var t = At("build", StageStatus.Blocked); t.StageStartedAt = Now.AddDays(-1);
+        PipelineEngine.Unblock(t, Now);
+        Assert.Equal(Now, t.StageStartedAt);
+    }
+
     [Fact] public void Changed_transitions_set_UpdatedAt()
     {
         var later = Now.AddHours(1);

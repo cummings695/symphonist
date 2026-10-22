@@ -260,6 +260,21 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Contains("unblocked", store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Unblocked_build_gets_a_fresh_timeout_instead_of_failing_at_once()
+    {
+        await Seed("ORD-1", "build", StageStatus.Blocked, "In Review", t =>
+        {
+            t.MergeCommit = "merge-1";
+            t.StageStartedAt = Now.AddHours(-3); // the build timeout (45 min) expired long ago
+        });
+        var o = Create();
+
+        await o.UnblockAsync("orders", "ORD-1", CancellationToken.None);
+        await TickIdle(o); // no pipeline yet, but the clock restarted at unblock
+
+        Assert.Equal((StageStatus.Running, 0), (store.Single("ORD-1").Status, store.Single("ORD-1").Attempts));
+    }
+
     [Fact] public async Task Source_move_back_sends_back_with_latest_own_comment_as_feedback()
     {
         await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review");

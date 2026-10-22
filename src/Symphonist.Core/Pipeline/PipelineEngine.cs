@@ -136,6 +136,7 @@ public static class PipelineEngine
         t.Status = StageStatus.Pending;
         t.Attempts = 0;
         t.BlockedReason = null;
+        t.StageStartedAt = now; // a fresh start: build/deploy timeouts count from here, not from the original entry
         t.UpdatedAt = now;
         return new(true, null, "unblocked");
     }
