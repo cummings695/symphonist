@@ -185,4 +185,67 @@ public class PipelineEngineTests
         var t = At("plan"); PipelineEngine.StageFailed(P, t, "e", later); Assert.Equal(later, t.UpdatedAt);
         var a = Awaiting("plan"); PipelineEngine.Approve(P, a, later); Assert.Equal(later, a.UpdatedAt);
     }
+    [Fact] public void Moving_back_to_current_stage_enter_status_at_gate_sends_back_to_current_stage()
+    {
+        var t = Awaiting("implement"); t.LastSourceStatus = "In Review";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "In Progress", "fix the tests", Now);
+        Assert.True(o.Changed); Assert.Equal(("implement", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Equal("fix the tests", t.Feedback); Assert.Equal("sent back to implement", o.Message);
+    }
+
+    [Theory]
+    [InlineData(StageStatus.Pending)]
+    [InlineData(StageStatus.Running)]
+    public void Approval_move_while_stage_runs_is_deferred_until_it_succeeds(StageStatus status)
+    {
+        var t = At("plan", status); t.LastSourceStatus = "Planned";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "In Progress", null, Now);
+        Assert.True(o.Changed); Assert.Null(o.SourceStatusToSet);
+        Assert.Equal($"source moved to 'In Progress' while plan is {status}; will apply when the stage finishes", o.Message);
+        Assert.Equal(("plan", status, "In Progress"), (t.StageId, t.Status, t.PendingSourceStatus));
+
+        var done = PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal(("implement", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Equal("applying source move to 'In Progress': advanced to implement", done.Message);
+        Assert.Equal("In Progress", done.SourceStatusToSet);
+    }
+
+    [Fact] public void Backward_move_while_stage_runs_sends_back_when_it_succeeds_with_latest_feedback()
+    {
+        var t = At("implement", StageStatus.Running); t.LastSourceStatus = "In Progress";
+        PipelineEngine.SourceStatusChanged(P, t, "Planned", "too early", Now);
+        Assert.Equal(("implement", StageStatus.Running, "Planned"), (t.StageId, t.Status, t.PendingSourceStatus));
+
+        var o = PipelineEngine.StageSucceeded(P, t, Now, "rethink the plan");
+        Assert.Equal(("plan", StageStatus.Pending, "rethink the plan"), (t.StageId, t.Status, t.Feedback));
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Equal("applying source move to 'Planned': sent back to plan", o.Message);
+    }
+
+    [Fact] public void Backward_move_while_gateless_stage_runs_sends_back_when_it_succeeds()
+    {
+        var t = At("build", StageStatus.Running); t.LastSourceStatus = "In Review";
+        PipelineEngine.SourceStatusChanged(P, t, "In Progress", null, Now);
+        PipelineEngine.StageSucceeded(P, t, Now, "fix it");
+        Assert.Equal(("implement", StageStatus.Pending, "fix it"), (t.StageId, t.Status, t.Feedback));
+    }
+
+    [Fact] public void Unrelated_move_while_stage_runs_drops_the_deferred_decision()
+    {
+        var t = At("plan", StageStatus.Running); t.LastSourceStatus = "Planned";
+        PipelineEngine.SourceStatusChanged(P, t, "In Progress", null, Now);
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Code Review", null, Now);
+        Assert.Null(t.PendingSourceStatus);
+        PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+    }
+
+    [Fact] public void Status_at_pickup_is_never_an_approval()
+    {
+        var t = PipelineEngine.Create(P, "ORD-1", "t", "Planned", Now);
+        Assert.Null(t.PendingSourceStatus);
+        PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+    }
 }

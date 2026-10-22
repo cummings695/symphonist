@@ -33,7 +33,7 @@ public sealed class SqliteTicketStoreTests : IDisposable
         {
             Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-1", Title = "Title", StageId = "plan",
             Status = StageStatus.AwaitingApproval, BlockedReason = "reason", Feedback = "fb", Attempts = 3,
-            LastSourceStatus = "In Progress", Branch = "feat/x", SpecPath = "s.md", PlanPath = "p.md",
+            LastSourceStatus = "In Progress", PendingSourceStatus = "Planned", Branch = "feat/x", SpecPath = "s.md", PlanPath = "p.md",
             PullRequestId = 42, MergeCommit = "abc", ReleasePullRequestId = 43, ReleaseMergeCommit = "def",
             CreatedAt = Now, UpdatedAt = Now.AddMinutes(1), StageStartedAt = Now.AddMinutes(2),
             WaitingSince = Now.AddMinutes(3),

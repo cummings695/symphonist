@@ -312,19 +312,97 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
     }
 
-    [Fact] public async Task Backward_source_move_while_running_is_recorded_and_ignored()
+    [Fact] public async Task Backward_source_move_while_running_is_applied_when_the_stage_finishes()
     {
         await Seed("ORD-1", "build", StageStatus.Running, "In Review", t => t.MergeCommit = "merge-1");
         builds.Statuses["merge-1"] = BuildStatus.Running;
-        tracker.Move("ORD-1", "Planned");
+        tracker.Tickets.Clear();
+        Source("ORD-1", "Planned", new SourceComment("Me", true, Now.AddMinutes(5), "replan: wrong approach"));
         var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
 
         await TickIdle(o);
 
         var t = store.Single("ORD-1");
-        Assert.Equal(("build", StageStatus.Running), (t.StageId, t.Status));
-        Assert.Equal("Planned", t.LastSourceStatus); // saved even though the engine reported no change
-        Assert.Contains("source moved to 'Planned' while build is Running; ignored", store.EventMessages("ORD-1"));
+        Assert.Equal(("build", StageStatus.Running, "Planned"), (t.StageId, t.Status, t.PendingSourceStatus));
+        Assert.Equal("Planned", t.LastSourceStatus);
+        Assert.Contains("source moved to 'Planned' while build is Running; will apply when the stage finishes",
+            store.EventMessages("ORD-1"));
+
+        builds.Statuses["merge-1"] = BuildStatus.Succeeded;
+        await o.TickAsync(CancellationToken.None);
+
+        t = store.Single("ORD-1");
+        Assert.Equal(("plan", "replan: wrong approach"), (t.StageId, t.Feedback));
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Contains("applying source move to 'Planned': sent back to plan", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Transitions); // the card is already in Planned
+    }
+
+    [Fact] public async Task Approval_move_during_agent_run_approves_when_the_run_finishes()
+    {
+        Source("ORD-1", "Planned");
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var never = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : never.Task; // only the plan run finishes
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+
+        tracker.Move("ORD-1", "In Progress");
+        await o.TickAsync(CancellationToken.None);
+        Assert.Contains("source moved to 'In Progress' while plan is Running; will apply when the stage finishes",
+            store.EventMessages("ORD-1"));
+
+        release.SetResult(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")));
+        await o.WhenIdleAsync();
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Contains("applying source move to 'In Progress': advanced to implement", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Transitions);
+    }
+
+    [Fact] public async Task Status_at_pickup_is_not_an_approval()
+    {
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
+    [Fact] public async Task Card_moved_back_to_In_Progress_at_implement_gate_reruns_implement_with_feedback()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review");
+        tracker.Tickets.Clear();
+        Source("ORD-1", "In Progress", new SourceComment("Me", true, Now.AddMinutes(5), "add tests"));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", "add tests"), (t.StageId, t.Feedback));
+        Assert.Contains("sent back to implement", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Transitions);
+    }
+
+    [Fact] public async Task Reopened_done_card_is_recorded()
+    {
+        await Seed("ORD-1", "done", StageStatus.Done, "Done");
+        tracker.Move("ORD-1", "In Progress");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Done, "In Progress"), (t.Status, t.LastSourceStatus));
+        Assert.Equal(["card moved to 'In Progress' after the ticket was done; Symphonist does not reopen done tickets"],
+            store.EventMessages("ORD-1"));
     }
 
     [Fact] public async Task Waiting_merge_event_is_recorded_once()

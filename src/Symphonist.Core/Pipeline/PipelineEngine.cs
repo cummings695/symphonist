@@ -23,15 +23,27 @@ public static class PipelineEngine
         };
     }
 
-    public static TransitionOutcome StageSucceeded(ProjectConfig p, Ticket t, DateTimeOffset now)
+    /// <summary>
+    /// The stage's work is done: wait at its human gate or advance. A source move deferred while the stage ran
+    /// (<see cref="Ticket.PendingSourceStatus"/>) is applied now: its gate's approval status approves, an earlier
+    /// stage's status sends back with <paramref name="latestFeedback"/>.
+    /// </summary>
+    public static TransitionOutcome StageSucceeded(ProjectConfig p, Ticket t, DateTimeOffset now, string? latestFeedback = null)
     {
         var stage = p.Stage(t.StageId);
+        var pending = t.PendingSourceStatus;
+        t.PendingSourceStatus = null;
         t.Feedback = null;
+
+        if (pending is not null && EarlierStageFor(p, t.StageId, pending) is { } target)
+            return Deferred(pending, SendBackTo(t, target, latestFeedback, now));
+
         if (stage.Gate == GatePolicy.Human)
         {
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = now;
             t.UpdatedAt = now;
+            if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             return new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
         }
         return Advance(p, t, stage, now);
@@ -75,10 +87,7 @@ public static class PipelineEngine
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked))
             return NoChange($"cannot send back from {t.Status}");
-        var target = p.Stage(toStageId ?? t.StageId);
-        EnterStage(t, target, now);
-        t.Feedback = feedback;
-        return new(true, target.OnEnterStatus, $"sent back to {target.Id}");
+        return SendBackTo(t, p.Stage(toStageId ?? t.StageId), feedback, now);
     }
 
     public static TransitionOutcome SourceStatusChanged(ProjectConfig p, Ticket t, string newStatus, string? latestFeedback, DateTimeOffset now)
@@ -88,15 +97,28 @@ public static class PipelineEngine
         if (unchanged) return NoChange("source status unchanged");
 
         var stage = p.Stage(t.StageId);
+        if (t.Status is StageStatus.Pending or StageStatus.Running)
+        {
+            // The stage's result isn't in yet: remember the developer's latest decision and apply it when it is.
+            if (Same(stage.ApprovedWhenStatus, newStatus) || EarlierStageFor(p, t.StageId, newStatus) is not null)
+            {
+                t.PendingSourceStatus = newStatus;
+                return new(true, null,
+                    $"source moved to '{newStatus}' while {stage.Id} is {t.Status}; will apply when the stage finishes");
+            }
+            t.PendingSourceStatus = null;
+            return NoChange($"source status '{newStatus}' ignored");
+        }
+
         if (t.Status == StageStatus.AwaitingApproval && Same(stage.ApprovedWhenStatus, newStatus))
             return Approve(p, t, now);
 
-        for (var i = IndexOf(p, t.StageId) - 1; i >= 0; i--)
-        {
-            var s = p.Pipeline[i];
-            if (s.EntryStatuses.Any(e => Same(e, newStatus)) || Same(s.OnEnterStatus, newStatus))
-                return SendBack(p, t, latestFeedback, s.Id, now);
-        }
+        // Card moved back to the stage's own status (e.g. In Review -> In Progress at the implement gate): rerun it.
+        if (t.Status == StageStatus.AwaitingApproval && Same(stage.OnEnterStatus, newStatus) && !Same(stage.OnGateStatus, newStatus))
+            return SendBack(p, t, latestFeedback, stage.Id, now);
+
+        if (EarlierStageFor(p, t.StageId, newStatus) is { } target)
+            return SendBack(p, t, latestFeedback, target.Id, now);
         return NoChange($"source status '{newStatus}' ignored");
     }
 
@@ -133,6 +155,27 @@ public static class PipelineEngine
         return new(true, next.OnEnterStatus, $"advanced to {next.Id}");
     }
 
+    private static TransitionOutcome SendBackTo(Ticket t, StageDefinition target, string? feedback, DateTimeOffset now)
+    {
+        EnterStage(t, target, now);
+        t.Feedback = feedback;
+        return new(true, target.OnEnterStatus, $"sent back to {target.Id}");
+    }
+
+    private static TransitionOutcome Deferred(string status, TransitionOutcome applied) =>
+        applied with { Message = $"applying source move to '{status}': {applied.Message}" };
+
+    /// <summary>The latest stage before <paramref name="stageId"/> that <paramref name="status"/> maps to (a send-back move).</summary>
+    private static StageDefinition? EarlierStageFor(ProjectConfig p, string stageId, string status)
+    {
+        for (var i = IndexOf(p, stageId) - 1; i >= 0; i--)
+        {
+            var s = p.Pipeline[i];
+            if (s.EntryStatuses.Any(e => Same(e, status)) || Same(s.OnEnterStatus, status)) return s;
+        }
+        return null;
+    }
+
     private static void EnterStage(Ticket t, StageDefinition stage, DateTimeOffset now)
     {
         t.StageId = stage.Id;
@@ -141,6 +184,7 @@ public static class PipelineEngine
         t.BlockedReason = null;
         t.Feedback = null;
         t.WaitingSince = null;
+        t.PendingSourceStatus = null;
         t.StageStartedAt = now;
         t.UpdatedAt = now;
     }

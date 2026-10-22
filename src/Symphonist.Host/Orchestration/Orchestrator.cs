@@ -25,6 +25,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
     private readonly CancellationTokenSource shutdown = new();
     private readonly Dictionary<string, (ProjectConfig Config, ProjectIntegrations Io)> io = []; // used under gate only
+    private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
 
     public async Task RecoverAsync(CancellationToken ct)
     {
@@ -116,6 +117,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (results is not null)
         {
             foreach (var s in results) sources.TryAdd(s.Key, s);
+            latestSources[p.Id] = sources;
             await SyncAsync(p, io, sources, ct);
         }
 
@@ -152,12 +154,17 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             }
             if (Same(t.LastSourceStatus, s.Status)) continue;
 
-            var ignoredBackwardMove = t.Status is StageStatus.Pending or StageStatus.Running
-                                      && IsEarlierStageStatus(p, t.StageId, s.Status);
+            if (t.Status == StageStatus.Done)
+            {
+                t.LastSourceStatus = s.Status;
+                await store.SaveAsync(t, ct);
+                await AddEventAsync(t,
+                    $"card moved to '{s.Status}' after the ticket was done; Symphonist does not reopen done tickets", ct);
+                continue;
+            }
+
             var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t), now);
             await store.SaveAsync(t, ct); // LastSourceStatus changes even when the outcome doesn't
-            if (ignoredBackwardMove)
-                await AddEventAsync(t, $"source moved to '{s.Status}' while {t.StageId} is {t.Status}; ignored", ct);
             await ApplyAsync(io, t, outcome, ct);
         }
 
@@ -197,7 +204,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 var now = time.GetUtcNow();
                 var outcome = result.Status switch
                 {
-                    ExecutionStatus.Completed => PipelineEngine.StageSucceeded(p, t, now),
+                    ExecutionStatus.Completed => PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t)),
                     ExecutionStatus.Failed => PipelineEngine.StageFailed(p, t, result.Error ?? "stage failed", now),
                     _ => null,
                 };
@@ -294,8 +301,10 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
 
         var now = time.GetUtcNow();
+        // The newest query result, not the run's start snapshot: a deferred send-back's comment came during the run.
+        var source = latestSources.GetValueOrDefault(p.Id)?.GetValueOrDefault(t.Key);
         var outcome = result.Status == ExecutionStatus.Completed
-            ? PipelineEngine.StageSucceeded(p, t, now)
+            ? PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t))
             : PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now);
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, outcome, ct);
@@ -364,11 +373,6 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var stage = projects.Projects.FirstOrDefault(p => p.Id == projectId)?.Pipeline.FirstOrDefault(s => s.Id == stageId);
         return stage is not null && StageExecutor.IsAgentStage(stage.Kind);
     }
-
-    /// <summary>Whether <paramref name="status"/> maps to a stage before <paramref name="stageId"/> (a send-back move).</summary>
-    private static bool IsEarlierStageStatus(ProjectConfig p, string stageId, string status) =>
-        p.Pipeline.TakeWhile(s => s.Id != stageId)
-            .Any(s => s.EntryStatuses.Any(e => Same(e, status)) || Same(s.OnEnterStatus, status));
 
     /// <summary>
     /// The developer's newest comment since the ticket started waiting (or entered its stage), excluding the comments

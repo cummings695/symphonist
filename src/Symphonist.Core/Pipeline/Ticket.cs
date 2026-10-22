@@ -14,6 +14,12 @@ public sealed class Ticket
     public string? Feedback { get; set; }
     public int Attempts { get; set; }
     public string? LastSourceStatus { get; set; }
+
+    /// <summary>
+    /// A source move made while the stage was Pending/Running (an approval or a send-back), applied when the stage
+    /// finishes instead of being lost.
+    /// </summary>
+    public string? PendingSourceStatus { get; set; }
     public string? Branch { get; set; }
     public string? SpecPath { get; set; }
     public string? PlanPath { get; set; }

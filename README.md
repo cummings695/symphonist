@@ -106,9 +106,14 @@ The pipeline in the project file maps stages to Jira statuses, so you can drive 
 - `onEnterStatus`: Symphonist moves the card to this status when the stage starts.
 - `onGateStatus`: Symphonist moves the card here when the stage is waiting for you.
 - `approvedWhenStatus`: you approve the stage by moving the card to this status (same as `symphonist approve`).
-- Moving a card backwards, to an earlier stage's status, sends the ticket back to that stage. Your latest comment that
-  is not one of Symphonist's own (those end with `— posted by Symphonist`) is passed to the agent as feedback. A
-  backwards move while a stage is pending or running is ignored and noted in the event log.
+- Moving a card backwards, to an earlier stage's status, sends the ticket back to that stage. Moving it back to the
+  current stage's `onEnterStatus` while that stage waits for you (for example In Review -> In Progress at the implement
+  gate) reruns the current stage. Your latest comment that is not one of Symphonist's own (those end with
+  `— posted by Symphonist`) is passed to the agent as feedback.
+- A move made while a stage is still pending or running (an approval or a backwards move) is remembered and applied
+  when the stage finishes; the event log notes `will apply when the stage finishes`. The status a card has when
+  Symphonist first picks it up is never treated as an approval.
+- Reopening a card after its ticket is `Done` is noted in the event log; Symphonist does not reopen done tickets.
 
 ### Sandbox
 

@@ -48,6 +48,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<string>("MergeCommit")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("PendingSourceStatus")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("PlanPath")
                         .HasColumnType("TEXT");
 
