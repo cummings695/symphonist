@@ -56,7 +56,8 @@ builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
 builder.Services.AddSingleton<ITicketStore>(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
 builder.Services.AddSingleton<IGitWorkspace>(sp =>
-    new GitWorkspace(sp.GetRequiredService<IProcessRunner>(), SymphonistPaths.Resolve("work")));
+    new GitWorkspace(sp.GetRequiredService<IProcessRunner>(), SymphonistPaths.Resolve("work"),
+        sp.GetRequiredService<ILogger<GitWorkspace>>()));
 builder.Services.AddSingleton(sp => new DockerLauncher(sp.GetRequiredService<IProcessRunner>(),
     Path.Combine(AppContext.BaseDirectory, "Containers", "agent"),
     name => sp.GetRequiredService<ISecretStore>().Get(name)));

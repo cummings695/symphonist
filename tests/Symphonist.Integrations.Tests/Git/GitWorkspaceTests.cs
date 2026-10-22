@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
@@ -201,5 +202,96 @@ public sealed class GitWorkspaceTests : IDisposable
         var ws = await g.PrepareAsync(project, "ORD-2", "symphonist/ORD-2", default);
         Assert.Equal("symphonist/ORD-2", Git(ws, "branch --show-current"));
         Assert.Equal(Norm(bare), Norm(Git(ws, "remote get-url origin")));
+    }
+    private const string CredentialUrl = "https://dev:s3cret@bitbucket.org/acme/orders.git";
+
+    /// <summary>Pretends the developer's origin URL embeds credentials; records what the workspace origin is set to.</summary>
+    private sealed class CredentialOrigin(IProcessRunner inner, string realRemote, string? failFetchWith = null) : IProcessRunner
+    {
+        public List<string> SetUrls { get; } = [];
+        public List<ProcessSpec> Specs { get; } = [];
+
+        public Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct)
+        {
+            Specs.Add(spec);
+            var args = spec.Arguments.ToList();
+            if (args.Contains("get-url")) return Task.FromResult(new ProcessResult(0, CredentialUrl + "\n", "", false));
+            if (args.Contains("set-url"))
+            {
+                SetUrls.Add(args[^1]);
+                args[^1] = realRemote; // keep the test offline: point the workspace at the local bare repo
+                return inner.RunAsync(spec with { Arguments = args }, ct);
+            }
+            if (failFetchWith is not null && args.Contains("fetch"))
+                return Task.FromResult(new ProcessResult(128, "", failFetchWith, false));
+            return inner.RunAsync(spec, ct);
+        }
+    }
+
+    private sealed class ListLogger : ILogger
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    [Fact]
+    public async Task Credentials_in_the_developer_origin_never_reach_the_workspace_and_are_warned_about_once()
+    {
+        var runner = new CredentialOrigin(new ProcessRunner(), bare);
+        var log = new ListLogger();
+        var g = new GitWorkspace(runner, workRoot, log);
+
+        await g.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        await g.PrepareAsync(project, "ORD-2", "symphonist/ORD-2", default);
+
+        Assert.Equal(["https://bitbucket.org/acme/orders.git", "https://bitbucket.org/acme/orders.git"], runner.SetUrls);
+        var warning = Assert.Single(log.Entries, e => e.Level == LogLevel.Warning);
+        Assert.DoesNotContain("s3cret", warning.Message);
+        Assert.All(log.Entries, e => Assert.DoesNotContain("s3cret", e.Message));
+    }
+
+    [Fact]
+    public async Task Git_failure_messages_redact_credentials()
+    {
+        var runner = new CredentialOrigin(new ProcessRunner(), bare,
+            failFetchWith: $"fatal: unable to access '{CredentialUrl}/': The requested URL returned error: 403");
+        var g = new GitWorkspace(runner, workRoot);
+
+        var ex = await Assert.ThrowsAsync<GitCommandException>(() => g.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default));
+
+        Assert.DoesNotContain("s3cret", ex.Message);
+        Assert.Contains("https://***@bitbucket.org/acme/orders.git", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("https://dev:s3cret@bitbucket.org/acme/orders.git", "https://bitbucket.org/acme/orders.git")]
+    [InlineData("http://token@host.example/x.git", "http://host.example/x.git")]
+    [InlineData("https://bitbucket.org/acme/orders.git", "https://bitbucket.org/acme/orders.git")]
+    [InlineData("git@bitbucket.org:acme/orders.git", "git@bitbucket.org:acme/orders.git")]
+    [InlineData("C:/src/orders", "C:/src/orders")]
+    public void Strip_user_info_only_touches_http_urls(string url, string expected) =>
+        Assert.Equal(expected, GitUrls.StripUserInfo(url));
+
+    [Fact]
+    public void Redact_masks_user_info_anywhere_in_text() =>
+        Assert.Equal("git push https://***@h.example/x.git failed; see 'http://***@other/y'",
+            GitUrls.Redact("git push https://u:p@h.example/x.git failed; see 'http://tok@other/y'"));
+
+    [Fact]
+    public async Task Git_never_prompts_for_credentials()
+    {
+        var runner = new CredentialOrigin(new ProcessRunner(), bare);
+        var g = new GitWorkspace(runner, workRoot);
+
+        await g.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+
+        Assert.All(runner.Specs, spec =>
+        {
+            Assert.Equal("0", spec.Environment!["GIT_TERMINAL_PROMPT"]);
+            Assert.Equal("never", spec.Environment!["GCM_INTERACTIVE"]);
+        });
     }
 }

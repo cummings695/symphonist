@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Integrations.Processes;
@@ -7,8 +9,26 @@ namespace Symphonist.Integrations.Git;
 
 public sealed class GitCommandException(string message, Exception? inner = null) : Exception(message, inner);
 
-public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitWorkspace
+/// <summary>Keeps credentials embedded in http(s) remote URLs (<c>https://user:token@host/...</c>) out of workspaces and logs.</summary>
+public static partial class GitUrls
 {
+    /// <summary>The URL without its user info when it is an http(s) URL; anything else (ssh, paths) unchanged.</summary>
+    public static string StripUserInfo(string url) => LeadingUserInfo().Replace(url, "$1", 1);
+
+    /// <summary>Masks the user info of every http(s) URL in <paramref name="text"/> as <c>***</c>.</summary>
+    public static string Redact(string text) => AnyUserInfo().Replace(text, "$1***@");
+
+    [GeneratedRegex(@"^(https?://)[^/]*@", RegexOptions.IgnoreCase)]
+    private static partial Regex LeadingUserInfo();
+
+    [GeneratedRegex(@"(https?://)[^/\s@'""]+@", RegexOptions.IgnoreCase)]
+    private static partial Regex AnyUserInfo();
+}
+
+/// <param name="log">Optional; used to warn (once per checkout) about credentials in the developer's origin URL.</param>
+public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger? log = null) : IGitWorkspace
+{
+    private readonly HashSet<string> warnedCheckouts = [];
     public async Task<string> PrepareAsync(ProjectConfig project, string ticketKey, string branch, CancellationToken ct)
     {
         var repo = project.Repo;
@@ -24,7 +44,11 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
             {
                 await GitAsync(null, ct, "clone", repo.LocalPath, tmp);
                 var originUrl = (await GitAsync(repo.LocalPath, ct, "remote", "get-url", "origin")).Trim();
-                await GitAsync(tmp, ct, "remote", "set-url", "origin", originUrl);
+                // The agent can read .git/config (mounted read-only): never copy credentials into it. Pushes from the
+                // host still authenticate through the developer's credential helper.
+                var safeUrl = GitUrls.StripUserInfo(originUrl);
+                if (safeUrl != originUrl) WarnCredentialsOnce(repo.LocalPath);
+                await GitAsync(tmp, ct, "remote", "set-url", "origin", safeUrl);
                 await GitAsync(tmp, ct, "fetch", "origin");
 
                 var remoteBranch = await RemoteBranchExistsAsync(tmp, branch, ct);
@@ -70,6 +94,16 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
         return r.ExitCode == 0;
     }
 
+    private void WarnCredentialsOnce(string checkout)
+    {
+        lock (warnedCheckouts)
+            if (!warnedCheckouts.Add(checkout)) return;
+        log?.LogWarning(
+            "The origin URL of {Checkout} contains credentials; Symphonist removes them from agent workspaces and pushes " +
+            "with your git credential helper. Consider removing them from the URL and using a credential helper instead.",
+            checkout);
+    }
+
     private static void DeleteQuietly(string dir)
     {
         try
@@ -84,7 +118,7 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
 
     private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(10);
     private static readonly IReadOnlyDictionary<string, string?> GitEnv =
-        new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" };
+        new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GCM_INTERACTIVE"] = "never" };
 
     /// <summary>
     /// The agent can write to the workspace, so never let repo-local config run code on the host: hooks come from an
@@ -115,7 +149,8 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot) : IGitW
     {
         var r = await RunAsync(dir, ct, args);
         if (r.TimedOut || r.ExitCode != 0)
-            throw new GitCommandException($"git {string.Join(' ', args)} failed (exit {r.ExitCode}): {r.StandardError.Trim()}");
+            throw new GitCommandException(GitUrls.Redact(
+                $"git {string.Join(' ', args)} failed (exit {r.ExitCode}): {r.StandardError.Trim()}"));
         return r.StandardOutput;
     }
 }

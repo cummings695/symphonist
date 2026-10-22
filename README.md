@@ -120,7 +120,10 @@ The pipeline in the project file maps stages to Jira statuses, so you can drive 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network
   allowlist (Claude Code's own hosts plus `agent.allowedDomains`; HTTPS/HTTP on TCP 443/80 only). Jira, Bitbucket and git
   credentials stay on the host; the only secret the container receives is the Claude token. Symphonist itself commits,
-  pushes and opens PRs from the host using your git credentials.
+  pushes and opens PRs from the host using your git credentials. If the origin URL of your checkout embeds credentials
+  (`https://user:token@...`), Symphonist strips them from agent workspaces (and masks them in errors) and logs a
+  warning; pushes then authenticate through your git credential helper, so make sure one is configured. Git never
+  prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`): missing credentials fail the stage with git's error.
 - `host`: the agent runs directly on your machine with no sandbox, restricted only by `agent.allowedTools`, which is
   therefore required. Use it only for projects you trust.
 
