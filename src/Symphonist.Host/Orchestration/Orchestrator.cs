@@ -24,8 +24,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
     private readonly CancellationTokenSource shutdown = new();
+    private readonly ConcurrentDictionary<string, string> problems = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (ProjectConfig Config, ProjectIntegrations Io)> io = []; // used under gate only
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
+
+    /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
+    public string? ProblemOf(string projectId) => problems.GetValueOrDefault(projectId);
 
     public async Task RecoverAsync(CancellationToken ct)
     {
@@ -108,7 +112,19 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     private async Task TickProjectAsync(ProjectConfig p, CancellationToken ct)
     {
-        var io = IntegrationsFor(p);
+        ProjectIntegrations io;
+        try
+        {
+            io = IntegrationsFor(p);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // E.g. a missing secret: nothing can run for this project, so make it visible (symphonist projects).
+            problems[p.Id] = e.Message;
+            log.LogError("Project {Project} cannot run: {Error}", p.Id, e.Message);
+            return;
+        }
+
         var sources = new Dictionary<string, SourceTicket>(StringComparer.Ordinal);
         IReadOnlyList<SourceTicket>? results = null;
         try
@@ -117,11 +133,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
+            problems[p.Id] = $"tracker query failed: {e.Message}";
             log.LogWarning(e, "Tracker query failed for project {Project}; skipping sync this tick", p.Id);
         }
 
         if (results is not null)
         {
+            problems.TryRemove(p.Id, out _);
             foreach (var s in results) sources.TryAdd(s.Key, s);
             latestSources[p.Id] = sources;
             await SyncAsync(p, io, sources, ct);

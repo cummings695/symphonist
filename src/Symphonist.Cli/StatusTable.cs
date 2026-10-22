@@ -15,8 +15,8 @@ public static class StatusTable
     }
 
     public static string RenderProjects(IEnumerable<ProjectDto> projects) =>
-        Table(["ID", "NAME", "STATE", "ISOLATION"],
-            projects.Select(p => new[] { p.Id, p.Name, p.Paused ? "paused" : "active", p.Isolation }));
+        Table(["ID", "NAME", "STATE", "ISOLATION", "PROBLEM"],
+            projects.Select(p => new[] { p.Id, p.Name, p.Paused ? "paused" : "active", p.Isolation, p.Problem ?? "" }));
 
     public static string RenderDetail(TicketDetailDto t, DateTimeOffset now)
     {

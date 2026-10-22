@@ -71,8 +71,10 @@ public sealed class OrchestratorTests : IDisposable
         if (Directory.Exists(home)) Directory.Delete(home, true);
     }
 
+    private FakeIntegrationFactory? factory;
+
     private Orchestrator Create(int maxRuns = 1) =>
-        new(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
+        new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
             new StageExecutor(git, agent, store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns), NullLogger<Orchestrator>.Instance);
 
@@ -199,6 +201,28 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal("no longer matches tracker query", t.BlockedReason);
         Assert.Equal(StageStatus.Done, store.Single("ORD-2").Status);
         Assert.Empty(store.EventMessages("ORD-2"));
+    }
+
+    [Fact] public async Task Integration_and_query_errors_are_reported_as_project_problem_until_a_tick_succeeds()
+    {
+        Source("ORD-1", "Backlog");
+        var o = Create();
+        Assert.Null(o.ProblemOf("orders"));
+
+        factory!.Error = new InvalidOperationException("secret 'jira-acme' not set; run: symphonist secret set jira-acme");
+        await TickIdle(o);
+        Assert.Equal("secret 'jira-acme' not set; run: symphonist secret set jira-acme", o.ProblemOf("orders"));
+        Assert.Empty(store.Tickets);
+
+        factory.Error = null;
+        tracker.OnQuery = () => throw new HttpRequestException("401 Unauthorized");
+        await TickIdle(o);
+        Assert.Equal("tracker query failed: 401 Unauthorized", o.ProblemOf("orders"));
+
+        tracker.OnQuery = null;
+        await TickIdle(o);
+        Assert.Null(o.ProblemOf("orders"));
+        Assert.Single(store.Tickets);
     }
 
     [Fact] public async Task Respects_max_concurrent_agent_runs()

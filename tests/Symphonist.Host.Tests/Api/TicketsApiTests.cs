@@ -272,6 +272,19 @@ public sealed class TicketsApiTests : IDisposable
     }
 
     [Fact]
+    public async Task Projects_report_their_integration_problem()
+    {
+        var before = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(JsonValueKind.Null, before[1].GetProperty("problem").ValueKind);
+
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set; run: symphonist secret set jira-acme");
+        await factory.Services.GetRequiredService<Orchestrator>().TickAsync(CancellationToken.None);
+
+        var after = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal("secret 'jira-acme' not set; run: symphonist secret set jira-acme", after[1].GetProperty("problem").GetString());
+    }
+
+    [Fact]
     public async Task Startup_with_docker_unavailable_still_serves_the_api()
     {
         // The orders project uses container isolation; the fake runner reports Docker as unavailable.

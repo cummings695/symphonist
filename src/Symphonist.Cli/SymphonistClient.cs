@@ -14,7 +14,7 @@ public sealed record TicketEventDto(DateTimeOffset At, string Stage, string Mess
 public sealed record TicketDetailDto(string Key, string Project, string Title, string Stage, string Status,
     string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events);
 
-public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation);
+public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation, string? Problem = null);
 
 public sealed record OutcomeDto(bool Changed, string Message);
 

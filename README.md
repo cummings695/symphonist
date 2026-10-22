@@ -91,7 +91,7 @@ symphonist approve <project> <key>          approve the stage the ticket is wait
 symphonist send-back <project> <key> -m "feedback" [--to <stage>]
 symphonist unblock <project> <key>          retry a blocked ticket
 symphonist poll                             ask the host to poll now
-symphonist projects                         list projects
+symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
 symphonist projects resume <id>
 ```
@@ -160,6 +160,9 @@ repo with a trivial `bitbucket-pipelines.yml`).
 - `Symphonist host is not running on 127.0.0.1:<port>` (exit code 2): start the host, and check that `SYMPHONIST_PORT`
   matches for host and CLI. The same message appears if `~/.symphonist/api-token` does not exist yet.
 - A project is missing from `symphonist projects`: check the host log for `Skipping project file ...`.
+- A project's tickets never move and `symphonist projects` shows a `PROBLEM` (for example `secret 'jira-acme' not set;
+  run: symphonist secret set jira-acme`, or `tracker query failed: ...`): fix the cause (store the secret, check the
+  token or JQL). The problem clears on the next poll that succeeds; run `symphonist poll` to retry now.
 
 ## Third-party notices
 

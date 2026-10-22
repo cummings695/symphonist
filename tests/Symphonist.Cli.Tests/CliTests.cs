@@ -195,6 +195,21 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Projects_shows_problem_column()
+    {
+        var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/projects", HttpStatusCode.OK,
+            "[{\"id\":\"api\",\"name\":\"Api\",\"paused\":false,\"isolation\":\"Container\",\"problem\":null}," +
+            "{\"id\":\"web\",\"name\":\"Web\",\"paused\":false,\"isolation\":\"Container\",\"problem\":\"secret 'jira-acme' not set\"}]");
+
+        var r = await RunAsync(handler, "", "projects");
+
+        var lines = r.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.EndsWith("PROBLEM", lines[0]);
+        Assert.EndsWith("Container", lines[1]);
+        Assert.EndsWith("secret 'jira-acme' not set", lines[2]);
+    }
+
+    [Fact]
     public async Task Show_prints_ticket_and_events()
     {
         var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/tickets/p/K-1", HttpStatusCode.OK,
