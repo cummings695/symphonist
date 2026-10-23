@@ -18,6 +18,8 @@ public sealed record ProjectDto(string Id, string Name, bool Paused, string Isol
 
 public sealed record OutcomeDto(bool Changed, string Message);
 
+public sealed record DashboardLinkDto(Uri Url);
+
 /// <summary>The host is unreachable (not running, or no API token exists yet).</summary>
 public sealed class HostNotRunningException(int port)
     : Exception($"Symphonist host is not running on 127.0.0.1:{port}");
@@ -69,6 +71,10 @@ public sealed class SymphonistClient : IDisposable
 
     public Task SetPausedAsync(string id, bool paused, CancellationToken ct) =>
         SendAsync<object>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(id)}/{(paused ? "pause" : "resume")}", null, ct);
+
+    /// <summary>A single-use sign-in link for the dashboard, valid for two minutes.</summary>
+    public async Task<Uri> CreateDashboardLinkAsync(CancellationToken ct) =>
+        (await SendAsync<DashboardLinkDto>(HttpMethod.Post, "/api/dashboard/login-code", null, ct)).Url;
 
     public void Dispose() => http.Dispose();
 

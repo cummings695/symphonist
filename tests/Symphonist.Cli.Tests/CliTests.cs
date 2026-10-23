@@ -168,6 +168,74 @@ public sealed class CliTests
         Assert.Contains("database locked", r.Err);
     }
 
+    private sealed class RequestRecordingHandler(string body) : HttpMessageHandler
+    {
+        public List<(HttpMethod Method, string Path, string? Token)> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Requests.Add((request.Method, request.RequestUri!.AbsolutePath,
+                request.Headers.TryGetValues(ApiToken.Header, out var v) ? v.Single() : null));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        }
+    }
+
+    private const string LinkBody = """{"url":"http://127.0.0.1:5199/login?code=abc"}""";
+
+    private static async Task<Result> RunDashboardAsync(HttpMessageHandler handler, Func<Uri, bool> openBrowser, params string[] args)
+    {
+        using var client = new SymphonistClient(handler, Token, 5199);
+        var (o, e) = (new StringWriter(), new StringWriter());
+        var exit = await Cli.RunAsync(args, client, o, e, new FakeSecrets(), new StringReader(""), openBrowser: openBrowser);
+        return new Result(exit, o.ToString(), e.ToString());
+    }
+
+    [Fact]
+    public async Task Dashboard_opens_link_from_host()
+    {
+        var handler = new RequestRecordingHandler(LinkBody);
+        var opened = new List<Uri>();
+
+        var r = await RunDashboardAsync(handler, u => { opened.Add(u); return true; }, "dashboard");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Equal(new Uri("http://127.0.0.1:5199/login?code=abc"), Assert.Single(opened));
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal((HttpMethod.Post, "/api/dashboard/login-code", Token), request);
+        Assert.Contains("Opened the dashboard (link valid for 2 minutes)", r.Out);
+        Assert.DoesNotContain("code=abc", r.Out);
+    }
+
+    [Fact]
+    public async Task Dashboard_no_browser_prints_link()
+    {
+        var called = false;
+
+        var r = await RunDashboardAsync(new RequestRecordingHandler(LinkBody), _ => called = true, "dashboard", "--no-browser");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Equal("http://127.0.0.1:5199/login?code=abc" + Environment.NewLine, r.Out);
+        Assert.False(called);
+    }
+
+    [Fact]
+    public async Task Dashboard_prints_link_when_browser_fails()
+    {
+        var r = await RunDashboardAsync(new RequestRecordingHandler(LinkBody), _ => false, "dashboard");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Contains("Could not open a browser. Open this link within 2 minutes: http://127.0.0.1:5199/login?code=abc", r.Out);
+    }
+
+    [Fact]
+    public async Task Dashboard_host_down_exits_2()
+    {
+        var r = await RunDashboardAsync(new ThrowingHandler(), _ => true, "dashboard");
+
+        Assert.Equal(2, r.Exit);
+        Assert.Contains("Symphonist host is not running", r.Err);
+    }
+
     [Fact]
     public async Task Host_down_exits_2_with_message()
     {

@@ -11,9 +11,11 @@ public static class Cli
 
     /// <param name="interactive">True when stdin is a terminal: <c>secret set</c> then prompts and reads without echo.</param>
     public static Task<int> RunAsync(string[] args, SymphonistClient client, TextWriter stdout, TextWriter stderr,
-        ISecretStore secrets, TextReader stdin, bool interactive = false, TimeProvider? clock = null)
+        ISecretStore secrets, TextReader stdin, bool interactive = false, TimeProvider? clock = null,
+        Func<Uri, bool>? openBrowser = null)
     {
         var time = clock ?? TimeProvider.System;
+        var open = openBrowser ?? BrowserLauncher.TryOpen;
         var root = new RootCommand("Symphonist command-line client");
 
         var projectOption = new Option<string?>("--project") { Description = "Only tickets of this project" };
@@ -64,6 +66,17 @@ public static class Cli
             stdout.WriteLine("Poll requested");
         });
         root.Add(poll);
+
+        var noBrowser = new Option<bool>("--no-browser") { Description = "Print the link instead of opening it" };
+        var dashboard = new Command("dashboard", "Open the dashboard in your browser") { noBrowser };
+        Run(dashboard, async (r, ct) =>
+        {
+            var url = await client.CreateDashboardLinkAsync(ct);
+            if (r.GetValue(noBrowser)) stdout.WriteLine(url);
+            else if (open(url)) stdout.WriteLine("Opened the dashboard (link valid for 2 minutes)");
+            else stdout.WriteLine($"Could not open a browser. Open this link within 2 minutes: {url}");
+        });
+        root.Add(dashboard);
 
         var projects = new Command("projects", "List projects, or pause/resume one");
         Run(projects, async (_, ct) => stdout.Write(StatusTable.RenderProjects(await client.ListProjectsAsync(ct))));

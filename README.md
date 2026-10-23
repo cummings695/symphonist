@@ -94,10 +94,31 @@ symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
 symphonist projects resume <id>
+symphonist dashboard [--no-browser]         open the dashboard in your browser
 ```
 
 Exit codes: `0` success, `1` the host rejected the request, bad usage or another error (one-line message), `2` the host
 is not running.
+
+### Dashboard
+
+```
+symphonist dashboard [--no-browser]
+```
+
+The host serves a live pipeline board at `http://127.0.0.1:5199/` (the same listener as the API). It shows every ticket
+as a card in its stage column, with the ones waiting on you highlighted and labelled, any problem that stops a project
+(for example a missing secret) as a banner, Pause/Resume per project, "Poll now", and a detail page per ticket where you
+can approve, send back, or unblock. It updates live; if the host stops, the page says it is reconnecting and reloads
+when the host is back.
+
+- `symphonist dashboard` asks the host for a sign-in link and opens it in your default browser. The link is single-use
+  and valid for 2 minutes; the sign-in then lasts 30 days in that browser.
+- `--no-browser` prints the link instead. It only works for a browser on the same machine, because the host listens on
+  loopback only.
+- The dashboard needs its static assets (`blazor.web.js`), so run the host with `dotnet run` / the launch profile
+  (Development) or from a `dotnet publish` output. An unpublished build run in Production returns 500 for
+  `blazor.web.js`.
 
 ### Working from Jira instead
 
