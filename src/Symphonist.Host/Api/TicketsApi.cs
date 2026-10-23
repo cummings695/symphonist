@@ -1,6 +1,7 @@
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
+using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations.Bitbucket;
 
@@ -20,6 +21,9 @@ public sealed record SendBackRequest(string? Feedback, string? ToStage);
 
 /// <param name="Problem">Why the project's last tick could not run (e.g. a missing secret); null when it ran.</param>
 public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation Isolation, string? Problem);
+
+/// <param name="Url">Single-use sign-in link for the dashboard (see <see cref="DashboardLogin"/>).</param>
+public sealed record DashboardLinkDto(Uri Url);
 
 /// <summary>The local HTTP API under <c>/api</c> (token-protected by <see cref="ApiTokenMiddleware"/>).</summary>
 public static class TicketsApi
@@ -72,6 +76,9 @@ public static class TicketsApi
 
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));
         api.MapPost("/projects/{id}/resume", (string id, ProjectRegistry projects) => SetPaused(projects, id, false));
+
+        api.MapPost("/dashboard/login-code", (DashboardLogin login, DashboardAddress address) =>
+            new DashboardLinkDto(address.LoginUrl(login.IssueCode())));
 
         return app;
     }

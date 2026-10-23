@@ -74,6 +74,7 @@ builder.Services.AddSingleton<Orchestrator>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
+builder.Services.AddDashboard(port);
 
 var app = builder.Build();
 
@@ -84,6 +85,7 @@ app.Services.GetRequiredService<ProjectRegistry>().PausedChanged += notifier.Not
 app.UseMiddleware<ApiTokenMiddleware>(apiToken);
 app.MapDefaultEndpoints();
 app.MapTicketsApi();
+app.MapDashboard();
 
 app.Lifetime.ApplicationStarted.Register(() => VerifyLoopbackOnly(app, port));
 

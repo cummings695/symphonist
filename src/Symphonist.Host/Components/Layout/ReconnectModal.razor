@@ -1,0 +1,8 @@
+@* Shown by blazor.web.js while the circuit is down; ReconnectModal.razor.js handles the state changes. *@
+<script type="module" src="@Assets["Components/Layout/ReconnectModal.razor.js"]"></script>
+
+<dialog id="components-reconnect-modal" data-nosnippet>
+    <p class="reconnect-retrying-visible" role="status">Symphonist host is not responding — reconnecting…</p>
+    <p class="reconnect-rejected-visible" role="status">The host restarted. Reload to continue.</p>
+    <button id="components-reload-button" class="reconnect-rejected-visible" type="button">Reload</button>
+</dialog>

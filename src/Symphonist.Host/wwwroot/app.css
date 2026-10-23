@@ -1,0 +1,78 @@
+:root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #59636e;
+    --surface: #f6f8fa;
+    --border: #d1d9e0;
+    --accent: #0b63ce;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0f1216;
+        --fg: #e6e9ed;
+        --muted: #9aa4ae;
+        --surface: #181c21;
+        --border: #30363d;
+        --accent: #5aa2f5;
+    }
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 var(--font);
+}
+
+main {
+    padding: 1rem;
+}
+
+h1:focus {
+    outline: none;
+}
+
+#components-reconnect-modal {
+    max-width: 24rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--surface);
+    color: var(--fg);
+    text-align: center;
+}
+
+#components-reconnect-modal::backdrop {
+    background: rgb(0 0 0 / 0.4);
+}
+
+#components-reconnect-modal p {
+    margin: 0 0 1rem;
+}
+
+.reconnect-retrying-visible,
+.reconnect-rejected-visible {
+    display: none;
+}
+
+#components-reconnect-modal[data-state="retrying"] .reconnect-retrying-visible,
+#components-reconnect-modal[data-state="rejected"] .reconnect-rejected-visible {
+    display: block;
+}
+
+#components-reconnect-modal button {
+    margin: 0 auto;
+    padding: 0.25rem 1.5rem;
+    border: 0;
+    border-radius: 0.25rem;
+    background: var(--accent);
+    color: var(--bg);
+    font: inherit;
+}
