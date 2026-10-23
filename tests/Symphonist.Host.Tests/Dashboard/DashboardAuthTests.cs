@@ -119,6 +119,18 @@ public sealed class DashboardAuthTests : IDisposable
     }
 
     [Fact]
+    public async Task Missing_ticket_page_is_404_with_a_not_found_page()
+    {
+        var client = Client();
+        await SignInAsync(client);
+
+        var response = await client.GetAsync("/tickets/orders/NOPE-1");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("Not found", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Signed_out_page_explains_how_to_sign_in()
     {
         var response = await Client().GetAsync("/signed-out");

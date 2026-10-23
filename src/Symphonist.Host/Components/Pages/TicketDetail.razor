@@ -6,6 +6,7 @@
 @inject BoardNotifier Notifier
 @inject Orchestrator Orchestrator
 @inject IJSRuntime JS
+@inject NavigationManager Navigation
 @inject ILogger<TicketDetail> Log
 
 <PageTitle>@Key · Symphonist</PageTitle>
@@ -202,7 +203,7 @@ else
     [SupplyParameterFromQuery(Name = "from")]
     public string? From { get; set; }
 
-    /// <summary>Set while prerendering, so a missing ticket answers 404 (the message is rendered either way).</summary>
+    /// <summary>Set while prerendering, so a missing ticket answers 404 with the not-found page.</summary>
     [CascadingParameter] private HttpContext? HttpContext { get; set; }
 
     private string BackUrl => From is { Length: > 0 } from ? $"/?project={Uri.EscapeDataString(from)}" : "/";
@@ -218,8 +219,8 @@ else
         notFound = false;
         commandMessage = null;
         await ReloadAsync();
-        if (notFound && HttpContext is { Response.HasStarted: false } http)
-            http.Response.StatusCode = StatusCodes.Status404NotFound;
+        // While prerendering, answer 404 with the not-found page (a bare status would reach the browser with no body).
+        if (notFound && HttpContext is { Response.HasStarted: false }) Navigation.NotFound();
     }
 
     private void OnTicketChanged() => _ = InvokeAsync(async () =>
