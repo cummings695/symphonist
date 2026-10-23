@@ -3,7 +3,6 @@ using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
-using Symphonist.Integrations.Bitbucket;
 
 namespace Symphonist.Host.Api;
 
@@ -104,10 +103,7 @@ public static class TicketsApi
 
     private static TicketDto ToDto(Ticket t, ProjectConfig? p) =>
         new(t.Key, t.ProjectId, t.Title, t.StageId, t.Status, t.BlockedReason, t.Attempts, t.WaitingSince,
-            PullRequestUrl(p, t.PullRequestId));
-
-    private static Uri? PullRequestUrl(ProjectConfig? p, long? id) =>
-        p is { Repo.Type: "bitbucket" } && id is { } prId ? BitbucketSourceControl.PullRequestUrl(p.Repo, prId) : null;
+            TicketLinks.PullRequest(p, t.PullRequestId));
 
     private static ProjectConfig? Find(ProjectRegistry projects, string id) => projects.Projects.FirstOrDefault(p => p.Id == id);
 
