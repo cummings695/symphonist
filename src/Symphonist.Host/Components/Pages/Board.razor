@@ -1,5 +1,236 @@
 @page "/"
+@implements IDisposable
+@inject BoardQuery Query
+@inject BoardNotifier Notifier
+@inject Orchestrator Orchestrator
+@inject ProjectRegistry Registry
+@inject TimeProvider Time
+@inject NavigationManager Navigation
 
-<PageTitle>Symphonist</PageTitle>
+<PageTitle>@(model is { Counts.WaitingOnYou: > 0 } ? $"({model.Counts.WaitingOnYou}) Symphonist" : "Symphonist")</PageTitle>
 
-<h1>Symphonist</h1>
+<header class="board-header">
+    <h1>Symphonist</h1>
+    @if (model is not null)
+    {
+        <p class="counts"><span class="@(model.Counts.WaitingOnYou > 0 ? "count-waiting" : null)">@model.Counts.WaitingOnYou waiting on you</span> · <span>@model.Counts.Running running</span> · <span class="@(model.Counts.Blocked > 0 ? "count-blocked" : null)">@model.Counts.Blocked blocked</span></p>
+        <div class="board-actions">
+            @if (model.Projects.Count > 0)
+            {
+                <label class="filter">
+                    <span class="visually-hidden">Project</span>
+                    <select value="@(model.ProjectFilter ?? "")" @onchange="FilterChanged">
+                        <option value="">All projects</option>
+                        @foreach (var p in model.Projects)
+                        {
+                            <option value="@p.Id">@p.Name</option>
+                        }
+                    </select>
+                </label>
+            }
+            <button type="button" class="button" @onclick="PollNow">Poll now</button>
+        </div>
+    }
+</header>
+
+<StatusLine Message="@(refreshError ?? commandMessage)" IsError="@(refreshError is not null)" />
+
+@if (model is null)
+{
+    @if (refreshError is null)
+    {
+        <p class="loading">Loading the board…</p>
+    }
+}
+else
+{
+    <div data-board-loaded>
+        @if (model.Projects.Count == 0)
+        {
+            <section class="setup-hint">
+                <h2>No projects configured</h2>
+                <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>; the host picks it up on restart.</p>
+            </section>
+        }
+        else
+        {
+            <section class="projects" aria-label="Projects">
+                @foreach (var p in model.Projects.Where(p => model.ProjectFilter is null || p.Id == model.ProjectFilter))
+                {
+                    <ProjectBar Project="p" OnTogglePause="() => TogglePause(p)" />
+                }
+            </section>
+        }
+
+        @if (model.Columns.Count > 0)
+        {
+            <div class="columns" role="list" aria-label="Pipeline">
+                @foreach (var column in model.Columns)
+                {
+                    <section class="column @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null)"
+                             role="listitem" data-column="@column.Id" aria-labelledby="col-@column.Id">
+                        <h2 class="column-header" id="col-@column.Id">
+                            <span class="column-title">@column.Title</span>
+                            <span class="column-count" aria-label="@($"{column.Cards.Count + column.HiddenCount} tickets")">@(column.Cards.Count + column.HiddenCount)</span>
+                        </h2>
+                        <div class="column-cards">
+                            @foreach (var card in column.Cards)
+                            {
+                                <TicketCard @key="(card.Project, card.Key)" Card="card" Now="now"
+                                            ProjectName="@(model.ProjectFilter is null ? ProjectName(card.Project) : null)"
+                                            Approving="approving.Contains((card.Project, card.Key))"
+                                            OnApprove="() => ApproveAsync(card)" />
+                            }
+                            @if (column.Cards.Count == 0 && column.HiddenCount == 0)
+                            {
+                                <p class="column-empty">No tickets</p>
+                            }
+                            @if (column.HiddenCount > 0)
+                            {
+                                <p class="column-more">+@column.HiddenCount older</p>
+                            }
+                        </div>
+                    </section>
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private static readonly TimeSpan ElapsedRefresh = TimeSpan.FromSeconds(30);
+
+    private readonly HashSet<(string Project, string Key)> approving = [];
+    private readonly CancellationTokenSource disposed = new();
+    private BoardModel? model;
+    private string? refreshError;
+    private string? commandMessage;
+    private DateTimeOffset now;
+    private int loadVersion;
+    private string? loadedFilter;
+    private PeriodicTimer? clock;
+
+    [SupplyParameterFromQuery(Name = "project")]
+    public string? Project { get; set; }
+
+    protected override void OnInitialized()
+    {
+        now = Time.GetUtcNow();
+        Notifier.Changed += OnBoardChanged;
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (model is not null && loadedFilter == Project) return;
+        loadedFilter = Project;
+        await ReloadAsync();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender) _ = TickClockAsync();
+    }
+
+    /// <summary>Re-renders elapsed times only; the board itself reloads on <see cref="BoardNotifier.Changed"/>.</summary>
+    private async Task TickClockAsync()
+    {
+        clock = new PeriodicTimer(ElapsedRefresh, Time);
+        try
+        {
+            while (await clock.WaitForNextTickAsync(disposed.Token))
+                await InvokeAsync(() =>
+                {
+                    now = Time.GetUtcNow();
+                    StateHasChanged();
+                });
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposed.
+        }
+    }
+
+    private void OnBoardChanged() => _ = InvokeAsync(async () =>
+    {
+        await ReloadAsync();
+        StateHasChanged();
+    });
+
+    /// <summary>Loads the board; a failure keeps the last board and reports the error in the status line.</summary>
+    private async Task ReloadAsync()
+    {
+        var version = ++loadVersion;
+        try
+        {
+            var board = await Query.LoadBoardAsync(Project, disposed.Token);
+            if (version != loadVersion) return; // a newer load started meanwhile
+            model = board;
+            refreshError = null;
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            if (version == loadVersion) refreshError = $"Could not refresh the board: {e.Message}";
+        }
+        now = Time.GetUtcNow();
+    }
+
+    private void FilterChanged(ChangeEventArgs e)
+    {
+        var id = e.Value as string;
+        Navigation.NavigateTo(string.IsNullOrEmpty(id) ? "/" : $"/?project={Uri.EscapeDataString(id)}");
+    }
+
+    private void PollNow()
+    {
+        Orchestrator.RequestTick();
+        commandMessage = "Poll requested";
+    }
+
+    private async Task TogglePause(BoardProject p)
+    {
+        Registry.SetPaused(p.Id, !p.Paused);
+        commandMessage = p.Paused ? $"{p.Name} resumed" : $"{p.Name} paused";
+        await ReloadAsync();
+    }
+
+    private async Task ApproveAsync(BoardCard card)
+    {
+        var id = (card.Project, card.Key);
+        if (!approving.Add(id)) return;
+        try
+        {
+            var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token);
+            commandMessage = $"{card.Key}: {outcome.Message}";
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (KeyNotFoundException e)
+        {
+            commandMessage = e.Message; // e.g. the ticket or its project was removed meanwhile
+        }
+        catch (Exception e)
+        {
+            commandMessage = $"{card.Key}: approve failed: {e.Message}";
+        }
+        finally
+        {
+            approving.Remove(id);
+        }
+        await ReloadAsync();
+    }
+
+    private string ProjectName(string id) => model?.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;
+
+    public void Dispose()
+    {
+        Notifier.Changed -= OnBoardChanged;
+        disposed.Cancel();
+        clock?.Dispose();
+    }
+}

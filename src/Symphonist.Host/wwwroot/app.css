@@ -1,22 +1,48 @@
+/*
+ * Tokens. Calm cool neutrals; the one loud colour is ochre, reserved for "waiting on you".
+ * Status is always also spelled out in text — colour only reinforces it.
+ */
 :root {
     color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #1b1f24;
-    --muted: #59636e;
-    --surface: #f6f8fa;
-    --border: #d1d9e0;
-    --accent: #0b63ce;
-    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --bg: #eef1f4;
+    --fg: #1d232b;
+    --muted: #5c6773;
+    --surface: #ffffff;
+    --lane: #e4e8ed;
+    --border: #d3d9e0;
+    --accent: #2b5cad;
+    --focus: #2b5cad;
+    --waiting: #8a4b00;
+    --waiting-rail: #d98a1c;
+    --waiting-tint: #fff3df;
+    --danger: #a8202a;
+    --danger-tint: #fdebec;
+    --running: #2463c9;
+    --caution-tint: #fff7d6;
+    --caution-border: #e3c56a;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --radius: 6px;
 }
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --bg: #0f1216;
-        --fg: #e6e9ed;
-        --muted: #9aa4ae;
-        --surface: #181c21;
-        --border: #30363d;
-        --accent: #5aa2f5;
+        --bg: #12161b;
+        --fg: #e3e7ec;
+        --muted: #97a2ae;
+        --surface: #1b2027;
+        --lane: #171b21;
+        --border: #2d353f;
+        --accent: #7aa7f0;
+        --focus: #8fb6f5;
+        --waiting: #f2c27a;
+        --waiting-rail: #e8a33d;
+        --waiting-tint: #2c2315;
+        --danger: #f2868c;
+        --danger-tint: #301a1d;
+        --running: #74a7ff;
+        --caution-tint: #2a2614;
+        --caution-border: #6d5d22;
     }
 }
 
@@ -28,16 +54,220 @@ body {
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font: 15px/1.5 var(--font);
+    font: 14px/1.45 var(--font);
 }
 
 main {
-    padding: 1rem;
+    padding: 1rem 1rem 2rem;
+}
+
+a {
+    color: var(--accent);
 }
 
 h1:focus {
     outline: none;
 }
+
+:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+}
+
+/* Controls */
+
+.button,
+select {
+    font: inherit;
+    color: var(--fg);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.2rem 0.65rem;
+    min-height: 1.9rem;
+}
+
+.button {
+    cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+    border-color: var(--muted);
+}
+
+.button:disabled {
+    cursor: progress;
+    opacity: 0.6;
+}
+
+.button-primary {
+    background: var(--fg);
+    border-color: var(--fg);
+    color: var(--surface);
+    font-weight: 600;
+}
+
+.button-primary:hover:not(:disabled) {
+    border-color: var(--fg);
+    opacity: 0.88;
+}
+
+.button-quiet {
+    background: transparent;
+    color: var(--muted);
+}
+
+.badge {
+    display: inline-block;
+    padding: 0 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.35rem;
+    white-space: nowrap;
+}
+
+/* Board (global because the page's <h1> must stay attribute-free) */
+
+.board-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.board-header h1 {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+}
+
+.counts {
+    margin: 0;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.count-waiting {
+    color: var(--waiting);
+    font-weight: 650;
+}
+
+.count-blocked {
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.board-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: auto;
+}
+
+.loading,
+.setup-hint {
+    color: var(--muted);
+}
+
+.setup-hint {
+    max-width: 44rem;
+    padding: 1rem 1.25rem;
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+}
+
+.setup-hint h2 {
+    margin: 0 0 0.25rem;
+    color: var(--fg);
+    font-size: 1rem;
+}
+
+.setup-hint p {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.projects {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-bottom: 0.9rem;
+}
+
+.columns {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    overflow-x: auto;
+    padding-bottom: 0.5rem;
+    scroll-snap-type: x proximity;
+}
+
+.column {
+    flex: 1 0 15.5rem;
+    max-width: 24rem;
+    min-width: 15.5rem;
+    background: var(--lane);
+    border-radius: var(--radius);
+    padding: 0.5rem;
+    scroll-snap-align: start;
+}
+
+.column-unknown {
+    border: 1px dashed var(--border);
+}
+
+.column-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin: 0 0.15rem 0.5rem;
+    font-size: 0.86rem;
+    font-weight: 600;
+}
+
+.column-count {
+    color: var(--muted);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+
+.column-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.column-empty,
+.column-more {
+    margin: 0.15rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.column-more {
+    text-align: center;
+}
+
+/* Reconnect modal */
 
 #components-reconnect-modal {
     max-width: 24rem;

@@ -1,0 +1,91 @@
+@using System.Globalization
+
+<article class="card card-@Card.Status.ToString().ToLowerInvariant()" data-key="@Card.Key" data-project-card="@Card.Project">
+    <div class="card-top">
+        <a class="card-key" href="@DetailUrl">@Card.Key</a>
+        <span class="badge">@Card.Source</span>
+        <span class="status-label"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
+    </div>
+    <p class="card-title">@Card.Title</p>
+    @if (ProjectName is not null)
+    {
+        <p class="card-project">@ProjectName</p>
+    }
+    @if (Meta().Any() || Card.PrUrl is not null)
+    {
+        <p class="card-meta">
+            @foreach (var item in Meta())
+            {
+                <span>@item</span>
+            }
+            @if (Card.PrUrl is not null)
+            {
+                <a href="@Card.PrUrl" target="_blank" rel="noopener noreferrer">PR</a>
+            }
+        </p>
+    }
+    @if (Card.BlockedReason is { Length: > 0 } reason)
+    {
+        <p class="card-reason">@Truncate(reason)</p>
+    }
+    @if (Card.WaitingOnYou)
+    {
+        <button type="button" class="button button-primary" disabled="@Approving" aria-busy="@(Approving ? "true" : null)"
+                aria-label="@($"Approve {Card.Key}")" @onclick="OnApprove">Approve</button>
+    }
+</article>
+
+@code {
+    public const int ReasonLength = 140;
+
+    [Parameter, EditorRequired] public BoardCard Card { get; set; } = default!;
+
+    /// <summary>The time elapsed times are measured to.</summary>
+    [Parameter, EditorRequired] public DateTimeOffset Now { get; set; }
+
+    /// <summary>Shown on the all-projects board only.</summary>
+    [Parameter] public string? ProjectName { get; set; }
+
+    [Parameter] public bool Approving { get; set; }
+
+    [Parameter] public EventCallback OnApprove { get; set; }
+
+    private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}";
+
+    private string StatusText => Card.Status switch
+    {
+        StageStatus.AwaitingApproval => "Waiting on you",
+        StageStatus.Running => "Running",
+        StageStatus.Blocked => "Blocked",
+        StageStatus.Approved => "Approved",
+        StageStatus.Done => "Done",
+        _ => "Pending",
+    };
+
+    private IEnumerable<string> Meta()
+    {
+        if (Card.Attempts > 0)
+            yield return Card.MaxAttempts is { } max ? $"attempt {Card.Attempts}/{max}" : $"attempt {Card.Attempts}";
+        if (Card.Since is { } since && TimeVerb is { } verb) yield return $"{verb} {Elapsed(Now - since)}";
+        if (Card.CostUsd is { } cost) yield return "$" + cost.ToString("0.00", CultureInfo.InvariantCulture);
+    }
+
+    private string? TimeVerb => Card.Status switch
+    {
+        StageStatus.Running => "running",
+        StageStatus.AwaitingApproval => "waiting",
+        StageStatus.Blocked => "blocked",
+        _ => null,
+    };
+
+    /// <summary><c>4m</c>, <c>2h 5m</c>, <c>3d</c>.</summary>
+    public static string Elapsed(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        if (span.TotalHours < 1) return $"{(int)span.TotalMinutes}m";
+        if (span.TotalDays < 1) return $"{(int)span.TotalHours}h {span.Minutes}m";
+        return $"{(int)span.TotalDays}d";
+    }
+
+    private static string Truncate(string text) => text.Length <= ReasonLength ? text : text[..ReasonLength] + "…";
+}

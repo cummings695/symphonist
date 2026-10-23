@@ -1,0 +1,10 @@
+.status-line {
+    min-height: 1.45em;
+    margin: 0 0 0.6rem;
+    color: var(--muted);
+}
+
+.status-error {
+    color: var(--danger);
+    font-weight: 600;
+}

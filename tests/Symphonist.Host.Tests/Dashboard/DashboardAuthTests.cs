@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
@@ -30,6 +31,7 @@ public sealed class DashboardAuthTests : IDisposable
     }
 
     private readonly TestHome home = new();
+    private readonly FakeTicketStore store = new();
     private readonly List<IDisposable> disposables = [];
     private readonly WebApplicationFactory<Program> factory;
 
@@ -51,7 +53,7 @@ public sealed class DashboardAuthTests : IDisposable
             new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
         var f = new WebApplicationFactory<Program>().WithWebHostBuilder(b => b.ConfigureTestServices(s =>
         {
-            s.AddSingleton<ITicketStore>(new FakeTicketStore());
+            s.AddSingleton<ITicketStore>(store);
             s.AddSingleton<IIntegrationFactory>(integrations);
             s.AddSingleton<IGitWorkspace>(new FakeGitWorkspace());
             s.AddSingleton<IAgentRunner>(new FakeAgentRunner());
@@ -145,11 +147,19 @@ public sealed class DashboardAuthTests : IDisposable
     [Fact]
     public async Task Signed_in_board_renders()
     {
+        var at = DateTimeOffset.Parse("2026-10-21T12:00:00Z");
+        await store.SaveAsync(new Ticket
+        {
+            Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-42", Title = "Seeded", StageId = "plan",
+            Status = StageStatus.AwaitingApproval, CreatedAt = at, UpdatedAt = at, WaitingSince = at,
+        }, default);
         var client = Client();
         await SignInAsync(client);
         var response = await client.GetAsync("/");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("<h1>Symphonist</h1>", await response.Content.ReadAsStringAsync());
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("<h1>Symphonist</h1>", html);
+        Assert.Contains("ORD-42", html);
     }
 
     [Fact]

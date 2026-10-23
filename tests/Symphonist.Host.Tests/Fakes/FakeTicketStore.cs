@@ -19,6 +19,9 @@ public sealed class FakeTicketStore : ITicketStore
     /// <summary>Thrown from ResetInterruptedRunsAsync when set.</summary>
     public Exception? ResetError { get; set; }
 
+    /// <summary>When set, the next ListAsync throws (and clears the flag).</summary>
+    public bool FailNextList { get; set; }
+
     public Ticket Single(string key)
     {
         lock (sync) return Tickets.Single(t => t.Key == key);
@@ -41,8 +44,15 @@ public sealed class FakeTicketStore : ITicketStore
     public Task<IReadOnlyList<Ticket>> ListAsync(string? projectId, CancellationToken ct)
     {
         lock (sync)
+        {
+            if (FailNextList)
+            {
+                FailNextList = false;
+                throw new InvalidOperationException("database is locked");
+            }
             return Task.FromResult<IReadOnlyList<Ticket>>(
                 Tickets.Where(t => projectId is null || t.ProjectId == projectId).Select(Copy).ToList());
+        }
     }
 
     public Task SaveAsync(Ticket ticket, CancellationToken ct)

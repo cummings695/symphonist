@@ -1,0 +1,48 @@
+.project {
+    padding: 0.35rem 0.6rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.project-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+}
+
+.project-name {
+    font-weight: 600;
+}
+
+.project-row .button {
+    margin-left: auto;
+    min-height: 1.6rem;
+    padding: 0 0.6rem;
+}
+
+.project-paused .project-name {
+    color: var(--muted);
+}
+
+.badge-caution {
+    border-color: var(--caution-border);
+    background: var(--caution-tint);
+    color: var(--fg);
+}
+
+.badge-paused {
+    border-color: var(--fg);
+    color: var(--fg);
+    font-weight: 600;
+}
+
+.project-problem {
+    margin: 0.35rem 0 0.1rem;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid var(--caution-border);
+    background: var(--caution-tint);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    overflow-wrap: anywhere;
+}
