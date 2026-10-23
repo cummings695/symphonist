@@ -6,6 +6,7 @@
 @inject ProjectRegistry Registry
 @inject TimeProvider Time
 @inject NavigationManager Navigation
+@inject ILogger<Board> Log
 
 <PageTitle>@(model is { Counts.WaitingOnYou: > 0 } ? $"({model.Counts.WaitingOnYou}) Symphonist" : "Symphonist")</PageTitle>
 
@@ -201,6 +202,7 @@ else
     {
         var id = (card.Project, card.Key);
         if (!approving.Add(id)) return;
+        Exception? failure = null;
         try
         {
             var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token);
@@ -216,14 +218,27 @@ else
         }
         catch (Exception e)
         {
-            commandMessage = $"{card.Key}: approve failed: {e.Message}";
+            Log.LogError(e, "Approving {Project}/{Key} from the dashboard failed", card.Project, card.Key);
+            failure = e;
         }
         finally
         {
             approving.Remove(id);
         }
         await ReloadAsync();
+
+        // The orchestrator stores the approval before syncing it to the tracker, so a failure may come after the
+        // ticket has already moved on: word the message from the ticket's state as reloaded.
+        if (failure is not null)
+            commandMessage = StillWaiting(card)
+                ? $"{card.Key}: approve failed: {failure.Message}"
+                : $"{card.Key}: approved, but syncing to the tracker failed: {failure.Message}";
     }
+
+    /// <summary>True when the reloaded board still shows the card awaiting approval (or could not be reloaded).</summary>
+    private bool StillWaiting(BoardCard card) =>
+        refreshError is not null || model?.Columns.SelectMany(c => c.Cards)
+            .FirstOrDefault(c => c.Project == card.Project && c.Key == card.Key) is not { WaitingOnYou: false };
 
     private string ProjectName(string id) => model?.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;
 

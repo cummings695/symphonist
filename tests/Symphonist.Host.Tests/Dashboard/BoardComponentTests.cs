@@ -26,6 +26,8 @@ public sealed class BoardComponentTests : IDisposable
     private readonly FakeTimeProvider time = new(Now);
     private readonly BoardNotifier notifier;
     private readonly ProjectRegistry registry;
+    private readonly FakeIntegrationFactory integrations = new(
+        new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
     public BoardComponentTests()
     {
@@ -33,8 +35,6 @@ public sealed class BoardComponentTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
-        var integrations = new FakeIntegrationFactory(
-            new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
         var orchestrator = new Orchestrator(registry, store, integrations,
             new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
@@ -140,6 +140,20 @@ public sealed class BoardComponentTests : IDisposable
         Card(cut, "ORD-1").QuerySelector("button")!.Click();
 
         cut.WaitForAssertion(() => Assert.Contains("implement is not awaiting approval", StatusLine(cut)));
+    }
+
+    [Fact]
+    public async Task Approve_stored_but_tracker_sync_failed_says_so()
+    {
+        await Seed("ORD-5", "implement", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set");
+
+        Card(cut, "ORD-5").QuerySelector("button")!.Click();
+
+        cut.WaitForAssertion(() =>
+            Assert.Contains("ORD-5: approved, but syncing to the tracker failed: secret 'jira-acme' not set", StatusLine(cut)));
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-5").Status);
     }
 
     [Fact]
