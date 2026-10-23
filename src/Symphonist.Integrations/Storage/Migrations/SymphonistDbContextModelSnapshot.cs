@@ -155,6 +155,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<bool>("Succeeded")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Summary")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("TicketId")
                         .HasColumnType("TEXT");
 

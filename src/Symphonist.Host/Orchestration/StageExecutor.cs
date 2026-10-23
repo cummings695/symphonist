@@ -246,7 +246,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         await File.WriteAllTextAsync(logPath, result.RawLog, ct);
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
-            result.CostUsd, result.Error, logPath), ct);
+            result.CostUsd, result.Error, logPath, result.Output?.Summary), ct);
 
         ExecutionResult? failure =
             !result.Succeeded ? Failed(result.Error ?? "agent run failed")

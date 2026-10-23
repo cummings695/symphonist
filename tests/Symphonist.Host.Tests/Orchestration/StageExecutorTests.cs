@@ -186,6 +186,15 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal("image symphonist-agent not found", run.Error);
     }
 
+    [Fact] public async Task Records_agent_summary()
+    {
+        agent.OnRun = _ => FakeAgentRunner.Ok(FakeAgentRunner.Output("Wrote the plan"));
+
+        await executor.ExecuteAsync(project, io, At("triage"), source, CancellationToken.None);
+
+        Assert.Equal("Wrote the plan", Assert.Single(store.AgentRuns).Summary);
+    }
+
     [Fact] public async Task Caller_cancellation_propagates()
     {
         using var cts = new CancellationTokenSource();

@@ -75,6 +75,20 @@ public sealed class FakeTicketStore : ITicketStore
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<AgentRunRecord>>(
+                AgentRuns.Where(r => r.TicketId == ticketId).OrderBy(r => r.StartedAt).ToList());
+    }
+
+    public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyDictionary<Guid, decimal>>(AgentRuns.Where(r => r.CostUsd is not null)
+                .GroupBy(r => r.TicketId).ToDictionary(g => g.Key, g => g.Sum(r => r.CostUsd!.Value)));
+    }
+
     public Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)
     {
         if (ResetError is not null) throw ResetError;

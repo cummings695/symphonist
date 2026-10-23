@@ -77,10 +77,29 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             {
                 TicketId = run.TicketId, StageId = run.StageId, StartedAt = run.StartedAt, Duration = run.Duration,
                 Succeeded = run.Succeeded, CostUsd = run.CostUsd, Error = run.Error, RawLogPath = run.RawLogPath,
+                Summary = run.Summary,
             });
             await db.SaveChangesAsync(ct);
         }
         finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var runs = await db.AgentRuns.AsNoTracking().Where(r => r.TicketId == ticketId)
+            .OrderBy(r => r.StartedAt).ThenBy(r => r.Id).ToListAsync(ct);
+        return runs.Select(r => new AgentRunRecord(r.TicketId, r.StageId, r.StartedAt, r.Duration, r.Succeeded,
+            r.CostUsd, r.Error, r.RawLogPath, r.Summary)).ToList();
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        // SQLite stores decimal as TEXT, so sum client-side.
+        var costs = await db.AgentRuns.AsNoTracking().Where(r => r.CostUsd != null)
+            .Select(r => new { r.TicketId, Cost = r.CostUsd!.Value }).ToListAsync(ct);
+        return costs.GroupBy(c => c.TicketId).ToDictionary(g => g.Key, g => g.Sum(c => c.Cost));
     }
 
     public async Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)

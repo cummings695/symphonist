@@ -15,6 +15,7 @@ public sealed class AgentRunEntity
     public decimal? CostUsd { get; set; }
     public string? Error { get; set; }
     public string RawLogPath { get; set; } = "";
+    public string? Summary { get; set; }
 }
 
 public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> options) : DbContext(options)

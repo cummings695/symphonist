@@ -1,5 +1,8 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
 using Symphonist.Integrations.Storage;
@@ -101,6 +104,66 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Equal("boom", runs[1].Error);
         Assert.Equal(TimeSpan.FromSeconds(1), runs[1].Duration);
         Assert.Equal("log2.txt", runs[1].RawLogPath);
+    }
+
+    [Fact]
+    public async Task Agent_runs_round_trip_with_summary_oldest_first()
+    {
+        var t = NewTicket("A", "plan", StageStatus.Pending);
+        await _store.SaveAsync(t, default);
+        var second = new AgentRunRecord(t.Id, "build", Now.AddMinutes(1), TimeSpan.FromSeconds(2), false, null, "boom", "b.json", "second");
+        var first = new AgentRunRecord(t.Id, "plan", Now, TimeSpan.FromSeconds(5), true, 0.12m, null, "a.json", "first");
+        await _store.AddAgentRunAsync(second, default);
+        await _store.AddAgentRunAsync(first, default);
+
+        var runs = await _store.AgentRunsAsync(t.Id, default);
+
+        Assert.Equal([first, second], runs);
+        Assert.Empty(await _store.AgentRunsAsync(Guid.NewGuid(), default));
+    }
+
+    [Fact]
+    public async Task Agent_costs_sum_per_ticket_and_skip_null()
+    {
+        var t1 = NewTicket("A", "plan", StageStatus.Pending);
+        var t2 = NewTicket("B", "plan", StageStatus.Pending);
+        await _store.SaveAsync(t1, default);
+        await _store.SaveAsync(t2, default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t1.Id, "plan", Now, TimeSpan.Zero, true, 0.12m, null, "1"), default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t1.Id, "plan", Now, TimeSpan.Zero, true, 0.30m, null, "2"), default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t1.Id, "plan", Now, TimeSpan.Zero, false, null, "x", "3"), default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t2.Id, "plan", Now, TimeSpan.Zero, false, null, "x", "4"), default);
+
+        var costs = await _store.AgentCostsAsync(default);
+
+        Assert.Equal(new Dictionary<Guid, decimal> { [t1.Id] = 0.42m }, costs);
+    }
+
+    [Fact]
+    public async Task Migrates_database_created_before_summary_column()
+    {
+        var path = Path.Combine(_dir, "old.db");
+        var ticketId = Guid.NewGuid();
+        await using (var db = new SymphonistDbContext(new DbContextOptionsBuilder<SymphonistDbContext>().UseSqlite($"Data Source={path}").Options))
+        {
+            await db.GetService<IMigrator>().MigrateAsync("20261022035014_PendingSourceStatus");
+            // The entity now has a Summary column the old schema lacks, so insert with raw SQL.
+            await db.Database.OpenConnectionAsync();
+            await using var cmd = (SqliteCommand)db.Database.GetDbConnection().CreateCommand();
+            cmd.CommandText = "INSERT INTO AgentRuns (TicketId, StageId, StartedAt, Duration, Succeeded, CostUsd, Error, RawLogPath) " +
+                "VALUES ($t, 'plan', $s, $d, 1, NULL, NULL, 'old.json')";
+            cmd.Parameters.AddWithValue("$t", ticketId);
+            cmd.Parameters.AddWithValue("$s", new DateTimeOffsetToBinaryConverter().ConvertToProvider(Now));
+            cmd.Parameters.AddWithValue("$d", "00:00:01");
+            await cmd.ExecuteNonQueryAsync();
+        }
+        SqliteConnection.ClearAllPools();
+
+        var runs = await new SqliteTicketStore(path).AgentRunsAsync(ticketId, default);
+
+        var run = Assert.Single(runs);
+        Assert.Null(run.Summary);
+        Assert.Equal("old.json", run.RawLogPath);
     }
 
     [Fact]
