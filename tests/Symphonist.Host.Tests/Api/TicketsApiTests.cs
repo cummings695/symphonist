@@ -253,6 +253,19 @@ public sealed class TicketsApiTests : IDisposable
     }
 
     [Fact]
+    public async Task Poll_requests_are_coalesced()
+    {
+        var http = Authorized();
+        var responses = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => http.PostAsync("/api/poll", null)));
+        Assert.All(responses, r => Assert.Equal(HttpStatusCode.Accepted, r.StatusCode));
+
+        await factory.Services.GetRequiredService<Orchestrator>().WhenIdleAsync();
+
+        // Two projects, so one tick queries twice: at most two ticks (one running + one pending) means at most 4.
+        Assert.InRange(tracker.QueryCount, 1, 4);
+    }
+
+    [Fact]
     public async Task Lists_pauses_and_resumes_projects()
     {
         var projects = await Json(await Authorized().GetAsync("/api/projects"));

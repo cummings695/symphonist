@@ -9,6 +9,7 @@ using Symphonist.Core.Agents;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Api;
+using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations;
 using Symphonist.Integrations.ClaudeCode;
@@ -53,7 +54,10 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new OrchestratorOptions());
 builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
 builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
-builder.Services.AddSingleton<ITicketStore>(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));
+builder.Services.AddSingleton<BoardNotifier>();
+builder.Services.AddSingleton(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));
+builder.Services.AddSingleton<ITicketStore>(sp =>
+    new NotifyingTicketStore(sp.GetRequiredService<SqliteTicketStore>(), sp.GetRequiredService<BoardNotifier>()));
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
 builder.Services.AddSingleton<IGitWorkspace>(sp =>
     new GitWorkspace(sp.GetRequiredService<IProcessRunner>(), SymphonistPaths.Resolve("work"),
@@ -72,6 +76,10 @@ builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
 
 var app = builder.Build();
+
+var notifier = app.Services.GetRequiredService<BoardNotifier>();
+app.Services.GetRequiredService<Orchestrator>().ProblemsChanged += notifier.Notify;
+app.Services.GetRequiredService<ProjectRegistry>().PausedChanged += notifier.Notify;
 
 app.UseMiddleware<ApiTokenMiddleware>(apiToken);
 app.MapDefaultEndpoints();

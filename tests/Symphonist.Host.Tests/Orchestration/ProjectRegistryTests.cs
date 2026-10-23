@@ -34,6 +34,22 @@ public sealed class ProjectRegistryTests : IDisposable
     }
 
     [Fact]
+    public void Paused_changed_raised_only_on_change()
+    {
+        var registry = Create();
+        var raised = 0;
+        registry.PausedChanged += () => raised++;
+
+        registry.SetPaused("orders", true);
+        registry.SetPaused("orders", true);
+        Assert.Equal(1, raised);
+
+        registry.SetPaused("orders", false);
+        registry.SetPaused("orders", false);
+        Assert.Equal(2, raised);
+    }
+
+    [Fact]
     public void Duplicate_project_ids_are_all_skipped()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));

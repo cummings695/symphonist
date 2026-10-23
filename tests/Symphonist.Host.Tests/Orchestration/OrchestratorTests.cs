@@ -226,6 +226,28 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Single(store.Tickets);
     }
 
+    [Fact] public async Task Problems_changed_raised_on_set_and_clear_only()
+    {
+        Source("ORD-1", "Backlog");
+        var o = Create();
+        var raised = 0;
+        o.ProblemsChanged += () => raised++;
+
+        factory!.Error = new InvalidOperationException("secret 'jira-acme' not set");
+        await TickIdle(o);
+        Assert.Equal(1, raised);
+
+        await TickIdle(o); // same problem again
+        Assert.Equal(1, raised);
+
+        factory.Error = null;
+        await TickIdle(o);
+        Assert.Equal(2, raised);
+
+        await TickIdle(o); // nothing to clear
+        Assert.Equal(2, raised);
+    }
+
     [Fact] public async Task Respects_max_concurrent_agent_runs()
     {
         Source("ORD-1", "Planned"); Source("ORD-2", "Planned"); Source("ORD-3", "Planned");

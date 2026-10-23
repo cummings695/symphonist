@@ -17,8 +17,15 @@ public sealed class FakeTracker : ITracker
     /// <summary>Thrown from TransitionAsync when set.</summary>
     public Exception? TransitionError { get; set; }
 
-    public Task<IReadOnlyList<SourceTicket>> QueryAsync(CancellationToken ct) =>
-        Task.FromResult(OnQuery?.Invoke() ?? Tickets.ToList());
+    /// <summary>How many times the tracker was queried.</summary>
+    public int QueryCount => Volatile.Read(ref queryCount);
+    private int queryCount;
+
+    public Task<IReadOnlyList<SourceTicket>> QueryAsync(CancellationToken ct)
+    {
+        Interlocked.Increment(ref queryCount);
+        return Task.FromResult(OnQuery?.Invoke() ?? Tickets.ToList());
+    }
 
     /// <summary>Like the real tracker, a successful transition changes the ticket's status in later query results.</summary>
     public Task<bool> TransitionAsync(string key, string targetStatus, CancellationToken ct)

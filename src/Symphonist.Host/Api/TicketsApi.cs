@@ -60,24 +60,9 @@ public static class TicketsApi
         api.MapPost("/tickets/{project}/{key}/unblock", (string project, string key, Orchestrator o, CancellationToken ct) =>
             CommandAsync(() => o.UnblockAsync(project, key, ct)));
 
-        api.MapPost("/poll", (Orchestrator o, IHostApplicationLifetime lifetime, ILoggerFactory logs) =>
+        api.MapPost("/poll", (Orchestrator o) =>
         {
-            var log = logs.CreateLogger(typeof(TicketsApi));
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await o.TickAsync(lifetime.ApplicationStopping);
-                }
-                catch (OperationCanceledException) when (lifetime.ApplicationStopping.IsCancellationRequested)
-                {
-                    // Host shutdown.
-                }
-                catch (Exception e)
-                {
-                    log.LogError(e, "Requested poll failed");
-                }
-            });
+            o.RequestTick();
             return Results.Accepted();
         });
 

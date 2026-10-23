@@ -41,11 +41,25 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             // Host shutdown.
         }
     }, log));
+
+    /// <summary>Raised when a project's problem is set to a different value or cleared.</summary>
+    public event Action? ProblemsChanged;
+
+    /// <summary>Starts a background tick now (coalesced with ticks already requested).</summary>
+    public void RequestTick() => TickTrigger.Request();
+
     private readonly Dictionary<string, (ProjectConfig Config, ProjectIntegrations Io)> io = []; // used under gate only
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
 
     /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
     public string? ProblemOf(string projectId) => problems.GetValueOrDefault(projectId);
+
+    private void SetProblem(string projectId, string problem)
+    {
+        var previous = problems.GetValueOrDefault(projectId);
+        problems[projectId] = problem;
+        if (previous != problem) ProblemsChanged?.Invoke();
+    }
 
     public async Task RecoverAsync(CancellationToken ct)
     {
@@ -133,7 +147,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
 
         // Act on the change now (e.g. start the next stage's run) rather than at the next poll.
-        if (outcome.Changed && options.TickAfterCommands) TickTrigger.Request();
+        if (outcome.Changed && options.TickAfterCommands) RequestTick();
         return outcome;
     }
 
@@ -147,7 +161,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
             // E.g. a missing secret: nothing can run for this project, so make it visible (symphonist projects).
-            problems[p.Id] = e.Message;
+            SetProblem(p.Id, e.Message);
             log.LogError("Project {Project} cannot run: {Error}", p.Id, e.Message);
             return;
         }
@@ -160,13 +174,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
-            problems[p.Id] = $"tracker query failed: {e.Message}";
+            SetProblem(p.Id, $"tracker query failed: {e.Message}");
             log.LogWarning(e, "Tracker query failed for project {Project}; skipping sync this tick", p.Id);
         }
 
         if (results is not null)
         {
-            problems.TryRemove(p.Id, out _);
+            if (problems.TryRemove(p.Id, out _)) ProblemsChanged?.Invoke();
             foreach (var s in results) sources.TryAdd(s.Key, s);
             latestSources[p.Id] = sources;
             await SyncAsync(p, io, sources, ct);

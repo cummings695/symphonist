@@ -80,6 +80,9 @@ public sealed class ProjectRegistry
         lock (sync) return paused.Contains(id);
     }
 
+    /// <summary>Raised by <see cref="SetPaused"/> only when the paused set actually changed.</summary>
+    public event Action? PausedChanged;
+
     public void SetPaused(string id, bool paused)
     {
         lock (sync)
@@ -89,6 +92,7 @@ public sealed class ProjectRegistry
             Directory.CreateDirectory(SymphonistPaths.Home);
             File.WriteAllText(PausedPath, JsonSerializer.Serialize(this.paused.Order(StringComparer.Ordinal)));
         }
+        PausedChanged?.Invoke();
     }
 
     private static string PausedPath => SymphonistPaths.Resolve("paused.json");
