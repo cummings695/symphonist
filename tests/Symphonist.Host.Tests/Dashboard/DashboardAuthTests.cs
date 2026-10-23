@@ -223,6 +223,29 @@ public sealed class DashboardAuthTests : IDisposable
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(request)).StatusCode);
     }
 
+    private static void AssertNotFramable(HttpResponseMessage response)
+    {
+        Assert.Equal("DENY", Assert.Single(response.Headers.GetValues("X-Frame-Options")));
+        Assert.Equal("frame-ancestors 'none'", Assert.Single(response.Headers.GetValues("Content-Security-Policy")));
+    }
+
+    [Fact]
+    public async Task Dashboard_responses_forbid_framing()
+    {
+        var client = Client();
+        AssertNotFramable(await client.GetAsync("/signed-out"));
+        AssertNotFramable(await client.GetAsync("/login?code=nope"));
+        AssertNotFramable(await client.SendAsync(NegotiateRequest("https://evil.example"))); // rejected by the origin check
+
+        AssertNotFramable(await SignInAsync(client));
+        var board = await client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.OK, board.StatusCode);
+        AssertNotFramable(board);
+        var css = await client.GetAsync("/app.css");
+        Assert.Equal(HttpStatusCode.OK, css.StatusCode);
+        AssertNotFramable(css);
+    }
+
     [Fact]
     public async Task Cookie_does_not_authorize_api()
     {

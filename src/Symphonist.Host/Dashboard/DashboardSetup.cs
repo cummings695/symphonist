@@ -96,7 +96,10 @@ public static class DashboardSetup
 
         app.MapGet("/signed-out", () => Results.Content(SignedOut, "text/html"));
 
-        app.MapRazorComponents<App>().AddInteractiveServerRenderMode().RequireAuthorization();
+        // DashboardOriginMiddleware sends frame-ancestors 'none' on every response; drop Blazor's own (weaker) 'self'.
+        app.MapRazorComponents<App>()
+            .AddInteractiveServerRenderMode(o => o.ContentSecurityFrameAncestorsPolicy = null)
+            .RequireAuthorization();
         return app;
     }
 }
