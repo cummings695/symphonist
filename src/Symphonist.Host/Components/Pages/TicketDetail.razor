@@ -1,0 +1,354 @@
+@page "/tickets/{Project}/{Key}"
+@using System.Globalization
+@using Microsoft.AspNetCore.Http
+@implements IAsyncDisposable
+@inject BoardQuery Query
+@inject BoardNotifier Notifier
+@inject Orchestrator Orchestrator
+@inject IJSRuntime JS
+@inject ILogger<TicketDetail> Log
+
+<PageTitle>@Key · Symphonist</PageTitle>
+
+<p class="back"><a href="@BackUrl">← Back to the board</a></p>
+
+<StatusLine Message="@(refreshError ?? commandMessage)" IsError="@(refreshError is not null)" />
+
+@if (model is null)
+{
+    @if (notFound)
+    {
+        <section class="not-found">
+            <h1>Not found</h1>
+            <p>Ticket @Key was not found in project @Project.</p>
+        </section>
+    }
+    else if (refreshError is null)
+    {
+        <p class="loading">Loading the ticket…</p>
+    }
+}
+else
+{
+    var card = model.Card;
+    <div data-ticket-loaded>
+        <header class="ticket-header">
+            <h1><span class="ticket-key">@card.Key</span> <span class="ticket-title">@card.Title</span></h1>
+            <p class="ticket-facts">
+                <span class="badge">@card.Source</span>
+                <span class="ticket-status ticket-@card.Status.ToString().ToLowerInvariant()" data-status>@TicketCard.StatusLabel(card.Status)</span>
+                <span>stage <strong>@card.StageId</strong></span>
+                <span>@(card.MaxAttempts is { } max ? $"attempt {card.Attempts}/{max}" : $"attempt {card.Attempts}")</span>
+                @if (card.CostUsd is { } cost)
+                {
+                    <span>$@cost.ToString("0.00", CultureInfo.InvariantCulture)</span>
+                }
+            </p>
+            @if (card.BlockedReason is { Length: > 0 } reason)
+            {
+                <p class="ticket-reason" data-blocked-reason><strong>Blocked:</strong> @reason</p>
+            }
+            @if (model.Feedback is { Length: > 0 } feedbackText)
+            {
+                <p class="ticket-feedback" data-feedback><strong>Last feedback:</strong> @feedbackText</p>
+            }
+        </header>
+
+        <section class="ticket-links" aria-label="Links">
+            @if (card.IssueUrl is not null)
+            {
+                <a href="@card.IssueUrl" target="_blank" rel="noopener noreferrer">Tracker issue</a>
+            }
+            @if (card.PrUrl is not null)
+            {
+                <a href="@card.PrUrl" target="_blank" rel="noopener noreferrer">Pull request</a>
+            }
+            @if (model.ReleasePrUrl is not null)
+            {
+                <a href="@model.ReleasePrUrl" target="_blank" rel="noopener noreferrer">Release pull request</a>
+            }
+            @if (model.Branch is { Length: > 0 } branch)
+            {
+                <span>Branch <code>@branch</code></span>
+            }
+            @if (model.SpecPath is { Length: > 0 } spec)
+            {
+                <span>Spec <code>@spec</code></span>
+            }
+            @if (model.PlanPath is { Length: > 0 } plan)
+            {
+                <span>Plan <code>@plan</code></span>
+            }
+        </section>
+
+        @if (model.CanApprove || model.CanUnblock || model.CanSendBack)
+        {
+            <section class="ticket-actions" aria-label="Actions">
+                @if (model.CanApprove || model.CanUnblock)
+                {
+                    <div class="action-row">
+                        @if (model.CanApprove)
+                        {
+                            <button type="button" class="button button-primary" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                                    @onclick="ApproveAsync">Approve</button>
+                        }
+                        @if (model.CanUnblock)
+                        {
+                            <button type="button" class="button" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                                    @onclick="UnblockAsync">Unblock</button>
+                        }
+                    </div>
+                }
+                @if (model.CanSendBack)
+                {
+                    <div class="send-back">
+                        <label for="send-back-feedback">Send back with feedback</label>
+                        <textarea id="send-back-feedback" rows="3" required @bind="feedback" @bind:event="oninput"></textarea>
+                        <div class="action-row">
+                            <label class="target">
+                                <span>Stage</span>
+                                <select @bind="sendBackTarget">
+                                    @foreach (var target in model.SendBackTargets)
+                                    {
+                                        <option value="@target">@target</option>
+                                    }
+                                </select>
+                            </label>
+                            <button type="button" class="button" disabled="@(busy || string.IsNullOrWhiteSpace(feedback))"
+                                    aria-busy="@(busy ? "true" : null)" @onclick="SendBackAsync">Send back</button>
+                        </div>
+                    </div>
+                }
+            </section>
+        }
+
+        <section aria-labelledby="runs-heading">
+            <h2 id="runs-heading">Agent runs</h2>
+            @if (model.Runs.Count == 0)
+            {
+                <p class="empty">No agent runs yet.</p>
+            }
+            else
+            {
+                <div class="table-wrap">
+                    <table class="runs">
+                        <thead>
+                            <tr><th>Stage</th><th>Started</th><th>Duration</th><th>Result</th><th>Cost</th><th>Summary or error</th><th>Log</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var run in model.Runs)
+                            {
+                                <tr data-run>
+                                    <td>@run.StageId</td>
+                                    <td>@LocalTime(run.StartedAt)</td>
+                                    <td>@Duration(run.Duration)</td>
+                                    <td class="@(run.Succeeded ? null : "run-failed")">@(run.Succeeded ? "succeeded" : "failed")</td>
+                                    <td>@(run.CostUsd is { } c ? "$" + c.ToString("0.00", CultureInfo.InvariantCulture) : "")</td>
+                                    <td class="run-text">@(run.Succeeded ? run.Summary : run.Error ?? run.Summary)</td>
+                                    <td class="run-log">
+                                        <code>@run.RawLogPath</code>
+                                        <button type="button" class="button button-quiet" aria-label="@($"Copy path of the {run.StageId} log")"
+                                                @onclick="() => CopyPathAsync(run.RawLogPath)">Copy path</button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <section aria-labelledby="events-heading">
+            <h2 id="events-heading">Events</h2>
+            @if (model.Events.Count == 0)
+            {
+                <p class="empty">No events yet.</p>
+            }
+            else
+            {
+                <ol class="events">
+                    @foreach (var e in model.Events)
+                    {
+                        <li data-event>
+                            <time datetime="@e.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(e.At)</time>
+                            <span class="event-stage">@e.StageId</span>
+                            <span class="event-message">@e.Message</span>
+                        </li>
+                    }
+                </ol>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private TicketDetailModel? model;
+    private bool notFound;
+    private string? refreshError;
+    private string? commandMessage;
+    private bool busy;
+    private int loadVersion;
+    private string? loadedFor;
+    private string feedback = "";
+    private string? sendBackTarget;
+    private IJSObjectReference? clipboard;
+
+    [Parameter] public string Project { get; set; } = "";
+
+    [Parameter] public string Key { get; set; } = "";
+
+    /// <summary>The board's project filter, kept in the back link.</summary>
+    [SupplyParameterFromQuery(Name = "from")]
+    public string? From { get; set; }
+
+    /// <summary>Set while prerendering, so a missing ticket answers 404 (the message is rendered either way).</summary>
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private string BackUrl => From is { Length: > 0 } from ? $"/?project={Uri.EscapeDataString(from)}" : "/";
+
+    protected override void OnInitialized() => Notifier.Changed += OnTicketChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var current = $"{Project}/{Key}";
+        if (loadedFor == current) return;
+        loadedFor = current;
+        model = null;
+        notFound = false;
+        commandMessage = null;
+        await ReloadAsync();
+        if (notFound && HttpContext is { Response.HasStarted: false } http)
+            http.Response.StatusCode = StatusCodes.Status404NotFound;
+    }
+
+    private void OnTicketChanged() => _ = InvokeAsync(async () =>
+    {
+        await ReloadAsync();
+        StateHasChanged();
+    });
+
+    /// <summary>Loads the ticket; a failure keeps the last model and reports the error in the status line.</summary>
+    private async Task ReloadAsync()
+    {
+        var version = ++loadVersion;
+        try
+        {
+            var loaded = await Query.LoadTicketAsync(Project, Key, disposed.Token);
+            if (version != loadVersion) return; // a newer load started meanwhile
+            model = loaded;
+            notFound = loaded is null;
+            refreshError = null;
+            if (loaded is not null && (sendBackTarget is null || !loaded.SendBackTargets.Contains(sendBackTarget)))
+                sendBackTarget = loaded.SendBackTargets.FirstOrDefault();
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            if (version == loadVersion) refreshError = $"Could not refresh the ticket: {e.Message}";
+        }
+    }
+
+    private Task ApproveAsync() =>
+        RunAsync("approve", "approved", ct => Orchestrator.ApproveAsync(Project, Key, ct));
+
+    private Task UnblockAsync() =>
+        RunAsync("unblock", "unblocked", ct => Orchestrator.UnblockAsync(Project, Key, ct));
+
+    private async Task SendBackAsync()
+    {
+        var text = feedback.Trim();
+        if (text.Length == 0) return;
+        var target = sendBackTarget;
+        if (await RunAsync("send back", "sent back", ct => Orchestrator.SendBackAsync(Project, Key, text, target, ct)))
+            feedback = "";
+    }
+
+    /// <summary>Runs one command and reloads; every failure is shown in the status line and cannot reach the circuit.</summary>
+    /// <returns>True when the command was applied.</returns>
+    private async Task<bool> RunAsync(string verb, string pastTense, Func<CancellationToken, Task<TransitionOutcome>> command)
+    {
+        if (busy || model is null) return false;
+        busy = true;
+        var before = (model.Card.StageId, model.Card.Status);
+        Exception? failure = null;
+        var applied = false;
+        try
+        {
+            var outcome = await command(disposed.Token);
+            commandMessage = $"{Key}: {outcome.Message}";
+            applied = outcome.Changed;
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (KeyNotFoundException e)
+        {
+            commandMessage = e.Message; // e.g. the ticket, its project or the target stage was removed meanwhile
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Command '{Verb}' on {Project}/{Key} from the dashboard failed", verb, Project, Key);
+            failure = e;
+        }
+        finally
+        {
+            busy = false;
+        }
+        await ReloadAsync();
+
+        // The orchestrator stores the change before syncing it to the tracker, so a failure may come after the
+        // ticket has already moved: word the message from the ticket's state as reloaded.
+        if (failure is not null)
+        {
+            var moved = refreshError is null && model is { } now && (now.Card.StageId, now.Card.Status) != before;
+            commandMessage = moved
+                ? $"{Key}: {pastTense}, but syncing to the tracker failed: {failure.Message}"
+                : $"{Key}: {verb} failed: {failure.Message}";
+            applied = moved;
+        }
+        return applied;
+    }
+
+    private async Task CopyPathAsync(string path)
+    {
+        try
+        {
+            clipboard ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/clipboard.js");
+            commandMessage = await clipboard.InvokeAsync<bool>("copyText", path)
+                ? "Copied the log path"
+                : "Could not copy the log path";
+        }
+        catch (Exception e) when (e is JSException or InvalidOperationException or JSDisconnectedException)
+        {
+            commandMessage = "Could not copy the log path";
+        }
+    }
+
+    private static string LocalTime(DateTimeOffset at) =>
+        at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    private static string Duration(TimeSpan span) =>
+        span.TotalMinutes < 1 ? $"{(int)span.TotalSeconds}s" : $"{(int)span.TotalMinutes}m {span.Seconds:00}s";
+
+    public async ValueTask DisposeAsync()
+    {
+        Notifier.Changed -= OnTicketChanged;
+        disposed.Cancel();
+        if (clipboard is not null)
+        {
+            try
+            {
+                await clipboard.DisposeAsync();
+            }
+            catch (Exception e) when (e is JSDisconnectedException or JSException)
+            {
+                // The circuit is already gone.
+            }
+        }
+    }
+}

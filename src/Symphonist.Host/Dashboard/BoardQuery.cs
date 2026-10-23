@@ -52,6 +52,31 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         return new BoardModel(boardProjects, filter?.Id, columns, counts);
     }
 
+    /// <summary>One ticket with its runs and events (newest first), or null when it is not in the store.</summary>
+    public async Task<TicketDetailModel?> LoadTicketAsync(string projectId, string key, CancellationToken ct)
+    {
+        if (await store.FindAsync(projectId, key, ct) is not { } t) return null;
+        var runs = (await store.AgentRunsAsync(t.Id, ct)).OrderByDescending(r => r.StartedAt).ToList();
+        var events = (await store.EventsAsync(t.Id, ct)).OrderByDescending(e => e.At).ThenByDescending(e => e.Id).ToList();
+        var project = projects.Projects.FirstOrDefault(p => p.Id == t.ProjectId);
+
+        var costs = runs.Where(r => r.CostUsd is not null).ToList();
+        var card = ToCard(t, project, costs.Count == 0
+            ? new Dictionary<Guid, decimal>()
+            : new Dictionary<Guid, decimal> { [t.Id] = costs.Sum(r => r.CostUsd!.Value) });
+
+        // Without its project or stage in the configuration the page is read-only.
+        var stageIndex = project?.Pipeline.ToList().FindIndex(s => s.Id == t.StageId) ?? -1;
+        var known = stageIndex >= 0;
+        var targets = known
+            ? project!.Pipeline.Take(stageIndex + 1).Reverse().Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
+            : [];
+        var sendBack = known && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
+        return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
+            TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
+            known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked);
+    }
+
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
         IReadOnlyList<Ticket> tickets)
     {

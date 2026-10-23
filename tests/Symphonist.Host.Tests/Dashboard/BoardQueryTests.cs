@@ -199,4 +199,64 @@ public sealed class BoardQueryTests : IDisposable
         Assert.Equal(Isolation.Host, billing.Isolation);
         Assert.False(billing.Paused);
     }
+
+    [Fact]
+    public async Task Detail_lists_runs_and_events_newest_first()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, with: x => x.Branch = "feature/ORD-1");
+        await store.AddAgentRunAsync(new AgentRunRecord(t.Id, "plan", Now.AddHours(-3), TimeSpan.FromMinutes(2), true, 0.5m, null, "a.log", "planned"), default);
+        await store.AddAgentRunAsync(new AgentRunRecord(t.Id, "implement", Now.AddHours(-1), TimeSpan.FromMinutes(5), false, 1.25m, "boom", "b.log"), default);
+        await store.AddEventAsync(t.Id, "plan", "first", Now.AddHours(-3), default);
+        await store.AddEventAsync(t.Id, "implement", "second", Now.AddHours(-1), default);
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+
+        Assert.Equal(["implement", "plan"], detail.Runs.Select(r => r.StageId));
+        Assert.Equal(["second", "first"], detail.Events.Select(e => e.Message));
+        Assert.Equal(1.75m, detail.Card.CostUsd);
+        Assert.Equal("feature/ORD-1", detail.Branch);
+    }
+
+    [Fact]
+    public async Task Send_back_targets_are_current_then_earlier()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+
+        Assert.Equal(["implement", "plan", "triage"], detail.SendBackTargets);
+    }
+
+    [Theory]
+    [InlineData(StageStatus.AwaitingApproval, true, true, false)]
+    [InlineData(StageStatus.Blocked, false, true, true)]
+    [InlineData(StageStatus.Approved, false, true, false)]
+    [InlineData(StageStatus.Running, false, false, false)]
+    public async Task Detail_actions_follow_status(StageStatus status, bool approve, bool sendBack, bool unblock)
+    {
+        await Seed("ORD-1", "implement", status);
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+
+        Assert.Equal((approve, sendBack, unblock), (detail.CanApprove, detail.CanSendBack, detail.CanUnblock));
+    }
+
+    [Fact]
+    public async Task Unknown_project_detail_is_read_only()
+    {
+        await Seed("GONE-1", "plan", StageStatus.AwaitingApproval, "gone");
+
+        var detail = (await query.LoadTicketAsync("gone", "GONE-1", default))!;
+
+        Assert.False(detail.CanApprove);
+        Assert.False(detail.CanSendBack);
+        Assert.False(detail.CanUnblock);
+        Assert.Empty(detail.SendBackTargets);
+    }
+
+    [Fact]
+    public async Task Missing_ticket_detail_is_null()
+    {
+        Assert.Null(await query.LoadTicketAsync("orders", "NOPE-1", default));
+    }
 }

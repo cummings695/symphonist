@@ -1,5 +1,6 @@
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Dashboard;
 
@@ -15,3 +16,7 @@ public sealed record BoardCounts(int WaitingOnYou, int Running, int Blocked);
 
 public sealed record BoardModel(IReadOnlyList<BoardProject> Projects, string? ProjectFilter,
     IReadOnlyList<BoardColumn> Columns, BoardCounts Counts);
+
+public sealed record TicketDetailModel(BoardCard Card, string? Branch, string? SpecPath, string? PlanPath,
+    Uri? ReleasePrUrl, string? Feedback, IReadOnlyList<AgentRunRecord> Runs, IReadOnlyList<TicketEvent> Events,
+    IReadOnlyList<string> SendBackTargets, bool CanApprove, bool CanSendBack, bool CanUnblock);

@@ -202,6 +202,15 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Filtered_board_links_carry_the_filter_to_the_detail_page()
+    {
+        await SeedDefault();
+
+        Assert.Equal("/tickets/billing/BIL-1?from=billing",
+            Card(RenderBoard("/?project=billing"), "BIL-1").QuerySelector("a.card-key")?.GetAttribute("href"));
+    }
+
+    [Fact]
     public void Paused_project_offers_resume()
     {
         registry.SetPaused("orders", true);

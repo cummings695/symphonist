@@ -22,6 +22,9 @@ public sealed class FakeTicketStore : ITicketStore
     /// <summary>When set, the next ListAsync throws (and clears the flag).</summary>
     public bool FailNextList { get; set; }
 
+    /// <summary>When set, the next FindAsync throws (and clears the flag).</summary>
+    public bool FailNextFind { get; set; }
+
     public Ticket Single(string key)
     {
         lock (sync) return Tickets.Single(t => t.Key == key);
@@ -38,6 +41,14 @@ public sealed class FakeTicketStore : ITicketStore
 
     public Task<Ticket?> FindAsync(string projectId, string key, CancellationToken ct)
     {
+        lock (sync)
+        {
+            if (FailNextFind)
+            {
+                FailNextFind = false;
+                throw new InvalidOperationException("database is locked");
+            }
+        }
         lock (sync) return Task.FromResult(Tickets.FirstOrDefault(t => t.ProjectId == projectId && t.Key == key) is { } t ? Copy(t) : null);
     }
 

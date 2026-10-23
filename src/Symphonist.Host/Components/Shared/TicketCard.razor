@@ -50,9 +50,15 @@
 
     [Parameter] public EventCallback OnApprove { get; set; }
 
-    private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}";
+    /// <summary>The board's project filter, carried to the detail page so its back link keeps it.</summary>
+    [Parameter] public string? From { get; set; }
 
-    private string StatusText => Card.Status switch
+    private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}"
+        + (From is { Length: > 0 } from ? $"?from={Uri.EscapeDataString(from)}" : "");
+
+    private string StatusText => StatusLabel(Card.Status);
+
+    public static string StatusLabel(StageStatus status) => status switch
     {
         StageStatus.AwaitingApproval => "Waiting on you",
         StageStatus.Running => "Running",
