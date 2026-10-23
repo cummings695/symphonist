@@ -224,6 +224,21 @@ public sealed class TicketDetailComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Copy_path_timeout_is_reported_and_page_keeps_rendering()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.Pending);
+        await store.AddAgentRunAsync(new AgentRunRecord(t.Id, "plan", Now, TimeSpan.FromSeconds(5), true, null, null, "logs/a.log"), default);
+        var module = ctx.JSInterop.SetupModule("./js/clipboard.js");
+        module.Setup<bool>("copyText", "logs/a.log").SetException(new TaskCanceledException());
+        var cut = Loaded(Render());
+
+        Button(cut, "Copy path").Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("Could not copy the log path", StatusLine(cut)));
+        Assert.Contains("Title ORD-1", cut.Markup);
+    }
+
+    [Fact]
     public void Missing_ticket_shows_not_found()
     {
         var cut = Render("NOPE-1");

@@ -323,8 +323,10 @@ else
                 ? "Copied the log path"
                 : "Could not copy the log path";
         }
-        catch (Exception e) when (e is JSException or InvalidOperationException or JSDisconnectedException)
+        catch (Exception e)
         {
+            // Copying is a convenience: nothing here may reach the circuit (timeouts, disposed module, disconnects).
+            Log.LogWarning(e, "Copying a log path from the dashboard failed");
             commandMessage = "Could not copy the log path";
         }
     }

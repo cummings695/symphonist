@@ -255,6 +255,17 @@ public sealed class BoardQueryTests : IDisposable
     }
 
     [Fact]
+    public async Task Unknown_stage_in_known_project_detail_is_read_only()
+    {
+        await Seed("ORD-1", "renamed", StageStatus.AwaitingApproval);
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+
+        Assert.False(detail.CanApprove || detail.CanSendBack || detail.CanUnblock);
+        Assert.Empty(detail.SendBackTargets);
+    }
+
+    [Fact]
     public async Task Missing_ticket_detail_is_null()
     {
         Assert.Null(await query.LoadTicketAsync("orders", "NOPE-1", default));
