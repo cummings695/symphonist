@@ -395,7 +395,7 @@ public sealed class BoardComponentTests : IDisposable
 
         var cut = RenderBoard();
 
-        Assert.Equal("All projects", cut.Find("h1").TextContent.Trim());
+        Assert.Equal("All projects", Assert.Single(cut.FindAll("h1")).TextContent.Trim());
         var problem = cut.Find("[data-problem='billing']");
         Assert.Contains("Project billing:", problem.TextContent);
         Assert.Contains("secret 'jira-acme' not set", problem.TextContent);
@@ -407,7 +407,10 @@ public sealed class BoardComponentTests : IDisposable
     {
         var cut = RenderBoard("/?project=orders");
 
-        Assert.Equal("Project orders", cut.Find("h1").TextContent.Trim());
+        var h1 = Assert.Single(cut.FindAll("h1")); // one element in every state, so navigation focus survives loads
+        Assert.Equal("Project orders", h1.TextContent.Trim());
+        Assert.Null(h1.Closest("[data-project]"));
+        Assert.NotNull(cut.Find("[data-project='orders']"));
         Assert.Equal("orders", ctx.Services.GetRequiredService<DashboardChrome>().CurrentProject);
     }
 

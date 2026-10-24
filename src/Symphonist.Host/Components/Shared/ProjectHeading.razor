@@ -1,8 +1,7 @@
 @using Symphonist.Core.Risk
-@* The filtered board's page heading: the project name is the page <h1> (the focus target after navigation). *@
-<div class="project @(Project.Paused ? "project-paused" : null)" data-project="@Project.Id">
+@* The filtered board's project heading, placed after the board's <h1> (which holds the name and stays one element). *@
+<div class="project" data-project="@Project.Id">
     <div class="project-row">
-        <h1 class="page-title">@Project.Name</h1>
         <span class="badge">@Project.Source</span>
         <span class="badge" title="The risk reviewer's mode for this project">Reviewer: @Project.Review.ToString().ToLowerInvariant()</span>
         @if (Project.Isolation == Isolation.Host)

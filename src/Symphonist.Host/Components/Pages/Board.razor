@@ -9,13 +9,21 @@
 @inject IJSRuntime JS
 @inject ILogger<Board> Log
 
-@* The page <h1> (the focus target after navigation) is always there: the project heading, else the plain one.
-   An unknown project id loads the all-projects board; until the first load, the id stands in for the name. *@
-@{ var filtered = model?.Projects.FirstOrDefault(p => p.Id == model.ProjectFilter); }
-@if (filtered is null)
-{
-    <h1 class="page-title">@(model is null && !string.IsNullOrEmpty(Project) ? Project : "All projects")</h1>
+@* Exactly one page <h1>, always this element, so the focus FocusOnNavigate gives it survives every load; only its
+   text changes. The name comes from any loaded board (all projects are listed); an unknown id loads the
+   all-projects board, and until the first load the id stands in for the name. *@
+@{
+    var filtered = model?.Projects.FirstOrDefault(p => p.Id == model.ProjectFilter);
+    var heading = model?.Projects.FirstOrDefault(p => p.Id == Project)?.Name
+        ?? (model is null && !string.IsNullOrEmpty(Project) ? Project : "All projects");
 }
+<div class="page-head">
+    <h1 class="page-title">@heading</h1>
+    @if (filtered is not null)
+    {
+        <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
+    }
+</div>
 
 @if (model is null)
 {
@@ -34,11 +42,7 @@ else
                 <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>; the host picks it up on restart.</p>
             </section>
         }
-        else if (filtered is not null)
-        {
-            <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
-        }
-        else if (model.Projects.Any(p => p.Problem is { Length: > 0 }))
+        else if (filtered is null && model.Projects.Any(p => p.Problem is { Length: > 0 }))
         {
             <div class="board-problems">
                 @foreach (var p in model.Projects.Where(p => p.Problem is { Length: > 0 }))

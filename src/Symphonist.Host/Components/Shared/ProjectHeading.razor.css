@@ -1,23 +1,15 @@
+/* The root takes no box: the row sits beside the board's <h1> in its .page-head line, the problem wraps below. */
 .project {
-    margin-bottom: 0.9rem;
+    display: contents;
 }
 
 .project-row {
     display: flex;
+    flex: 1 1 auto;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem 0.65rem;
-}
-
-/* A long name wraps rather than pushing the badges off a phone screen. */
-.project-row h1 {
     min-width: 0;
-    margin: 0;
-    overflow-wrap: anywhere;
-}
-
-.project-paused h1 {
-    color: var(--muted);
 }
 
 .project-row .button {
@@ -48,7 +40,8 @@
 }
 
 .project-problem {
-    margin: 0.6rem 0 0;
+    flex-basis: 100%;
+    margin: 0.2rem 0 0;
     padding: 0.45rem 0.75rem;
     border-left: 3px solid var(--caution-border);
     background: var(--caution-tint);

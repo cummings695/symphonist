@@ -337,8 +337,19 @@ select {
 
 /* Board (global because the page's <h1> must stay attribute-free) */
 
+/* The page <h1>, then (filtered board) the project's badges, agreement and Pause on the same line. */
+.page-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.65rem;
+    margin-bottom: 0.9rem;
+}
+
 .page-title {
-    margin: 0 0 0.9rem;
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
     font-size: 1.3rem;
     font-weight: 650;
     letter-spacing: -0.01em;
