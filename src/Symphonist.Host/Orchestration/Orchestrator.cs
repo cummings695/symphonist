@@ -249,8 +249,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             }
             if (Same(t.LastSourceStatus, s.Status))
             {
-                await RetryTrackerMoveAsync(io, t, ct); // first: a @claude send-back's own move replaces the retry
-                await HandleClaudeCommentsAsync(p, io, t, s, now, ct); // only acts at a gate or block, never on Done
+                // A @claude rerun's own move replaces the retry, so the retry waits for a tick without one.
+                if (!await HandleClaudeCommentsAsync(p, io, t, s, now, ct)) await RetryTrackerMoveAsync(io, t, ct);
                 continue;
             }
 
@@ -306,12 +306,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Developer "@claude" comments made since the stage started rerun it, with the comments as feedback, once it waits
-    /// at its gate or is blocked; comments made while it is pending or running wait for that.
+    /// at its gate or is blocked; comments made while it is pending or running wait for that. Returns whether it reran.
     /// </summary>
-    private async Task HandleClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket s,
+    private async Task<bool> HandleClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket s,
         DateTimeOffset now, CancellationToken ct)
     {
-        if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Blocked)) return;
+        if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Blocked)) return false;
         var since = t.ClaudeCommentsHandledAt is { } handled && (t.StageStartedAt is not { } started || handled > started)
             ? handled
             : t.StageStartedAt; // the later of the two: entering a stage leaves earlier comments behind
@@ -321,15 +321,16 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             .Where(c => c.Request is not null)
             .OrderBy(c => c.Created)
             .ToList();
-        if (comments.Count == 0) return;
+        if (comments.Count == 0) return false;
 
         var requests = comments.Select(c => c.Request!).Where(r => r.Length > 0).ToList();
         var feedback = requests.Count > 0 ? string.Join("\n\n", requests) : "(no details given)";
+        await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct); // the cause before its effects
         var outcome = PipelineEngine.SendBack(p, t, feedback, t.StageId, now);
         t.ClaudeCommentsHandledAt = comments[^1].Created;
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, outcome, ct);
-        await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct);
+        return true;
     }
 
     private async Task AdvanceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source, CancellationToken ct)

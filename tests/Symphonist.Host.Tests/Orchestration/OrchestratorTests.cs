@@ -747,6 +747,39 @@ public sealed class OrchestratorTests : IDisposable
         Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("@claude", StringComparison.Ordinal));
     }
 
+    [Fact] public async Task Claude_comment_rerun_replaces_a_pending_retry_in_the_same_tick()
+    {
+        // The move into plan failed earlier, so the card is still in Backlog with a retry to Planned pending.
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Backlog", t => t.TrackerRetryStatus = "Planned");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude also cover refunds"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal([("ORD-1", "Planned")], tracker.Transitions); // the rerun's own move, attempted once
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal(["@claude comment: rerunning plan", "sent back to plan"], store.EventMessages("ORD-1")); // no retry
+    }
+
+    [Fact] public async Task Claude_comment_dated_after_host_clock_reruns_once()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        // Jira's clock is ahead: the comment is later than the rerun's StageStartedAt, so only
+        // ClaudeCommentsHandledAt keeps it from triggering again.
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: A, B"));
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "@claude comment: rerunning triage");
+    }
+
     [Fact] public async Task Running_agent_ticket_without_a_run_is_retried()
     {
         await Seed("ORD-1", "plan", StageStatus.Running, "Planned");
