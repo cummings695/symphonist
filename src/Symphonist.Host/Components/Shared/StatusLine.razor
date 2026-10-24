@@ -1,5 +1,5 @@
 @* Always rendered so screen readers announce each new message. *@
-<p class="status-line @(IsError ? "status-error" : null)" role="status">@Message</p>
+<p class="status-line @(IsError ? "status-error" : null) @(string.IsNullOrEmpty(Message) ? "status-line-empty" : null)" role="status">@Message</p>
 
 @code {
     /// <summary>The last command outcome or refresh error; nothing is shown when null.</summary>

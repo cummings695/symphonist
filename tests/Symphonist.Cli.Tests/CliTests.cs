@@ -119,6 +119,15 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Send_back_help_describes_default()
+    {
+        var r = await RunAsync(new FailingHandler(), "", "send-back", "--help");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Contains("default: rerun the current stage", r.Out);
+    }
+
+    [Fact]
     public async Task Send_back_requires_message()
     {
         var handler = new StubHttpHandler();

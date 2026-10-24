@@ -256,6 +256,22 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public void Empty_status_line_takes_no_space()
+    {
+        var cut = RenderBoard();
+
+        Assert.Contains("status-line-empty", cut.Find("[role=status]").ClassList);
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Poll now").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            Assert.DoesNotContain("status-line-empty", cut.Find("[role=status]").ClassList);
+            Assert.Equal("Poll requested", StatusLine(cut));
+        });
+    }
+
+    [Fact]
     public void Paused_project_offers_resume()
     {
         registry.SetPaused("orders", true);

@@ -337,6 +337,11 @@ select {
         display: none;
     }
 
+    /* A plain header (empty stage) reserves the chevron's width (gap + margin + box) so counts line up. */
+    .column-header:not(:has(.column-toggle)) {
+        padding-right: 1.05rem;
+    }
+
     /* A non-empty stage folds to its header line with a tap on the header. */
     .column-toggle {
         margin: -0.35rem -0.15rem;

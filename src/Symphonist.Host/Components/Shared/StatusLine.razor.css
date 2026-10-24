@@ -8,3 +8,11 @@
     color: var(--danger);
     font-weight: 600;
 }
+
+/* Stays in the DOM as a live region but leaves no blank band when there is nothing to say. */
+.status-line-empty {
+    min-height: 0;
+    height: 0;
+    margin: 0;
+    padding: 0;
+}

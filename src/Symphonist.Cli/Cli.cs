@@ -45,7 +45,7 @@ public static class Cli
         var sendBack = new Command("send-back", "Send a ticket back with feedback");
         var (sendProject, sendKey) = Ticket(sendBack);
         var message = new Option<string>("-m", "--message") { Description = "Feedback for the agent", Required = true };
-        var toStage = new Option<string?>("--to") { Description = "Stage to send back to (default: the stage before approval)" };
+        var toStage = new Option<string?>("--to") { Description = "Stage to send back to (default: rerun the current stage)" };
         sendBack.Add(message);
         sendBack.Add(toStage);
         Run(sendBack, async (r, ct) =>
