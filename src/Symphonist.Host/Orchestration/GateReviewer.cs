@@ -32,7 +32,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
     /// <summary>Binary types a patch may show as "Binary files ... differ"; any other binary line hides content.</summary>
     private static readonly HashSet<string> KnownBinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf", "zip", "woff", "woff2", "ttf", "eot",
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "woff", "woff2", "ttf", "eot",
     };
 
     /// <summary>Never throws for agent or git failures (returns <see cref="GateVerdict.Failed"/>); honours <paramref name="ct"/>.</summary>
@@ -59,19 +59,22 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         var stage = p.Stage(t.StageId);
         var runner = agents.For(p.Review.Agent.Type);
         var branch = t.Branch ?? $"symphonist/{t.Key}";
+        foreach (var name in new[] { branch, p.Repo.MainBranch, p.Repo.ProductionBranch })
+            if (!IsValidBranchName(name)) return new(GateVerdict.Failed($"invalid branch name '{name}'"), null);
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
         var forced = new List<string>();
 
         // Pin the review to commits: what is pushed (implement) or about to ship (release), never the local checkout.
+        // Full ref names: a tag or local branch called "origin/main" must not shadow the remote-tracking branch.
         var range = "";
         string? head = null;
         IReadOnlyList<string> changed = [];
         var diff = "";
         if (DiffRefs(p, stage.Kind, branch) is var (baseRef, headRef))
         {
-            var baseSha = await git.ResolveCommitAsync(workspace, baseRef, ct);
+            var baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/{baseRef}", ct);
             if (baseSha is null) return new(GateVerdict.Failed($"cannot resolve {baseRef}"), null);
-            head = await git.ResolveCommitAsync(workspace, headRef, ct);
+            head = await git.ResolveCommitAsync(workspace, $"refs/remotes/{headRef}", ct);
             if (head is null)
                 return new(GateVerdict.Failed(stage.Kind == StageKind.Implement
                     ? $"branch not pushed: {headRef}"
@@ -149,6 +152,9 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
     [GeneratedRegex("<(/?untrusted-)", RegexOptions.IgnoreCase)]
     private static partial Regex ForgedMarker();
 
+    [GeneratedRegex("^(new file mode|deleted file mode|old mode|new mode|index [0-9a-f]+[.][.][0-9a-f]+) 160000$")]
+    private static partial Regex GitlinkHeader();
+
     [GeneratedRegex("^Binary files (.+) and (.+) differ$")]
     private static partial Regex BinaryLine();
 
@@ -158,6 +164,15 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         StageKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{p.Repo.MainBranch}"),
         _ => null, // Triage, Plan: the reviewer reads the ticket and the spec/plan files
     };
+
+    /// <summary>The rules of <c>git check-ref-format --branch</c> that matter here; anything doubtful is rejected.</summary>
+    internal static bool IsValidBranchName(string name) =>
+        name.Length is > 0 and <= 255
+        && !name.StartsWith('-') && !name.StartsWith('/') && !name.EndsWith('/') && !name.EndsWith('.')
+        && !name.EndsWith(".lock", StringComparison.Ordinal)
+        && !name.Contains("..") && !name.Contains("@{") && !name.Contains("//") && name != "@"
+        && !name.Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || c is '~' or '^' or ':' or '?' or '*' or '[' or '\\')
+        && !name.Split('/').Any(part => part.StartsWith('.') || part.EndsWith(".lock", StringComparison.Ordinal));
 
     /// <summary>Single-line, repo-relative, no "..", at most <see cref="MaxPathLength"/> characters.</summary>
     private static bool IsSafeRepoPath(string path) =>
@@ -195,8 +210,11 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             foreach (var side in sides.Where(s => !KnownBinaryExtensions.Contains(Path.GetExtension(s).TrimStart('.'))).Take(1))
                 verdict = verdict.WithForcedHigh($"patch hides the content of {side} (shown as binary)");
         }
+        // Whatever diff.submodule says, a gitlink shows as a 160000 mode header, a "Submodule " line or "Subproject commit".
         if (lines.Any(l => l.StartsWith("+Subproject commit ", StringComparison.Ordinal)
-                           || l.StartsWith("-Subproject commit ", StringComparison.Ordinal)))
+                           || l.StartsWith("-Subproject commit ", StringComparison.Ordinal)
+                           || l.StartsWith("Submodule ", StringComparison.Ordinal)
+                           || GitlinkHeader().IsMatch(l)))
             verdict = verdict.WithForcedHigh("changes a submodule pointer");
 
         if (truncated) verdict = verdict.WithForcedHigh("diff too large to review fully");

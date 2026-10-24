@@ -490,7 +490,7 @@ public sealed class GateReviewerTests : IDisposable
     [Fact]
     public async Task Unpushed_branch_is_high_and_runs_no_reviewer()
     {
-        git.RemoteCommits.Remove("origin/symphonist/ORD-1");
+        git.RemoteCommits.Remove("refs/remotes/origin/symphonist/ORD-1");
 
         var outcome = await reviewer.ReviewAsync(project, At("implement"), source, default);
 
@@ -501,10 +501,60 @@ public sealed class GateReviewerTests : IDisposable
         Assert.Empty(agent.Requests);
     }
 
+    [Theory]
+    [InlineData("bad..name")]
+    [InlineData("-x")]
+    [InlineData("a@{1}")]
+    [InlineData("a b")]
+    [InlineData("a~1")]
+    [InlineData("a^")]
+    [InlineData("a:b")]
+    [InlineData("x.lock")]
+    [InlineData(".hidden/x")]
+    [InlineData("a//b")]
+    [InlineData("a/")]
+    [InlineData("a\nb")]
+    [InlineData("")]
+    public async Task Invalid_branch_name_is_high_and_touches_no_git(string name)
+    {
+        var t = At("implement");
+        t.Branch = name;
+
+        var outcome = await reviewer.ReviewAsync(project, t, source, default);
+
+        Assert.Equal(RiskLevel.High, outcome.Verdict.Risk);
+        Assert.Equal($"invalid branch name '{name}'", outcome.Verdict.Error);
+        Assert.Empty(git.Prepared);
+        Assert.Empty(agent.Requests);
+    }
+
+    [Fact]
+    public async Task Invalid_main_branch_is_high()
+    {
+        var p = project with { Repo = project.Repo with { MainBranch = "main..x" } };
+
+        var outcome = await reviewer.ReviewAsync(p, At("release"), source, default);
+
+        Assert.Equal(RiskLevel.High, outcome.Verdict.Risk);
+        Assert.Empty(agent.Requests);
+    }
+
+    [Fact]
+    public async Task Refs_are_resolved_by_full_remote_tracking_name()
+    {
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        git.RemoteCommits["origin/main"] = "shadow0"; // a short name (e.g. a tag) must never be consulted
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        await Review(At("implement"));
+
+        Assert.Equal([(git.WorkspacePath, "main000...head000")], git.ChangedFilesCalls);
+    }
+
     [Fact]
     public async Task Unresolvable_base_is_high_and_runs_no_reviewer()
     {
-        git.RemoteCommits.Remove("origin/production");
+        git.RemoteCommits.Remove("refs/remotes/origin/production");
 
         var verdict = await Review(At("release"));
 
@@ -530,6 +580,11 @@ public sealed class GateReviewerTests : IDisposable
     [InlineData("Binary files \"a/src/Pr\\303\\251.cs\" and \"b/src/Pr\\303\\251.cs\" differ", "patch hides the content of src/Pr\\303\\251.cs (shown as binary)")]
     [InlineData("+Subproject commit 1234567890abcdef1234567890abcdef12345678", "changes a submodule pointer")]
     [InlineData("-Subproject commit 1234567890abcdef1234567890abcdef12345678", "changes a submodule pointer")]
+    [InlineData("Submodule vendor/lib 0000000...1234567 (new submodule)", "changes a submodule pointer")]
+    [InlineData("new file mode 160000", "changes a submodule pointer")]
+    [InlineData("index 1234567..89abcde 160000", "changes a submodule pointer")]
+    [InlineData("Binary files a/docs/a.pdf and b/docs/a.pdf differ", "patch hides the content of docs/a.pdf (shown as binary)")]
+    [InlineData("Binary files /dev/null and b/dist/bundle.zip differ", "patch hides the content of dist/bundle.zip (shown as binary)")]
     public async Task Content_hidden_from_the_patch_forces_high(string line, string reason)
     {
         git.ChangedFiles = ["src/Calc.cs"];

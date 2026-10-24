@@ -49,11 +49,11 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
                 var safeUrl = GitUrls.StripUserInfo(originUrl);
                 if (safeUrl != originUrl) WarnCredentialsOnce(repo.LocalPath);
                 await GitAsync(tmp, ct, "remote", "set-url", "origin", safeUrl);
-                await GitAsync(tmp, ct, "fetch", "origin");
+                await GitAsync(tmp, ct, "fetch", "--prune", "origin");
 
                 var remoteBranch = await RemoteBranchExistsAsync(tmp, branch, ct);
                 await GitAsync(tmp, ct, "checkout", "-B", branch,
-                    remoteBranch ? $"origin/{branch}" : $"origin/{repo.MainBranch}");
+                    remoteBranch ? $"refs/remotes/origin/{branch}" : $"refs/remotes/origin/{repo.MainBranch}");
                 Directory.Move(tmp, ws);
             }
             catch
@@ -64,7 +64,7 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         }
         else
         {
-            await GitAsync(ws, ct, "fetch", "origin");
+            await GitAsync(ws, ct, "fetch", "--prune", "origin");
             await GitAsync(ws, ct, "checkout", branch);
         }
         return ws;
@@ -81,7 +81,7 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
 
     public async Task<bool> HasCommitsAheadAsync(string workspace, string baseBranch, CancellationToken ct)
     {
-        var count = await GitAsync(workspace, ct, "rev-list", "--count", $"origin/{baseBranch}..HEAD");
+        var count = await GitAsync(workspace, ct, "rev-list", "--count", $"refs/remotes/origin/{baseBranch}..HEAD");
         return int.Parse(count.Trim(), System.Globalization.CultureInfo.InvariantCulture) > 0;
     }
 
@@ -108,7 +108,7 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
     private static readonly string[] DiffArgs =
     [
         "-c", "core.attributesFile=", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
-        "--no-renames", "--ignore-submodules=none",
+        "--no-renames", "--ignore-submodules=none", "--submodule=short",
     ];
 
     public async Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct)

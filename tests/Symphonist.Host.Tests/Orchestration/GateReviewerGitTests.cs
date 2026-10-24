@@ -206,6 +206,57 @@ public sealed class GateReviewerGitTests : IDisposable
     }
 
     [Fact]
+    public async Task Submodule_pointer_change_is_high_whatever_diff_submodule_says()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        Run(ws, "config", "diff.submodule", "log");
+        Run(ws, "update-index", "--add", "--cacheinfo", "160000,1234567890abcdef1234567890abcdef12345678,vendor/lib");
+        Run(ws, "commit", "-m", "add submodule pointer");
+        Run(ws, "push", "-u", "origin", "symphonist/ORD-1");
+
+        var verdict = (await ReviewAsync()).Verdict;
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("changes a submodule pointer", verdict.Reasons);
+        Assert.Contains("Subproject commit 1234567890abcdef1234567890abcdef12345678", Assert.Single(agent.Requests).Prompt);
+    }
+
+    [Fact]
+    public async Task A_tag_named_like_the_remote_branch_does_not_move_the_base()
+    {
+        var older = Run(dev, "rev-parse", "HEAD");
+        Write(dev, "src/Main/FromMain.cs", "class FromMainB {}");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "main moves on");
+        Run(dev, "push", "origin", "main");
+        var mainHead = Run(dev, "rev-parse", "HEAD");
+        Run(dev, "tag", "origin/main", older);
+        Run(dev, "push", "origin", "refs/tags/origin/main");
+        var ws = await CommitAndPushAsync(ws => Write(ws, "src/Export/Csv.cs", "class Csv {}"));
+        Assert.Equal(older, Run(ws, "rev-parse", "refs/tags/origin/main")); // the shadowing tag reached the workspace
+
+        var outcome = await ReviewAsync();
+
+        var prompt = Assert.Single(agent.Requests).Prompt;
+        Assert.Contains($"{mainHead}...{outcome.ReviewedHead}", prompt);
+        Assert.DoesNotContain("FromMainB", prompt);
+        Assert.Equal(RiskLevel.Low, outcome.Verdict.Risk);
+    }
+
+    [Fact]
+    public async Task A_deleted_remote_branch_no_longer_resolves()
+    {
+        await CommitAndPushAsync(ws => Write(ws, "src/Export/Csv.cs", "class Csv {}"));
+        Assert.Equal(RiskLevel.Low, (await ReviewAsync()).Verdict.Risk);
+        Run(dev, "push", "origin", "--delete", "symphonist/ORD-1");
+
+        var outcome = await ReviewAsync();
+
+        Assert.Equal(RiskLevel.High, outcome.Verdict.Risk);
+        Assert.Equal("branch not pushed: origin/symphonist/ORD-1", outcome.Verdict.Error);
+    }
+
+    [Fact]
     public async Task Png_change_outside_risk_areas_stays_low()
     {
         await CommitAndPushAsync(ws => WriteBytes(ws, "docs/logo.png", [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0, 1, 2, 3]));

@@ -41,7 +41,8 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>Commits ResolveCommitAsync knows; anything else resolves to null (no such commit).</summary>
     public Dictionary<string, string> RemoteCommits { get; } = new()
     {
-        ["origin/main"] = "main000", ["origin/production"] = "prod000", ["origin/symphonist/ORD-1"] = "head000",
+        ["refs/remotes/origin/main"] = "main000", ["refs/remotes/origin/production"] = "prod000",
+        ["refs/remotes/origin/symphonist/ORD-1"] = "head000",
     };
 
     public Task<string> PrepareAsync(ProjectConfig project, string ticketKey, string branch, CancellationToken ct)
