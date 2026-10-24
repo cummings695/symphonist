@@ -206,6 +206,28 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_tag_named_like_a_remote_branch_is_not_that_branch()
+    {
+        // A tag "refs/remotes/origin/feat" is refs/tags/refs/remotes/origin/feat, which rev-parse would fall back to.
+        Run(dev, "checkout", "-b", "side");
+        File.WriteAllText(Path.Combine(dev, "evil.txt"), "planted");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "planted");
+        var planted = Run(dev, "rev-parse", "HEAD");
+        Run(dev, "tag", "refs/remotes/origin/feat", planted);
+        Run(dev, "checkout", "main");
+
+        var ws = await git.PrepareAsync(project, "ORD-9", "feat", default);
+
+        Assert.Equal(planted, Git(ws, "rev-parse refs/tags/refs/remotes/origin/feat")); // the tag reached the workspace
+        Assert.False(File.Exists(Path.Combine(ws, "evil.txt"))); // the branch starts from main, not from the tag
+        Assert.Equal(Git(ws, "rev-parse refs/remotes/origin/main"), Git(ws, "rev-parse HEAD"));
+        Assert.Null(await git.ResolveCommitAsync(ws, "refs/remotes/origin/feat", default));
+        Assert.Equal(Git(ws, "rev-parse refs/remotes/origin/main"),
+            await git.ResolveCommitAsync(ws, "refs/remotes/origin/main", default));
+    }
+
+    [Fact]
     public async Task Changed_files_and_diff_fail_loudly_on_a_bad_range()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);

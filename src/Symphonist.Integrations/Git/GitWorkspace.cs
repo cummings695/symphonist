@@ -51,9 +51,12 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
                 await GitAsync(tmp, ct, "remote", "set-url", "origin", safeUrl);
                 await GitAsync(tmp, ct, "fetch", "--prune", "origin");
 
-                var remoteBranch = await RemoteBranchExistsAsync(tmp, branch, ct);
-                await GitAsync(tmp, ct, "checkout", "-B", branch,
-                    remoteBranch ? $"refs/remotes/origin/{branch}" : $"refs/remotes/origin/{repo.MainBranch}");
+                var start = await RefExistsAsync(tmp, $"refs/remotes/origin/{branch}", ct)
+                    ? $"refs/remotes/origin/{branch}"
+                    : $"refs/remotes/origin/{repo.MainBranch}";
+                // An existing ref named in full wins over git's fallbacks (e.g. a tag of the same name).
+                if (!await RefExistsAsync(tmp, start, ct)) throw new GitCommandException($"{start} does not exist");
+                await GitAsync(tmp, ct, "checkout", "-B", branch, start);
                 Directory.Move(tmp, ws);
             }
             catch
@@ -111,8 +114,13 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         "--no-renames", "--ignore-submodules=none", "--submodule=short",
     ];
 
+    /// <summary>
+    /// A full ref name (<c>refs/...</c>) must exist exactly as named: <c>rev-parse</c> alone would fall back to e.g.
+    /// <c>refs/tags/refs/remotes/origin/x</c>, a tag anyone who can push tags can plant.
+    /// </summary>
     public async Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct)
     {
+        if (rev.StartsWith("refs/", StringComparison.Ordinal) && !await RefExistsAsync(workspace, rev, ct)) return null;
         var r = await RunAsync(workspace, ct, "rev-parse", "--verify", "--quiet", rev + "^{commit}");
         if (!r.TimedOut && r.ExitCode == 0) return r.StandardOutput.Trim();
         if (!r.TimedOut && r.ExitCode == 1) return null; // --quiet: no such commit
@@ -120,10 +128,13 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
             $"git rev-parse {rev} failed (exit {r.ExitCode}{(r.TimedOut ? ", timed out" : "")}): {r.StandardError.Trim()}"));
     }
 
-    private async Task<bool> RemoteBranchExistsAsync(string ws, string branch, CancellationToken ct)
+    /// <summary>Whether the full ref <paramref name="name"/> exists exactly (no fallbacks to other namespaces).</summary>
+    private async Task<bool> RefExistsAsync(string ws, string name, CancellationToken ct)
     {
-        var r = await RunAsync(ws, ct, "rev-parse", "--verify", "--quiet", $"refs/remotes/origin/{branch}");
-        return r.ExitCode == 0;
+        var r = await RunAsync(ws, ct, "show-ref", "--verify", "--quiet", name);
+        if (!r.TimedOut && r.ExitCode is 0 or 1) return r.ExitCode == 0;
+        throw new GitCommandException(GitUrls.Redact(
+            $"git show-ref {name} failed (exit {r.ExitCode}{(r.TimedOut ? ", timed out" : "")}): {r.StandardError.Trim()}"));
     }
 
     private void WarnCredentialsOnce(string checkout)
