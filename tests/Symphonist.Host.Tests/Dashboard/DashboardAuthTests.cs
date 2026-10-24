@@ -170,7 +170,7 @@ public sealed class DashboardAuthTests : IDisposable
         var response = await client.GetAsync("/");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var html = await response.Content.ReadAsStringAsync();
-        Assert.Contains("<h1>Symphonist</h1>", html);
+        Assert.Contains(">All projects</h1>", html);
         Assert.Contains("ORD-42", html);
     }
 

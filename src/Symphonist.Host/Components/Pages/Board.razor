@@ -5,41 +5,21 @@
 @inject Orchestrator Orchestrator
 @inject ProjectRegistry Registry
 @inject TimeProvider Time
-@inject NavigationManager Navigation
+@inject DashboardChrome Chrome
 @inject IJSRuntime JS
 @inject ILogger<Board> Log
 
-<PageTitle>@(model is { Counts.WaitingOnYou: > 0 } ? $"({model.Counts.WaitingOnYou}) Symphonist" : "Symphonist")</PageTitle>
-
-<header class="board-header">
-    <h1>Symphonist</h1>
-    @if (model is not null)
-    {
-        <p class="counts"><span class="@(model.Counts.WaitingOnYou > 0 ? "count-waiting" : null)">@model.Counts.WaitingOnYou waiting on you</span> · <span>@model.Counts.Running running</span> · <span class="@(model.Counts.Blocked > 0 ? "count-blocked" : null)">@model.Counts.Blocked blocked</span></p>
-        <div class="board-actions">
-            @if (model.Projects.Count > 0)
-            {
-                <label class="filter">
-                    <span class="visually-hidden">Project</span>
-                    <select value="@(model.ProjectFilter ?? "")" @onchange="FilterChanged">
-                        <option value="">All projects</option>
-                        @foreach (var p in model.Projects)
-                        {
-                            <option value="@p.Id">@p.Name</option>
-                        }
-                    </select>
-                </label>
-            }
-            <button type="button" class="button" @onclick="PollNow">Poll now</button>
-        </div>
-    }
-</header>
-
-<StatusLine Message="@(refreshError ?? commandMessage)" IsError="@(refreshError is not null)" />
+@* The page <h1> (the focus target after navigation) is always there: the project heading, else the plain one.
+   An unknown project id loads the all-projects board; until the first load, the id stands in for the name. *@
+@{ var filtered = model?.Projects.FirstOrDefault(p => p.Id == model.ProjectFilter); }
+@if (filtered is null)
+{
+    <h1 class="page-title">@(model is null && !string.IsNullOrEmpty(Project) ? Project : "All projects")</h1>
+}
 
 @if (model is null)
 {
-    @if (refreshError is null)
+    @if (boardError is null)
     {
         <p class="loading">Loading the board…</p>
     }
@@ -54,14 +34,18 @@ else
                 <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>; the host picks it up on restart.</p>
             </section>
         }
-        else
+        else if (filtered is not null)
         {
-            <section class="projects" aria-label="Projects">
-                @foreach (var p in model.Projects.Where(p => model.ProjectFilter is null || p.Id == model.ProjectFilter))
+            <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
+        }
+        else if (model.Projects.Any(p => p.Problem is { Length: > 0 }))
+        {
+            <div class="board-problems">
+                @foreach (var p in model.Projects.Where(p => p.Problem is { Length: > 0 }))
                 {
-                    <ProjectBar Project="p" OnTogglePause="() => TogglePause(p)" />
+                    <p class="project-problem" data-problem="@p.Id"><strong>@p.Name:</strong> @p.Problem</p>
                 }
-            </section>
+            </div>
         }
 
         @if (model.Columns.Count > 0)
@@ -72,7 +56,7 @@ else
                     var total = column.Cards.Count + column.HiddenCount;
                     var folded = total > 0 && IsFolded(column);
                     var waiting = column.Cards.Count(c => c.WaitingOnYou);
-                    <section class="column @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null) @(folded ? "collapsed" : null)"
+                    <section class="column @(column.Kind is { } kind ? $"lane-{kind.ToString().ToLowerInvariant()}" : null) @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null) @(folded ? "collapsed" : null)"
                              role="listitem" data-column="@column.Id" aria-labelledby="col-@column.Id">
                         <h2 class="column-header" id="col-@column.Id">
                             @if (total > 0 && phone != false)
@@ -80,6 +64,7 @@ else
                                 @* A toggle only at phone width; on a desktop the CSS shows it as the plain heading. *@
                                 <button type="button" class="column-toggle" aria-expanded="@(folded ? "false" : "true")"
                                         aria-controls="cards-@column.Id" @onclick="() => ToggleAsync(column)">
+                                    <span class="column-mark" aria-hidden="true"></span>
                                     <span class="column-title">@column.Title</span>
                                     <span class="column-meta">
                                         @if (folded && waiting > 0)
@@ -93,6 +78,7 @@ else
                             }
                             else
                             {
+                                <span class="column-mark" aria-hidden="true"></span>
                                 <span class="column-title">@column.Title</span>
                                 <span class="column-count" aria-label="@($"{total} tickets")">@total</span>
                             }
@@ -127,8 +113,7 @@ else
     private readonly HashSet<(string Project, string Key)> approving = [];
     private readonly CancellationTokenSource disposed = new();
     private BoardModel? model;
-    private string? refreshError;
-    private string? commandMessage;
+    private string? boardError; // the last load's error, also reported to the status line
     private DateTimeOffset now;
     private int loadVersion;
     private string? loadedFilter;
@@ -144,6 +129,7 @@ else
     protected override void OnInitialized()
     {
         now = Time.GetUtcNow();
+        Chrome.ClearForNavigation(); // the previous page's message and errors
         Notifier.Changed += OnBoardChanged;
     }
 
@@ -230,7 +216,7 @@ else
         StateHasChanged();
     });
 
-    /// <summary>Loads the board; a failure keeps the last board and reports the error in the status line.</summary>
+    /// <summary>Loads the board; a failure keeps the last board and reports the error in the layout's status line.</summary>
     private async Task ReloadAsync()
     {
         var version = ++loadVersion;
@@ -239,7 +225,9 @@ else
             var board = await Query.LoadBoardAsync(Project, disposed.Token);
             if (version != loadVersion) return; // a newer load started meanwhile
             model = board;
-            refreshError = null;
+            boardError = null;
+            Chrome.SetPage(null, board.ProjectFilter);
+            Chrome.SetError(StatusSource.Board, null);
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)
         {
@@ -247,21 +235,13 @@ else
         }
         catch (Exception e)
         {
-            if (version == loadVersion) refreshError = $"Could not refresh the board: {e.Message}";
+            if (version == loadVersion)
+            {
+                boardError = $"Could not refresh the board: {e.Message}";
+                Chrome.SetError(StatusSource.Board, boardError);
+            }
         }
         now = Time.GetUtcNow();
-    }
-
-    private void FilterChanged(ChangeEventArgs e)
-    {
-        var id = e.Value as string;
-        Navigation.NavigateTo(string.IsNullOrEmpty(id) ? "/" : $"/?project={Uri.EscapeDataString(id)}");
-    }
-
-    private void PollNow()
-    {
-        Orchestrator.RequestTick();
-        commandMessage = "Poll requested";
     }
 
     private async Task TogglePause(BoardProject p)
@@ -269,13 +249,13 @@ else
         try
         {
             Registry.SetPaused(p.Id, !p.Paused);
-            commandMessage = p.Paused ? $"{p.Name} resumed" : $"{p.Name} paused";
+            Chrome.ShowMessage(p.Paused ? $"{p.Name} resumed" : $"{p.Name} paused");
         }
         catch (Exception e)
         {
             // E.g. paused.json cannot be written: report it rather than kill the circuit.
             Log.LogError(e, "{Action} {Project} from the dashboard failed", p.Paused ? "Resuming" : "Pausing", p.Id);
-            commandMessage = $"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}";
+            Chrome.ShowMessage($"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}");
         }
         await ReloadAsync();
     }
@@ -288,7 +268,7 @@ else
         try
         {
             var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token, card.StageId, card.Since);
-            commandMessage = $"{card.Key}: {outcome.Message}";
+            Chrome.ShowMessage($"{card.Key}: {outcome.Message}");
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)
         {
@@ -296,7 +276,7 @@ else
         }
         catch (KeyNotFoundException e)
         {
-            commandMessage = e.Message; // e.g. the ticket or its project was removed meanwhile
+            Chrome.ShowMessage(e.Message); // e.g. the ticket or its project was removed meanwhile
         }
         catch (Exception e)
         {
@@ -312,14 +292,14 @@ else
         // The orchestrator stores the approval before recording and syncing it, so a failure (e.g. of the store) may
         // come after the ticket has already moved on: word the message from the ticket's state as reloaded.
         if (failure is not null)
-            commandMessage = StillWaiting(card)
+            Chrome.ShowMessage(StillWaiting(card)
                 ? $"{card.Key}: approve failed: {failure.Message}"
-                : $"{card.Key}: approved, but a follow-up step failed: {failure.Message}";
+                : $"{card.Key}: approved, but a follow-up step failed: {failure.Message}");
     }
 
     /// <summary>True when the reloaded board still shows the card awaiting approval (or could not be reloaded).</summary>
     private bool StillWaiting(BoardCard card) =>
-        refreshError is not null || model?.Columns.SelectMany(c => c.Cards)
+        boardError is not null || model?.Columns.SelectMany(c => c.Cards)
             .FirstOrDefault(c => c.Project == card.Project && c.Key == card.Key) is not { WaitingOnYou: false };
 
     private string ProjectName(string id) => model?.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;

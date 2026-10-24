@@ -1,16 +1,29 @@
 @using Symphonist.Core.Risk
+@* The filtered board's page heading: the project name is the page <h1> (the focus target after navigation). *@
 <div class="project @(Project.Paused ? "project-paused" : null)" data-project="@Project.Id">
     <div class="project-row">
-        <span class="project-name">@Project.Name</span>
+        <h1 class="page-title">@Project.Name</h1>
         <span class="badge">@Project.Source</span>
+        <span class="badge" title="The risk reviewer's mode for this project">Reviewer: @Project.Review.ToString().ToLowerInvariant()</span>
         @if (Project.Isolation == Isolation.Host)
         {
             <span class="badge badge-caution" title="The agent runs directly on this machine, not in a container">host mode</span>
         }
-        <span class="badge" title="The risk reviewer's mode for this project">Reviewer: @Project.Review.ToString().ToLowerInvariant()</span>
         @if (Project.Paused)
         {
             <span class="badge badge-paused">Paused</span>
+        }
+        @if (Agreement().Any())
+        {
+            <p class="project-agreement" aria-label="Reviewer agreement with your decisions">
+                @foreach (var a in Agreement())
+                {
+                    <span data-agreement="@a.StageId">@Describe(a)</span>
+                }
+            </p>
+        }
+        @if (Project.Paused)
+        {
             <button type="button" class="button" aria-label="@($"Resume {Project.Name}")" @onclick="OnTogglePause">Resume</button>
         }
         else
@@ -18,15 +31,6 @@
             <button type="button" class="button button-quiet" aria-label="@($"Pause {Project.Name}")" @onclick="OnTogglePause">Pause</button>
         }
     </div>
-    @if (Agreement().Any())
-    {
-        <p class="project-agreement" aria-label="Reviewer agreement with your decisions">
-            @foreach (var a in Agreement())
-            {
-                <span data-agreement="@a.StageId">@Describe(a)</span>
-            }
-        </p>
-    }
     @if (Project.Problem is { Length: > 0 } problem)
     {
         <p class="project-problem"><strong>Problem:</strong> @problem</p>

@@ -337,41 +337,17 @@ select {
 
 /* Board (global because the page's <h1> must stay attribute-free) */
 
-.board-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.25rem 1.25rem;
-    margin-bottom: 0.75rem;
-}
-
-.board-header h1 {
-    margin: 0;
-    font-size: 1.15rem;
+.page-title {
+    margin: 0 0 0.9rem;
+    font-size: 1.3rem;
     font-weight: 650;
     letter-spacing: -0.01em;
 }
 
-.counts {
-    margin: 0;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
-}
-
+/* Waiting on you, in a folded stage's header */
 .count-waiting {
     color: var(--waiting);
     font-weight: 650;
-}
-
-.count-blocked {
-    color: var(--danger);
-    font-weight: 600;
-}
-
-.board-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-left: auto;
 }
 
 .loading,
@@ -398,16 +374,26 @@ select {
     overflow-wrap: anywhere;
 }
 
-.projects {
+/* All projects: one notice per project with a problem, under the heading. */
+.board-problems {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
     margin-bottom: 0.9rem;
 }
 
+.board-problems .project-problem {
+    margin: 0;
+    padding: 0.45rem 0.75rem;
+    border-left: 3px solid var(--caution-border);
+    background: var(--caution-tint);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    overflow-wrap: anywhere;
+}
+
 .columns {
     display: flex;
-    gap: 0.6rem;
+    gap: 0.75rem;
     align-items: flex-start;
     overflow-x: auto;
     padding-bottom: 0.5rem;
@@ -415,13 +401,44 @@ select {
 }
 
 .column {
+    --stage: var(--muted);
+    --lane-tint: var(--lane);
     flex: 1 0 15.5rem;
     max-width: 24rem;
     min-width: 15.5rem;
-    background: var(--lane);
-    border-radius: var(--radius);
-    padding: 0.5rem;
+    background: var(--lane-tint);
+    border-radius: var(--radius-lane);
+    padding: 0.65rem;
     scroll-snap-align: start;
+}
+
+/* Lane colours by stage kind, so every project's pipeline looks the same. */
+.lane-triage {
+    --stage: var(--stage-triage);
+    --lane-tint: var(--lane-triage-tint);
+}
+
+.lane-plan {
+    --stage: var(--stage-plan);
+    --lane-tint: var(--lane-plan-tint);
+}
+
+.lane-implement {
+    --stage: var(--stage-implement);
+    --lane-tint: var(--lane-implement-tint);
+}
+
+.lane-build,
+.lane-uat,
+.lane-release {
+    --stage: var(--stage-release);
+    --lane-tint: var(--lane-release-tint);
+}
+
+.lane-deploy,
+.lane-done {
+    --stage: var(--stage-done);
+    --lane-tint: var(--lane-done-tint);
 }
 
 .column-unknown {
@@ -430,15 +447,34 @@ select {
 
 .column-header {
     display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin: 0 0.15rem 0.5rem;
-    font-size: 0.86rem;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.1rem 0.15rem 0.65rem;
+    font-size: 0.9rem;
     font-weight: 600;
 }
 
+/* The stage-colour mark before the title; the title itself says which stage it is. */
+.column-mark {
+    flex: none;
+    width: 4px;
+    height: 1rem;
+    border-radius: 2px;
+    background: var(--stage);
+}
+
+.column-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .column-count {
+    margin-left: auto;
+    padding: 0 0.45rem;
+    border-radius: 999px;
+    background: var(--surface);
     color: var(--muted);
+    font-size: 0.78rem;
     font-weight: 500;
     font-variant-numeric: tabular-nums;
 }
@@ -447,8 +483,7 @@ select {
 .column-toggle {
     display: flex;
     flex: 1;
-    justify-content: space-between;
-    align-items: baseline;
+    align-items: center;
     gap: 0.5rem;
     min-width: 0;
     margin: 0;
@@ -463,8 +498,13 @@ select {
 
 .column-meta {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 0.5rem;
+    margin-left: auto;
+}
+
+.column-meta .column-count {
+    margin-left: 0;
 }
 
 .column-waiting {
@@ -494,16 +534,6 @@ select {
 
 /* Phone width: stages stack top to bottom instead of scrolling sideways. */
 @media (max-width: 40rem) {
-    .board-actions {
-        margin-left: 0;
-        width: 100%;
-    }
-
-    .board-actions select {
-        flex: 1;
-        min-width: 0;
-    }
-
     .columns {
         flex-direction: column;
         align-items: stretch;

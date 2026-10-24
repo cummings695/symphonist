@@ -50,6 +50,7 @@ public sealed class BoardComponentTests : IDisposable
         ctx.Services.AddSingleton<ITicketStore>(store);
         ctx.Services.AddSingleton(orchestrator);
         ctx.Services.AddSingleton<BoardQuery>();
+        ctx.Services.AddScoped<DashboardChrome>();
     }
 
     public void Dispose()
@@ -90,16 +91,16 @@ public sealed class BoardComponentTests : IDisposable
 
     private static IElement Card(IRenderedComponent<Board> cut, string key) => cut.Find($"[data-key='{key}']");
 
-    private static string StatusLine(IRenderedComponent<Board> cut) => cut.Find("[role=status]").TextContent;
+    /// <summary>The status line now belongs to the layout: what the board reported to it.</summary>
+    private string StatusLine() => ctx.Services.GetRequiredService<DashboardChrome>().Message ?? "";
 
     [Fact]
-    public async Task Renders_columns_cards_and_counts()
+    public async Task Renders_columns_and_cards()
     {
         await SeedDefault();
 
         var cut = RenderBoard();
 
-        Assert.Contains("2 waiting on you · 1 running · 1 blocked", cut.Find(".counts").TextContent);
         Assert.Equal(["Triage", "Plan", "Implement", "Done"],
             cut.FindAll(".column-title").Select(e => e.TextContent.Trim()));
         Assert.Contains("Title ORD-1", Card(cut, "ORD-1").TextContent);
@@ -147,7 +148,7 @@ public sealed class BoardComponentTests : IDisposable
         cut.WaitForAssertion(() =>
         {
             Assert.Equal(StageStatus.Approved, store.Single("ORD-5").Status);
-            Assert.Contains("implement approved", StatusLine(cut));
+            Assert.Contains("implement approved", StatusLine());
             Assert.DoesNotContain("Waiting on you", Card(cut, "ORD-5").TextContent);
         });
     }
@@ -163,7 +164,7 @@ public sealed class BoardComponentTests : IDisposable
 
         Card(cut, "ORD-1").QuerySelector("button")!.Click();
 
-        cut.WaitForAssertion(() => Assert.Contains("implement is not awaiting approval", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("implement is not awaiting approval", StatusLine()));
     }
 
     [Fact]
@@ -177,7 +178,7 @@ public sealed class BoardComponentTests : IDisposable
 
         Card(cut, "ORD-1").QuerySelector("button")!.Click();
 
-        cut.WaitForAssertion(() => Assert.Contains("ORD-1: plan is not awaiting approval", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: plan is not awaiting approval", StatusLine()));
         Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
     }
 
@@ -191,7 +192,7 @@ public sealed class BoardComponentTests : IDisposable
         Card(cut, "ORD-5").QuerySelector("button")!.Click();
 
         cut.WaitForAssertion(() =>
-            Assert.Contains("ORD-5: approved, but a follow-up step failed: database is locked", StatusLine(cut)));
+            Assert.Contains("ORD-5: approved, but a follow-up step failed: database is locked", StatusLine()));
         Assert.Equal(StageStatus.Approved, store.Single("ORD-5").Status);
     }
 
@@ -204,7 +205,7 @@ public sealed class BoardComponentTests : IDisposable
 
         Card(cut, "ORD-5").QuerySelector("button")!.Click();
 
-        cut.WaitForAssertion(() => Assert.Contains("ORD-5: advanced to implement", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("ORD-5: advanced to implement", StatusLine()));
         Assert.Equal("implement", store.Single("ORD-5").StageId);
         Assert.Contains("tracker sync skipped: secret 'jira-acme' not set", store.EventMessages("ORD-5"));
     }
@@ -220,7 +221,7 @@ public sealed class BoardComponentTests : IDisposable
 
         Card(cut, "ORD-1").QuerySelector("button")!.Click();
 
-        cut.WaitForAssertion(() => Assert.Contains("ORD-1: implement is waiting on a newer round", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: implement is waiting on a newer round", StatusLine()));
         Assert.Equal((StageStatus.AwaitingApproval, Now.AddMinutes(30)),
             (store.Single("ORD-1").Status, store.Single("ORD-1").WaitingSince));
     }
@@ -264,7 +265,6 @@ public sealed class BoardComponentTests : IDisposable
         Assert.DoesNotContain("Waiting on you", card.TextContent);
         Assert.Empty(card.QuerySelectorAll("button"));
         Assert.DoesNotContain("card-awaitingapproval", card.ClassList);
-        Assert.Contains("0 waiting on you", cut.Find(".counts").TextContent);
     }
 
     [Fact]
@@ -286,14 +286,14 @@ public sealed class BoardComponentTests : IDisposable
             GatePolicy.AutoWhenLowRisk, verdict), default);
         await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "auto", "implement", autoAt, GateDecision.Approved, true, autoAt), default);
 
-        var cut = RenderBoard();
+        var cut = RenderBoard("/?project=auto");
 
         var text = cut.Find("[data-project='auto']").TextContent;
         Assert.Contains("Reviewer: shadow", text);
         Assert.Contains("implement: agrees 1/2", text);
         Assert.Contains("1 low-risk call(s) sent back", text);
         Assert.Contains("1 auto-approved", text);
-        var orders = cut.Find("[data-project='orders']").TextContent;
+        var orders = RenderBoard("/?project=orders").Find("[data-project='orders']").TextContent;
         Assert.Contains("Reviewer: off", orders);
         Assert.DoesNotContain("agrees", orders);
     }
@@ -321,12 +321,12 @@ public sealed class BoardComponentTests : IDisposable
         notifier.Notify();
         time.Advance(BoardNotifier.Window);
 
-        cut.WaitForAssertion(() => Assert.Contains("Could not refresh the board: database is locked", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("Could not refresh the board: database is locked", StatusLine()));
         Assert.Contains("Title ORD-1", Card(cut, "ORD-1").TextContent);
 
         notifier.Notify();
         time.Advance(BoardNotifier.Window);
-        cut.WaitForAssertion(() => Assert.DoesNotContain("Could not refresh", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.DoesNotContain("Could not refresh", StatusLine()));
     }
 
     [Fact]
@@ -353,26 +353,10 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
-    public void Empty_status_line_takes_no_space()
-    {
-        var cut = RenderBoard();
-
-        Assert.Contains("status-line-empty", cut.Find("[role=status]").ClassList);
-
-        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Poll now").Click();
-
-        cut.WaitForAssertion(() =>
-        {
-            Assert.DoesNotContain("status-line-empty", cut.Find("[role=status]").ClassList);
-            Assert.Equal("Poll requested", StatusLine(cut));
-        });
-    }
-
-    [Fact]
     public void Paused_project_offers_resume()
     {
         registry.SetPaused("orders", true);
-        var cut = RenderBoard();
+        var cut = RenderBoard("/?project=orders");
 
         var row = cut.Find("[data-project='orders']");
         Assert.Contains("Paused", row.TextContent);
@@ -388,21 +372,59 @@ public sealed class BoardComponentTests : IDisposable
     public void Pause_that_cannot_be_saved_shows_the_error()
     {
         Directory.CreateDirectory(SymphonistPaths.Resolve("paused.json")); // a directory in its place: the write fails
-        var cut = RenderBoard();
+        var cut = RenderBoard("/?project=orders");
 
         cut.Find("[data-project='orders']").QuerySelectorAll("button").Single(b => b.TextContent.Trim() == "Pause").Click();
 
-        cut.WaitForAssertion(() => Assert.Contains("Could not pause Project orders:", StatusLine(cut)));
+        cut.WaitForAssertion(() => Assert.Contains("Could not pause Project orders:", StatusLine()));
         Assert.NotEmpty(cut.FindAll("[data-board-loaded]"));
     }
 
     [Fact]
     public void Host_mode_project_is_marked()
     {
+        Assert.Contains("host mode", RenderBoard("/?project=billing").Find("[data-project='billing']").TextContent);
+        Assert.DoesNotContain("host mode", RenderBoard("/?project=orders").Find("[data-project='orders']").TextContent);
+    }
+
+    [Fact]
+    public async Task All_projects_view_has_a_heading_and_problem_notices()
+    {
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set");
+        await ctx.Services.GetRequiredService<Orchestrator>().TickAsync(CancellationToken.None);
+
         var cut = RenderBoard();
 
-        Assert.Contains("host mode", cut.Find("[data-project='billing']").TextContent);
-        Assert.DoesNotContain("host mode", cut.Find("[data-project='orders']").TextContent);
+        Assert.Equal("All projects", cut.Find("h1").TextContent.Trim());
+        var problem = cut.Find("[data-problem='billing']");
+        Assert.Contains("Project billing:", problem.TextContent);
+        Assert.Contains("secret 'jira-acme' not set", problem.TextContent);
+        Assert.Empty(cut.FindAll("[data-project]"));
+    }
+
+    [Fact]
+    public void Filtered_view_heading_is_the_project_name()
+    {
+        var cut = RenderBoard("/?project=orders");
+
+        Assert.Equal("Project orders", cut.Find("h1").TextContent.Trim());
+        Assert.Equal("orders", ctx.Services.GetRequiredService<DashboardChrome>().CurrentProject);
+    }
+
+    [Fact]
+    public void Columns_carry_lane_classes()
+    {
+        var cut = RenderBoard("/?project=orders");
+
+        Assert.Contains("lane-plan", cut.Find("[data-column='plan']").ClassList);
+    }
+
+    [Fact]
+    public void Board_has_no_project_dropdown()
+    {
+        var cut = RenderBoard();
+
+        Assert.Empty(cut.FindAll("select"));
     }
 
     [Fact]
@@ -426,6 +448,7 @@ public sealed class BoardComponentTests : IDisposable
 
         Assert.Contains("No projects configured", cut.Markup);
         Assert.Contains(SymphonistPaths.Resolve("projects"), cut.Find(".setup-hint").TextContent);
+        Assert.Equal("All projects", cut.Find("h1").TextContent.Trim()); // the focus target stays
     }
     /// <summary>The browser side of folding: at phone width, with <paramref name="stored"/> in localStorage.</summary>
     private BunitJSModuleInterop SetupFolds(Dictionary<string, bool>? stored = null)
