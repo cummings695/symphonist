@@ -146,6 +146,40 @@ comment (minus the marker) as feedback, for example to answer triage's questions
 rerun go together into one rerun. A comment made while the stage runs applies when it reaches the gate. Other
 comments are ignored, and a card move made in the same poll takes priority.
 
+### Risk reviewer
+
+A second agent can judge each gate, rate it `low` or `high` risk and give its reasons. It is off by default, so nothing
+runs and nothing extra is spent until you opt in.
+
+```yaml
+riskAreas:
+  - name: pricing
+    description: Anything that changes how order prices, discounts or tax are computed.
+    paths: ["src/Pricing/**"]
+review:
+  mode: shadow            # off (default) | shadow | active
+```
+
+- `riskAreas`: parts of the code that always need you. A `description` tells the reviewer what to look for, and `paths`
+  are globs. If a change touches a matching path the verdict is `high`, whatever the reviewer says.
+- `review.mode`: `off` (the default) runs no reviewer, and `auto` gates behave like `human`. `shadow` reviews every gate
+  and shows the verdict, but approves nothing, so you can see how often you agree first. `active` also lets `auto` gates
+  approve themselves.
+- `gate: auto` on a triage, plan, implement or release stage approves it when the verdict is `low`. It needs
+  `mode: active`. `human` gates are still reviewed in `active` mode, so the agreement numbers keep growing.
+- The release gate is production auto-approval: `release: auto` ships to production without you, `release: human` (the
+  default in the sample) turns it off. It is off unless you set it.
+- Before an auto-approval Symphonist comments on the ticket, signed as usual: `Auto-approved {stage}: low risk.`, what
+  was checked, and why it passed. If the comment can't be posted the gate is not approved and waits for you.
+- Anything else waits on you: a `high` verdict, a reviewer that failed or timed out, or one that was unsure. The
+  reviewer must return `high` when unsure. If the branch moved after the review, an auto-approved merge is held for you.
+- The reviewer can only read. In container mode the workspace is mounted read-only. In host mode it gets only `Read`,
+  `Grep` and `Glob`, and any other tool in `review.agent.allowedTools` is refused.
+- Review runs count toward `MaxConcurrentAgentRuns` and toward a ticket's cost.
+- `symphonist show <project> <key>` prints the latest review, `symphonist status` has a `RISK` column, and
+  `symphonist projects` and the dashboard show how often you agreed with the reviewer per stage, how many low-risk
+  verdicts you sent back, and how many gates were auto-approved. Look at these in `shadow` before turning on `active`.
+
 ### Sandbox
 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network

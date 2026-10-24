@@ -7,7 +7,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
@@ -150,6 +152,58 @@ public sealed class TicketsApiTests : IDisposable
         Assert.Equal(1, t.GetProperty("attempts").GetInt32());
         Assert.Equal(Waiting, t.GetProperty("waitingSince").GetDateTimeOffset());
         Assert.Equal("https://bitbucket.org/acme/orders/pull-requests/42", t.GetProperty("prUrl").GetString());
+    }
+
+    [Fact]
+    public async Task Ticket_detail_includes_gate_reviews()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        t.Risk = RiskLevel.High;
+        await store.SaveAsync(t, default);
+        var at = Waiting.AddMinutes(5);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Waiting, at, ReviewMode.Shadow, GatePolicy.Human,
+            new GateVerdict(RiskLevel.High, "touches pricing", ["touches risk area 'pricing'"], ["diff"], ["pricing"])), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "implement", Waiting, GateDecision.Approved,
+            false, at.AddMinutes(1)), default);
+
+        var shown = await Json(await Authorized().GetAsync("/api/tickets/orders/ORD-1"));
+
+        var r = Assert.Single(shown.GetProperty("reviews").EnumerateArray());
+        Assert.Equal("implement", r.GetProperty("stage").GetString());
+        Assert.Equal("Shadow", r.GetProperty("mode").GetString());
+        Assert.Equal("High", r.GetProperty("risk").GetString());
+        Assert.Equal("touches pricing", r.GetProperty("summary").GetString());
+        Assert.Equal(["touches risk area 'pricing'"], r.GetProperty("reasons").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(["diff"], r.GetProperty("checked").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(["pricing"], r.GetProperty("areasTouched").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal("Approved", r.GetProperty("decision").GetString());
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("error").ValueKind);
+
+        var list = await Json(await Authorized().GetAsync("/api/tickets?project=orders"));
+        Assert.Equal("High", Assert.Single(list.EnumerateArray()).GetProperty("risk").GetString());
+    }
+
+    [Fact]
+    public async Task Projects_include_review_mode_and_agreement()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReviewedProjectYaml("orders", "shadow"));
+        factory.Services.GetRequiredService<ProjectRegistry>().Reload();
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Waiting, Waiting.AddMinutes(1), ReviewMode.Shadow,
+            GatePolicy.Human, new GateVerdict(RiskLevel.Low, "ok", [], ["diff"], [])), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "implement", Waiting, GateDecision.SentBack,
+            false, Waiting.AddMinutes(2)), default);
+
+        var projects = await Json(await Authorized().GetAsync("/api/projects"));
+
+        Assert.Equal("Off", projects[0].GetProperty("review").GetString());
+        Assert.Equal(0, projects[0].GetProperty("agreement").GetArrayLength());
+        Assert.Equal("Shadow", projects[1].GetProperty("review").GetString());
+        var a = Assert.Single(projects[1].GetProperty("agreement").EnumerateArray());
+        Assert.Equal("implement", a.GetProperty("stageId").GetString());
+        Assert.Equal(1, a.GetProperty("decided").GetInt32());
+        Assert.Equal(0, a.GetProperty("agreed").GetInt32());
+        Assert.Equal(1, a.GetProperty("falseLows").GetInt32());
     }
 
     [Fact]

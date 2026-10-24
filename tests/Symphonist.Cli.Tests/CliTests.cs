@@ -318,6 +318,60 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Status_shows_risk_column()
+    {
+        var withRisk = Ticket("A-1", "AwaitingApproval", "2026-10-21T11:48:00+00:00").Replace("\"prUrl\":null", "\"prUrl\":null,\"risk\":\"High\"");
+        var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/tickets", HttpStatusCode.OK, "[" + withRisk + "," + Ticket("B-2", "Pending") + "]");
+
+        var r = await RunAsync(handler, "", "status");
+
+        var lines = r.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Matches(@"STATUS\s+RISK\s+WAITING", lines[0]);
+        Assert.Matches(@"AwaitingApproval\s+high\s+12m", lines[1]);
+        Assert.DoesNotContain("high", lines[2]);
+        Assert.DoesNotContain("low", lines[2]);
+    }
+
+    [Fact]
+    public async Task Show_prints_latest_review()
+    {
+        var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/tickets/p/K-1", HttpStatusCode.OK,
+            "{\"key\":\"K-1\",\"project\":\"p\",\"title\":\"Fix it\",\"stage\":\"implement\",\"status\":\"AwaitingApproval\"," +
+            "\"blockedReason\":null,\"attempts\":1,\"waitingSince\":null,\"prUrl\":null,\"events\":[]," +
+            "\"reviews\":[{\"stage\":\"implement\",\"at\":\"2026-10-21T10:00:00+00:00\",\"mode\":\"Shadow\",\"risk\":\"High\"," +
+            "\"summary\":\"touches pricing\",\"reasons\":[\"touches risk area 'pricing'\"],\"checked\":[],\"areasTouched\":[],\"decision\":null,\"error\":null}," +
+            "{\"stage\":\"plan\",\"at\":\"2026-10-20T10:00:00+00:00\",\"mode\":\"Shadow\",\"risk\":\"Low\",\"summary\":\"older review\",\"reasons\":[]}]}");
+
+        var r = await RunAsync(handler, "", "show", "p", "K-1");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Contains("Review:   implement (shadow) high risk: touches pricing", r.Out);
+        Assert.Contains("  - touches risk area 'pricing'", r.Out);
+        Assert.DoesNotContain("older review", r.Out);
+    }
+
+    [Fact]
+    public async Task Projects_prints_agreement()
+    {
+        var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/projects", HttpStatusCode.OK,
+            "[{\"id\":\"api\",\"name\":\"Api\",\"paused\":false,\"isolation\":\"Container\",\"problem\":null,\"review\":\"Shadow\"," +
+            "\"agreement\":[{\"projectId\":\"api\",\"stageId\":\"implement\",\"decided\":10,\"agreed\":9,\"falseLows\":1,\"autoApproved\":0,\"rate\":0.9}," +
+            "{\"projectId\":\"api\",\"stageId\":\"plan\",\"decided\":0,\"agreed\":0,\"falseLows\":0,\"autoApproved\":0,\"rate\":null}]}," +
+            "{\"id\":\"web\",\"name\":\"Web\",\"paused\":false,\"isolation\":\"Container\",\"review\":\"Active\"," +
+            "\"agreement\":[{\"projectId\":\"web\",\"stageId\":\"release\",\"decided\":2,\"agreed\":2,\"falseLows\":0,\"autoApproved\":3,\"rate\":1}]}]");
+
+        var r = await RunAsync(handler, "", "projects");
+
+        var lines = r.Out.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.TrimEnd('\r')).ToList();
+        Assert.Matches(@"STATE\s+REVIEW\s+ISOLATION", lines[0]);
+        Assert.Matches(@"active\s+shadow\s+Container", lines[1]);
+        Assert.Equal("  implement: agrees 9/10, 1 low-risk sent back", lines[2]);
+        Assert.Matches(@"^web\s", lines[3]);
+        Assert.Equal("  release: agrees 2/2, 3 auto-approved", lines[4]);
+        Assert.Equal(5, lines.Count);
+    }
+
+    [Fact]
     public async Task Projects_shows_problem_column()
     {
         var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/projects", HttpStatusCode.OK,

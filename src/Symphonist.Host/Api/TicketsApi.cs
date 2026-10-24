@@ -1,5 +1,6 @@
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
@@ -9,17 +10,23 @@ namespace Symphonist.Host.Api;
 public sealed record ApiError(string Error);
 
 public sealed record TicketDto(string Key, string Project, string Title, string Stage, StageStatus Status,
-    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl);
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, RiskLevel? Risk = null);
 
 public sealed record TicketEventDto(DateTimeOffset At, string Stage, string Message);
 
+/// <param name="Decision">The developer's (or auto-approval's) decision on the round: "Approved" or "SentBack"; null while undecided.</param>
+public sealed record GateReviewDto(string Stage, DateTimeOffset At, ReviewMode Mode, RiskLevel Risk, string Summary,
+    IReadOnlyList<string> Reasons, IReadOnlyList<string> Checked, IReadOnlyList<string> AreasTouched, string? Decision, string? Error);
+
 public sealed record TicketDetailDto(string Key, string Project, string Title, string Stage, StageStatus Status,
-    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events);
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events,
+    IReadOnlyList<GateReviewDto> Reviews);
 
 public sealed record SendBackRequest(string? Feedback, string? ToStage);
 
 /// <param name="Problem">Why the project's last tick could not run (e.g. a missing secret); null when it ran.</param>
-public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation Isolation, string? Problem);
+public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation Isolation, string? Problem,
+    ReviewMode Review, IReadOnlyList<StageAgreement> Agreement);
 
 /// <param name="Url">Single-use sign-in link for the dashboard (see <see cref="DashboardLogin"/>).</param>
 public sealed record DashboardLinkDto(Uri Url);
@@ -45,10 +52,12 @@ public static class TicketsApi
         {
             if (await store.FindAsync(project, key, ct) is not { } t) return TicketNotFound(project, key);
             var events = await store.EventsAsync(t.Id, ct);
+            var reviews = await store.GateReviewsAsync(t.Id, ct);
             var d = ToDto(t, Find(projects, project));
             return Results.Ok(new TicketDetailDto(d.Key, d.Project, d.Title, d.Stage, d.Status, d.BlockedReason,
                 d.Attempts, d.WaitingSince, d.PrUrl,
-                events.OrderBy(e => e.At).ThenBy(e => e.Id).Select(e => new TicketEventDto(e.At, e.StageId, e.Message)).ToList()));
+                events.OrderBy(e => e.At).ThenBy(e => e.Id).Select(e => new TicketEventDto(e.At, e.StageId, e.Message)).ToList(),
+                reviews.OrderByDescending(r => r.At).Select(ToDto).ToList()));
         });
 
         api.MapPost("/tickets/{project}/{key}/approve", (string project, string key, Orchestrator o, CancellationToken ct) =>
@@ -87,9 +96,13 @@ public static class TicketsApi
             return Results.Accepted();
         });
 
-        api.MapGet("/projects", (ProjectRegistry projects, Orchestrator o) =>
-            projects.Projects.OrderBy(p => p.Id, StringComparer.Ordinal)
-                .Select(p => new ProjectDto(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation, o.ProblemOf(p.Id))));
+        api.MapGet("/projects", async (ProjectRegistry projects, Orchestrator o, ITicketStore store, CancellationToken ct) =>
+        {
+            var agreements = (await store.ReviewAgreementAsync(null, ct)).ToLookup(a => a.ProjectId);
+            return projects.Projects.OrderBy(p => p.Id, StringComparer.Ordinal)
+                .Select(p => new ProjectDto(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation, o.ProblemOf(p.Id),
+                    p.Review.Mode, agreements[p.Id].ToList()));
+        });
 
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));
         api.MapPost("/projects/{id}/resume", (string id, ProjectRegistry projects) => SetPaused(projects, id, false));
@@ -121,7 +134,11 @@ public static class TicketsApi
 
     private static TicketDto ToDto(Ticket t, ProjectConfig? p) =>
         new(t.Key, t.ProjectId, t.Title, t.StageId, t.Status, t.BlockedReason, t.Attempts, t.WaitingSince,
-            TicketLinks.PullRequest(p, t.PullRequestId));
+            TicketLinks.PullRequest(p, t.PullRequestId), t.Risk);
+
+    private static GateReviewDto ToDto(GateReview r) =>
+        new(r.StageId, r.At, r.Mode, r.Verdict.Risk, r.Verdict.Summary, r.Verdict.Reasons, r.Verdict.Checked,
+            r.Verdict.AreasTouched, r.Decision?.ToString(), r.Verdict.Error);
 
     private static ProjectConfig? Find(ProjectRegistry projects, string id) => projects.Projects.FirstOrDefault(p => p.Id == id);
 

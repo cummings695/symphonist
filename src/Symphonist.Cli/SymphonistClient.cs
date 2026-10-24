@@ -7,14 +7,22 @@ using Symphonist.Core;
 namespace Symphonist.Cli;
 
 public sealed record TicketDto(string Key, string Project, string Title, string Stage, string Status,
-    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl);
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, string? Risk = null);
 
 public sealed record TicketEventDto(DateTimeOffset At, string Stage, string Message);
 
 public sealed record TicketDetailDto(string Key, string Project, string Title, string Stage, string Status,
-    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events);
+    string? BlockedReason, int Attempts, DateTimeOffset? WaitingSince, Uri? PrUrl, IReadOnlyList<TicketEventDto> Events,
+    IReadOnlyList<GateReviewDto>? Reviews = null);
 
-public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation, string? Problem = null);
+/// <param name="Mode">shadow, active or off (as the API names them).</param>
+public sealed record GateReviewDto(string Stage, DateTimeOffset At, string Mode, string Risk, string Summary,
+    IReadOnlyList<string> Reasons, string? Decision = null);
+
+public sealed record StageAgreementDto(string StageId, int Decided, int Agreed, int FalseLows, int AutoApproved);
+
+public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation, string? Problem = null,
+    string Review = "Off", IReadOnlyList<StageAgreementDto>? Agreement = null);
 
 public sealed record OutcomeDto(bool Changed, string Message);
 

@@ -10,13 +10,35 @@ public static class StatusTable
         var rows = tickets
             .OrderBy(t => t.Status == "AwaitingApproval" ? 0 : t.Status == "Blocked" ? 1 : 2)
             .ThenBy(t => t.Key, StringComparer.Ordinal).ThenBy(t => t.Project, StringComparer.Ordinal)
-            .Select(t => new[] { t.Key, t.Project, t.Stage, t.Status, Age(t.WaitingSince, now), t.BlockedReason ?? "" });
-        return Table(["KEY", "PROJECT", "STAGE", "STATUS", "WAITING", "NOTE"], rows);
+            .Select(t => new[] { t.Key, t.Project, t.Stage, t.Status, RiskWord(t.Risk), Age(t.WaitingSince, now), t.BlockedReason ?? "" });
+        return Table(["KEY", "PROJECT", "STAGE", "STATUS", "RISK", "WAITING", "NOTE"], rows);
     }
 
-    public static string RenderProjects(IEnumerable<ProjectDto> projects) =>
-        Table(["ID", "NAME", "STATE", "ISOLATION", "PROBLEM"],
-            projects.Select(p => new[] { p.Id, p.Name, p.Paused ? "paused" : "active", p.Isolation, p.Problem ?? "" }));
+    public static string RenderProjects(IEnumerable<ProjectDto> projects)
+    {
+        var list = projects.ToList();
+        var table = Table(["ID", "NAME", "STATE", "REVIEW", "ISOLATION", "PROBLEM"],
+            list.Select(p => new[] { p.Id, p.Name, p.Paused ? "paused" : "active", p.Review.ToLowerInvariant(), p.Isolation, p.Problem ?? "" }));
+
+        // Agreement lines go indented under their project's row.
+        var lines = table.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        var sb = new StringBuilder().AppendLine(lines[0]);
+        for (var i = 0; i < list.Count; i++)
+        {
+            sb.AppendLine(lines[i + 1]);
+            foreach (var a in Agreement(list[i]))
+                sb.AppendLine($"  {a.StageId}: agrees {a.Agreed}/{a.Decided}"
+                    + (a.FalseLows > 0 ? $", {a.FalseLows} low-risk sent back" : "")
+                    + (a.AutoApproved > 0 ? $", {a.AutoApproved} auto-approved" : ""));
+        }
+
+        return sb.ToString();
+    }
+
+    private static IEnumerable<StageAgreementDto> Agreement(ProjectDto p) =>
+        (p.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);
+
+    private static string RiskWord(string? risk) => risk?.ToLowerInvariant() ?? "";
 
     public static string RenderDetail(TicketDetailDto t, DateTimeOffset now)
     {
@@ -29,6 +51,11 @@ public static class StatusTable
         if (t.WaitingSince is not null) sb.AppendLine($"Waiting:  {Age(t.WaitingSince, now)}");
         if (t.BlockedReason is not null) sb.AppendLine($"Blocked:  {t.BlockedReason}");
         if (t.PrUrl is not null) sb.AppendLine($"PR:       {t.PrUrl}");
+        if (t.Reviews?.OrderByDescending(r => r.At).FirstOrDefault() is { } r)
+        {
+            sb.AppendLine($"Review:   {r.Stage} ({r.Mode.ToLowerInvariant()}) {r.Risk.ToLowerInvariant()} risk: {r.Summary}");
+            foreach (var reason in r.Reasons) sb.AppendLine($"  - {reason}");
+        }
         sb.AppendLine().AppendLine("Events:");
         foreach (var e in t.Events) sb.AppendLine($"  {e.At.ToLocalTime():yyyy-MM-dd HH:mm}  [{e.Stage}] {e.Message}");
         return sb.ToString();
