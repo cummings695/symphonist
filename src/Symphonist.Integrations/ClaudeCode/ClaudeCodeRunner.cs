@@ -9,8 +9,12 @@ namespace Symphonist.Integrations.ClaudeCode;
 /// <summary>Runs Claude Code headlessly (<c>claude -p</c>) and parses its JSON result.</summary>
 public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launcher) : IAgentRunner
 {
-    /// <summary>Denied on every read-only run, whatever the isolation (defense in depth).</summary>
-    public static readonly IReadOnlyList<string> ReadOnlyDeniedTools = ["Write", "Edit", "NotebookEdit", "Bash"];
+    /// <summary>
+    /// Denied on every read-only run, whatever the isolation (defense in depth): no writes, no shell, and no web access
+    /// that untrusted content could use to send what the reviewer read elsewhere.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ReadOnlyDeniedTools =
+        ["Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch"];
 
     private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
@@ -30,7 +34,14 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
                     $"read-only run refuses write-capable tool '{tool}'", "");
             args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools));
         }
-        if (request.ReadOnlyWorkspace) { args.Add("--disallowedTools"); args.Add(string.Join(",", ReadOnlyDeniedTools)); }
+        if (request.ReadOnlyWorkspace)
+        {
+            args.Add("--disallowedTools"); args.Add(string.Join(",", ReadOnlyDeniedTools));
+            // The workspace is what is being reviewed: its .claude settings (permissions, hooks), CLAUDE.md / AGENTS.md
+            // (loaded only with the project and local sources) and .mcp.json servers must not steer or widen the run.
+            args.Add("--setting-sources"); args.Add("user");
+            args.Add("--strict-mcp-config");
+        }
         if (!string.IsNullOrWhiteSpace(settings.Model)) { args.Add("--model"); args.Add(settings.Model); }
 
         var command = new ProcessSpec("claude", args, request.WorkingDirectory, request.Prompt,

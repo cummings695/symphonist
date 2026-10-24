@@ -205,6 +205,8 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             verdict = verdict.WithForcedHigh($"changed file name could not be decoded: {file}");
         foreach (var file in changed.Where(IsGitMetadata))
             verdict = verdict.WithForcedHigh($"changes git attributes or submodules: {file}");
+        foreach (var file in changed.Where(IsAgentConfiguration))
+            verdict = verdict.WithForcedHigh($"changes agent configuration: {file}");
 
         var lines = diff.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
         foreach (var line in lines)
@@ -229,6 +231,21 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         file.Equals(".gitattributes", StringComparison.OrdinalIgnoreCase)
         || file.Equals(".gitmodules", StringComparison.OrdinalIgnoreCase)
         || file.EndsWith("/.gitattributes", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Files that instruct or configure Claude Code (and other agents) in this repository: they steer every later agent
+    /// run here, so the reviewer's word alone cannot clear them.
+    /// </summary>
+    private static bool IsAgentConfiguration(string file)
+    {
+        var parts = file.Split('/');
+        var name = parts[^1];
+        return name.Equals("CLAUDE.md", StringComparison.OrdinalIgnoreCase)
+               || name.Equals("CLAUDE.local.md", StringComparison.OrdinalIgnoreCase)
+               || name.Equals("AGENTS.md", StringComparison.OrdinalIgnoreCase)
+               || name.Equals(".mcp.json", StringComparison.OrdinalIgnoreCase)
+               || parts[..^1].Any(dir => dir.Equals(".claude", StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>Drops the C-quotes and the a/ or b/ prefix of a patch path (enough to read its extension).</summary>
     private static string Unquote(string side)

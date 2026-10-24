@@ -249,8 +249,17 @@ public class ClaudeCodeRunnerTests
     {
         await runner.RunAsync(ReadOnly(Isolation.Host, [.. ReviewConfig.ReadOnlyTools]), default);
         Assert.Equal("Read,Grep,Glob", ArgAfter(fake.Last, "--allowedTools"));
-        Assert.Equal("Write,Edit,NotebookEdit,Bash", ArgAfter(fake.Last, "--disallowedTools"));
+        Assert.Equal("Write,Edit,NotebookEdit,Bash,WebFetch,WebSearch", ArgAfter(fake.Last, "--disallowedTools"));
         Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
+        AssertIgnoresWorkspaceConfig(fake.Last);
+    }
+
+    /// <summary>The workspace's own Claude Code settings, CLAUDE.md and MCP servers must not steer a read-only run.</summary>
+    private static void AssertIgnoresWorkspaceConfig(ProcessSpec spec)
+    {
+        Assert.Equal("user", ArgAfter(spec, "--setting-sources"));
+        Assert.Contains("--strict-mcp-config", spec.Arguments);
+        Assert.DoesNotContain("--mcp-config", spec.Arguments);
     }
 
     [Theory]
@@ -273,7 +282,8 @@ public class ClaudeCodeRunnerTests
     {
         await runner.RunAsync(ReadOnly(Isolation.Container, ["Write"]), default);
         Assert.Contains("--dangerously-skip-permissions", fake.Last.Arguments);
-        Assert.Equal("Write,Edit,NotebookEdit,Bash", ArgAfter(fake.Last, "--disallowedTools"));
+        Assert.Equal("Write,Edit,NotebookEdit,Bash,WebFetch,WebSearch", ArgAfter(fake.Last, "--disallowedTools"));
+        AssertIgnoresWorkspaceConfig(fake.Last);
     }
 
     [Fact]

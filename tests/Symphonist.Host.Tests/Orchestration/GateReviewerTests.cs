@@ -625,6 +625,42 @@ public sealed class GateReviewerTests : IDisposable
         Assert.Contains($"changes git attributes or submodules: {file}", verdict.Reasons);
     }
 
+    [Theory]
+    [InlineData("CLAUDE.md")]
+    [InlineData("src/Api/CLAUDE.md")]
+    [InlineData("claude.md")]
+    [InlineData("CLAUDE.local.md")]
+    [InlineData("AGENTS.md")]
+    [InlineData("docs/AGENTS.md")]
+    [InlineData(".claude/settings.json")]
+    [InlineData(".claude/agents/reviewer.md")]
+    [InlineData("tools/.claude/settings.local.json")]
+    [InlineData(".mcp.json")]
+    [InlineData("services/api/.mcp.json")]
+    public async Task Agent_configuration_files_force_high(string file)
+    {
+        // They steer later agent runs (and the developer's own Claude Code) in this repository.
+        git.ChangedFiles = [file];
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        var verdict = await Review(At("implement"));
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains($"changes agent configuration: {file}", verdict.Reasons);
+    }
+
+    [Theory]
+    [InlineData("docs/claude.md.txt")]
+    [InlineData("src/Claude/Client.cs")]
+    [InlineData("my.claude/notes.md")]
+    public async Task Look_alike_files_are_not_agent_configuration(string file)
+    {
+        git.ChangedFiles = [file];
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        Assert.Equal(RiskLevel.Low, (await Review(At("implement"))).Risk);
+    }
+
     [Fact]
     public async Task Forged_fence_markers_are_neutralised_and_stay_inside_the_real_fence()
     {
