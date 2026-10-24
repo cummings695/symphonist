@@ -2,6 +2,7 @@ using AngleSharp.Dom;
 using Bunit;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.JSInterop;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
@@ -29,6 +30,7 @@ public sealed class MainLayoutTests : IDisposable
     private readonly ProjectRegistry registry;
     private readonly Orchestrator orchestrator;
     private readonly DashboardChrome chrome = new();
+    private readonly BunitJSModuleInterop theme;
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
@@ -43,7 +45,8 @@ public sealed class MainLayoutTests : IDisposable
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
 
-        ctx.JSInterop.Mode = JSRuntimeMode.Loose; // Task 4 sets up the theme module strictly
+        ctx.JSInterop.Mode = JSRuntimeMode.Strict;
+        theme = ctx.JSInterop.SetupModule("./js/theme.js");
         ctx.Services.AddSingleton<TimeProvider>(time);
         ctx.Services.AddSingleton(notifier);
         ctx.Services.AddSingleton(registry);
@@ -70,10 +73,17 @@ public sealed class MainLayoutTests : IDisposable
 
     private IRenderedComponent<MainLayout> RenderLayout()
     {
+        if (!themeSetUp)
+        {
+            theme.Setup<string>("current").SetResult("light");
+            theme.Setup<bool>("set", _ => true).SetResult(true);
+        }
         var cut = ctx.Render<MainLayout>(p => p.Add(l => l.Body, b => b.AddContent(0, "page body")));
         cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-sidebar-project]")));
         return cut;
     }
+
+    private bool themeSetUp;
 
     private static IElement Row(IRenderedComponent<MainLayout> cut, string id) => cut.Find($"[data-sidebar-project='{id}']");
 
@@ -245,5 +255,34 @@ public sealed class MainLayoutTests : IDisposable
     {
         Assert.Equal(ProjectSidebar.ColourOf("orders"), ProjectSidebar.ColourOf("orders"));
         Assert.StartsWith("var(--project-", ProjectSidebar.ColourOf("billing"));
+    }
+
+    [Fact]
+    public void Theme_toggle_reads_and_sets_the_theme()
+    {
+        var cut = RenderLayout();
+
+        cut.WaitForAssertion(() => Assert.Equal("Switch to dark mode", cut.Find("[data-theme-toggle]").GetAttribute("aria-label")));
+
+        cut.Find("[data-theme-toggle]").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("Switch to light mode", cut.Find("[data-theme-toggle]").GetAttribute("aria-label")));
+        var call = Assert.Single(theme.Invocations["set"]);
+        Assert.Equal("dark", Assert.Single(call.Arguments));
+    }
+
+    [Fact]
+    public void Theme_toggle_survives_a_failing_browser()
+    {
+        themeSetUp = true;
+        theme.Setup<string>("current").SetException(new JSException("storage blocked"));
+        theme.Setup<bool>("set", _ => true).SetException(new JSException("storage blocked"));
+
+        var cut = RenderLayout();
+
+        Assert.Equal("Switch light or dark mode", cut.Find("[data-theme-toggle]").GetAttribute("aria-label"));
+        cut.Find("[data-theme-toggle]").Click();
+        Assert.Contains("page body", cut.Markup);
+        Assert.Equal("Switch light or dark mode", cut.Find("[data-theme-toggle]").GetAttribute("aria-label"));
     }
 }
