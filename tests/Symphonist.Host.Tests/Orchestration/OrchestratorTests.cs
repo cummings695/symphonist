@@ -246,6 +246,22 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal("tracker moved to 'In Progress' on retry", store.EventMessages("ORD-1")[^1]);
     }
 
+    [Fact] public async Task Retry_failure_is_recorded_once_even_when_the_error_text_varies()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var attempts = 0;
+        tracker.OnTransition = (_, _) => throw new HttpRequestException($"400 request {++attempts}");
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None); // attempt 1
+        for (var i = 0; i < 4; i++) await o.TickAsync(CancellationToken.None); // attempts 2-5
+
+        Assert.Equal(5, attempts);
+        Assert.Single(store.EventMessages("ORD-1"),
+            m => m.StartsWith("tracker transition to 'In Progress' failed", StringComparison.Ordinal));
+    }
+
     [Fact] public async Task Developer_move_cancels_retry()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");

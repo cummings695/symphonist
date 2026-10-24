@@ -51,6 +51,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     public void RequestTick() => TickTrigger.Request();
 
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
+    /// <summary>Tickets whose pending tracker move already has a failure event (one per retry episode); under gate only.</summary>
+    private readonly HashSet<Guid> retryFailureRecorded = [];
 
     /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
     public string? ProblemOf(string projectId) => problems.GetValueOrDefault(projectId);
@@ -133,6 +135,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             if (await store.FindAsync(projectId, key, ct) is not { } t) return ForgetResult.NotFound;
             if (inFlight.ContainsKey(t.Id)) return ForgetResult.Running;
+            retryFailureRecorded.Remove(t.Id);
             return await store.DeleteAsync(projectId, key, ct) ? ForgetResult.Forgotten : ForgetResult.NotFound;
         }
         finally
@@ -276,7 +279,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Retries a tracker move that was skipped or threw, while the card is still where Symphonist last saw it. A failure
-    /// is recorded once, not on every tick of an outage.
+    /// is recorded once per move, not on every tick of an outage (whatever the error text).
     /// </summary>
     private async Task RetryTrackerMoveAsync(ProjectIntegrations io, Ticket t, CancellationToken ct)
     {
@@ -289,12 +292,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
             log.LogWarning(e, "Retried transition of {Key} to {Status} failed", t.Key, target);
-            await AddEventOnceAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
+            if (retryFailureRecorded.Add(t.Id))
+                await AddEventAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
             return;
         }
 
         if (moved) t.LastSourceStatus = target;
         t.TrackerRetryStatus = null;
+        retryFailureRecorded.Remove(t.Id);
         await store.SaveAsync(t, ct);
         await AddEventAsync(t, moved ? $"tracker moved to '{target}' on retry" : $"no transition to '{target}' in tracker", ct);
     }
@@ -475,6 +480,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await AddEventAsync(t, outcome.Message, ct);
 
         if (outcome.SourceStatusToSet is not { } target) return;
+        retryFailureRecorded.Remove(t.Id); // a new move: its own failure is recorded
         if (t.TrackerRetryStatus is not null)
         {
             t.TrackerRetryStatus = null; // this move replaces the one still waiting to be retried
@@ -510,6 +516,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             log.LogWarning(e, "Transition of {Key} to {Status} failed", t.Key, target);
             await AddEventAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
+            retryFailureRecorded.Add(t.Id);
             await SaveRetryAsync(t, target, ct);
         }
     }
