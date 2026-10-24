@@ -163,6 +163,21 @@ public sealed class TicketDetailComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Approve_on_stale_page_leaves_a_later_gate_alone()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        var moved = store.Single("ORD-1");
+        moved.StageId = "implement";
+        await store.SaveAsync(moved, default);
+
+        Button(cut, "Approve").Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: plan is not awaiting approval", StatusLine(cut)));
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
+    [Fact]
     public async Task Approve_stored_but_a_follow_up_step_failed_says_so()
     {
         await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);

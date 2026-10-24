@@ -205,7 +205,7 @@ else
         Exception? failure = null;
         try
         {
-            var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token);
+            var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token, card.StageId);
             commandMessage = $"{card.Key}: {outcome.Message}";
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)

@@ -317,6 +317,21 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal("secret 'jira-acme' not set", o.ProblemOf("orders")); // the requested tick ran
     }
 
+    [Fact] public async Task Approve_of_a_stage_the_ticket_has_left_changes_nothing()
+    {
+        await Seed("ORD-1", "release", StageStatus.AwaitingApproval, "In Review");
+        var o = Create();
+
+        var outcome = await o.ApproveAsync("orders", "ORD-1", CancellationToken.None, expectedStageId: "implement");
+
+        Assert.False(outcome.Changed);
+        Assert.Equal("implement is not awaiting approval", outcome.Message);
+        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Empty(store.Events);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None, expectedStageId: "release")).Changed);
+    }
+
     [Fact] public async Task Unchanged_command_does_not_tick()
     {
         await Seed("ORD-1", "plan", StageStatus.Pending, "Planned");

@@ -253,8 +253,11 @@ else
         }
     }
 
-    private Task ApproveAsync() =>
-        RunAsync("approve", "approved", ct => Orchestrator.ApproveAsync(Project, Key, ct));
+    private Task ApproveAsync()
+    {
+        var stage = model?.Card.StageId; // the gate shown on the page, not one the ticket reached meanwhile
+        return RunAsync("approve", "approved", ct => Orchestrator.ApproveAsync(Project, Key, ct, stage));
+    }
 
     private Task UnblockAsync() =>
         RunAsync("unblock", "unblocked", ct => Orchestrator.UnblockAsync(Project, Key, ct));

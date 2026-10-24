@@ -105,8 +105,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
     }
 
-    public Task<TransitionOutcome> ApproveAsync(string projectId, string key, CancellationToken ct) =>
-        CommandAsync(projectId, key, (p, t, now) => PipelineEngine.Approve(p, t, now), ct);
+    /// <param name="expectedStageId">The stage the developer saw waiting (dashboard); when the ticket is at another stage
+    /// nothing changes, so a stale view can never approve a later gate (e.g. a production deploy).</param>
+    public Task<TransitionOutcome> ApproveAsync(string projectId, string key, CancellationToken ct,
+        string? expectedStageId = null) =>
+        CommandAsync(projectId, key, (p, t, now) => expectedStageId is not null && t.StageId != expectedStageId
+            ? new TransitionOutcome(false, null, $"{expectedStageId} is not awaiting approval")
+            : PipelineEngine.Approve(p, t, now), ct);
 
     public Task<TransitionOutcome> SendBackAsync(string projectId, string key, string feedback, string? toStageId,
         CancellationToken ct) =>

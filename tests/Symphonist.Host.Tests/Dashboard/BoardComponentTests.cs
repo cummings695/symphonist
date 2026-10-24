@@ -143,6 +143,21 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Approve_on_card_whose_ticket_reached_a_later_gate_leaves_that_gate_alone()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+        var moved = store.Single("ORD-1"); // approved elsewhere; now waits at the next gate
+        moved.StageId = "implement";
+        await store.SaveAsync(moved, default);
+
+        Card(cut, "ORD-1").QuerySelector("button")!.Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: plan is not awaiting approval", StatusLine(cut)));
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
+    [Fact]
     public async Task Approve_stored_but_a_follow_up_step_failed_says_so()
     {
         await Seed("ORD-5", "implement", StageStatus.AwaitingApproval);
