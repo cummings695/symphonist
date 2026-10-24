@@ -349,6 +349,82 @@ public sealed class BoardQueryTests : IDisposable
     }
 
     [Fact]
+    public async Task Shell_lists_every_project_with_its_counts()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        await Seed("ORD-2", "implement", StageStatus.Running);
+        await Seed("ORD-3", "done", StageStatus.Done);
+        await Seed("BIL-1", "triage", StageStatus.Blocked, "billing");
+
+        var shell = await query.LoadShellAsync(default);
+
+        Assert.Equal(["billing", "orders"], shell.Projects.Select(p => p.Id));
+        var orders = shell.Projects.Single(p => p.Id == "orders");
+        Assert.Equal((1, 2), (orders.WaitingOnYou, orders.Active));
+        var billing = shell.Projects.Single(p => p.Id == "billing");
+        Assert.Equal((0, 1), (billing.WaitingOnYou, billing.Active));
+        Assert.Equal(new BoardCounts(1, 1, 1), shell.Totals);
+    }
+
+    [Fact]
+    public async Task Shell_reports_pause_and_problem()
+    {
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set; run: symphonist secret set jira-acme");
+        await orchestrator.TickAsync(CancellationToken.None);
+        registry.SetPaused("orders", true);
+
+        var projects = (await query.LoadShellAsync(default)).Projects;
+
+        var orders = projects.Single(p => p.Id == "orders");
+        Assert.Contains("secret", orders.Problem);
+        Assert.True(orders.Paused);
+        Assert.False(projects.Single(p => p.Id == "billing").Paused);
+    }
+
+    [Fact]
+    public async Task Card_carries_its_stage_position()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending);
+        await Seed("ORD-2", "implement", StageStatus.Running);
+        await Seed("ORD-3", "done", StageStatus.Done);
+        await Seed("ORD-4", "nope", StageStatus.Pending);
+
+        var cards = (await query.LoadBoardAsync(null, default)).Columns.SelectMany(c => c.Cards).ToDictionary(c => c.Key);
+
+        Assert.Equal((2, 4), (cards["ORD-1"].StageNumber, cards["ORD-1"].StageCount));
+        Assert.Equal((3, 4), (cards["ORD-2"].StageNumber, cards["ORD-2"].StageCount));
+        Assert.Equal((null, null), (cards["ORD-3"].StageNumber, cards["ORD-3"].StageCount));
+        Assert.Equal((null, null), (cards["ORD-4"].StageNumber, cards["ORD-4"].StageCount));
+    }
+
+    [Fact]
+    public async Task Columns_carry_their_stage_kind()
+    {
+        var filtered = await query.LoadBoardAsync("orders", default);
+        await Seed("ORD-1", "nope", StageStatus.Pending); // gives the all-projects board an unknown column
+        var all = await query.LoadBoardAsync(null, default);
+
+        Assert.Equal([StageKind.Triage, StageKind.Plan, StageKind.Implement, StageKind.Done], filtered.Columns.Select(c => c.Kind));
+        Assert.All(all.Columns.Where(c => c.Id != BoardQuery.UnknownColumnId), c => Assert.Equal(c.Id, c.Kind.ToString()));
+        Assert.Null(all.Columns.Single(c => c.Id == BoardQuery.UnknownColumnId).Kind);
+    }
+
+    [Fact]
+    public async Task Detail_carries_the_project_pipeline()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending);
+        await Seed("GONE-1", "plan", StageStatus.Pending, "gone");
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+        var gone = (await query.LoadTicketAsync("gone", "GONE-1", default))!;
+
+        Assert.Equal(["triage", "plan", "implement", "done"], detail.Pipeline.Select(s => s.Id));
+        Assert.Equal("Project orders", detail.ProjectName);
+        Assert.Empty(gone.Pipeline);
+        Assert.Equal("gone", gone.ProjectName);
+    }
+
+    [Fact]
     public async Task Missing_ticket_detail_is_null()
     {
         Assert.Null(await query.LoadTicketAsync("orders", "NOPE-1", default));

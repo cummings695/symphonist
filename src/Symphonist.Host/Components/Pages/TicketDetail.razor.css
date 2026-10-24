@@ -1,48 +1,139 @@
-.back {
+.crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 0.5rem;
     margin: 0 0 0.75rem;
-}
-
-.ticket-header h1 {
-    margin: 0 0 0.3rem;
-    font-size: 1.15rem;
-    font-weight: 650;
+    color: var(--muted);
+    font-size: 0.9rem;
     overflow-wrap: anywhere;
 }
 
-.ticket-key {
-    font-family: var(--font-mono);
+.crumbs a {
+    min-width: 0;
+    text-decoration: none;
 }
 
-.ticket-facts {
+.crumbs a:hover {
+    text-decoration: underline;
+}
+
+/* Panels: the summary on top, then the history and the rail */
+.panel,
+.summary {
+    min-width: 0;
+    padding: 1rem 1.1rem;
+    background: var(--surface);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--card-shadow);
+}
+
+.panel h2 {
+    margin: 0 0 0.6rem;
+    font-size: 0.95rem;
+}
+
+.summary {
+    margin-bottom: 0.9rem;
+}
+
+/* The page's one loud signal: an ochre rail while the ticket waits on you, a red one while it is blocked. */
+.summary-waiting {
+    border-color: var(--waiting-rail);
+    box-shadow: inset 4px 0 0 var(--waiting-rail), var(--card-shadow);
+}
+
+.summary-blocked {
+    box-shadow: inset 4px 0 0 var(--danger), var(--card-shadow);
+}
+
+.facts {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.2rem 0.9rem;
-    margin: 0 0 0.5rem;
-    color: var(--muted);
+    gap: 0.35rem 0.6rem;
+    margin-bottom: 0.4rem;
+}
+
+.ticket-key {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .ticket-status {
-    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 650;
+    line-height: 1.35rem;
+    white-space: nowrap;
+}
+
+.status-dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: currentColor;
 }
 
 .ticket-awaitingapproval {
     color: var(--waiting);
+    background: var(--waiting-tint);
+    border-color: var(--waiting-rail);
 }
 
 .ticket-blocked {
     color: var(--danger);
+    background: var(--danger-tint);
+    border-color: var(--danger);
 }
 
 .ticket-running {
     color: var(--running);
+    border-color: var(--running);
+}
+
+.facts-numbers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.1rem 0.9rem;
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.facts-numbers strong {
+    color: var(--fg);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+h1 {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+}
+
+.not-found p {
+    margin: 0.4rem 0 0;
+    overflow-wrap: anywhere;
 }
 
 .ticket-reason,
 .ticket-feedback {
-    max-width: 60rem;
-    margin: 0.3rem 0;
-    padding: 0.4rem 0.6rem;
+    margin: 0.75rem 0 0;
+    padding: 0.5rem 0.75rem;
     border-radius: var(--radius);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -54,28 +145,33 @@
 }
 
 .ticket-feedback {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--lane);
 }
 
-.ticket-links {
+/* Desktop: the history on the left, Actions and Links in a rail on the right. */
+.detail-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 19rem;
+    gap: 0.9rem;
+    align-items: start;
+}
+
+.detail-history,
+.detail-rail {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem 1.2rem;
-    margin: 0.75rem 0;
-    overflow-wrap: anywhere;
+    flex-direction: column;
+    gap: 0.9rem;
+    min-width: 0;
 }
 
 .ticket-actions {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    max-width: 40rem;
-    margin: 0.75rem 0 1.25rem;
-    padding: 0.75rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+}
+
+.ticket-actions h2 {
+    margin-bottom: 0;
 }
 
 .action-row {
@@ -85,10 +181,19 @@
     gap: 0.5rem;
 }
 
+.action-row .button-primary {
+    flex: 1 1 auto;
+}
+
 .send-back {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+}
+
+.send-back > label {
+    font-size: 0.85rem;
+    font-weight: 600;
 }
 
 .send-back textarea {
@@ -104,20 +209,107 @@
 
 .target {
     display: inline-flex;
+    flex: 1 1 auto;
     align-items: center;
     gap: 0.4rem;
+    min-width: 0;
 }
 
-h2 {
-    margin: 1.25rem 0 0.4rem;
-    font-size: 1rem;
+.target select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.ticket-links {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    font-size: 0.88rem;
+    overflow-wrap: anywhere;
+}
+
+.ticket-links h2 {
+    margin-bottom: 0.05rem;
+}
+
+.ticket-links a {
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.ticket-links a:hover {
+    text-decoration: underline;
+}
+
+.link-label {
+    display: block;
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.ticket-links code {
+    padding: 0.05rem 0.35rem;
+    border-radius: 5px;
+    background: var(--lane);
 }
 
 .empty,
 .loading {
+    margin: 0;
     color: var(--muted);
 }
 
+.loading {
+    margin-top: 0.4rem;
+}
+
+/* Gate reviews as bordered cards */
+.reviews {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.88rem;
+}
+
+.review {
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.review-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.2rem 0.6rem;
+    margin: 0;
+    color: var(--muted);
+}
+
+.review-head strong {
+    color: var(--fg);
+}
+
+.review-outcome {
+    margin-left: auto;
+    font-weight: 600;
+}
+
+.review-summary,
+.review-error {
+    margin: 0.4rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.review-error {
+    color: var(--danger);
+}
+
+/* Agent runs */
 .table-wrap {
     overflow-x: auto;
 }
@@ -125,19 +317,35 @@ h2 {
 .runs {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.86rem;
+    font-size: 0.84rem;
 }
 
-.runs th,
+.runs th {
+    padding: 0 0.5rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-align: left;
+    text-transform: uppercase;
+}
+
 .runs td {
-    padding: 0.35rem 0.6rem;
+    padding: 0.55rem 0.5rem;
     border-bottom: 1px solid var(--border);
     text-align: left;
     vertical-align: top;
+    font-variant-numeric: tabular-nums;
 }
 
-.runs td {
-    font-variant-numeric: tabular-nums;
+.runs tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.run-ok {
+    color: var(--ok);
+    font-weight: 600;
 }
 
 .run-failed {
@@ -156,80 +364,85 @@ h2 {
     overflow-wrap: anywhere;
 }
 
-.reviews {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    font-size: 0.86rem;
-}
-
-.review {
-    max-width: 60rem;
-    margin-bottom: 0.5rem;
-    padding: 0.4rem 0.6rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-}
-
-.review-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.2rem 0.6rem;
-    margin: 0;
-}
-
-.review-head time,
-.review-outcome {
-    color: var(--muted);
-}
-
-.review-outcome {
+.run-log .button-quiet {
+    margin-top: 0.2rem;
+    padding: 0 0.4rem;
+    min-height: 1.6rem;
+    color: var(--accent);
+    font-size: 0.8rem;
     font-weight: 600;
 }
 
-.review-summary,
-.review-error {
-    margin: 0.3rem 0 0;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-
-.review-error {
-    color: var(--danger);
-}
-
+/* Events as a vertical timeline */
 .events {
     margin: 0;
-    padding: 0;
+    padding: 0 0 0 0.9rem;
+    border-left: 2px solid var(--track);
     list-style: none;
-    font-size: 0.86rem;
+    font-size: 0.88rem;
 }
 
 .events li {
+    position: relative;
     display: flex;
     flex-wrap: wrap;
-    gap: 0.1rem 0.8rem;
-    padding: 0.25rem 0;
-    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+    gap: 0.1rem 0.6rem;
+    padding: 0 0 0.75rem 0.9rem;
+}
+
+.events li:last-child {
+    padding-bottom: 0;
+}
+
+.events li::before {
+    content: "";
+    position: absolute;
+    top: 0.3rem;
+    left: calc(-0.9rem - 6px);
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    background: var(--surface);
 }
 
 .events time {
     color: var(--muted);
+    font-size: 0.78rem;
     font-variant-numeric: tabular-nums;
 }
 
 .event-stage {
+    padding: 0 0.4rem;
+    border-radius: 4px;
+    background: var(--lane);
     color: var(--muted);
-    min-width: 6rem;
+    font-size: 0.76rem;
 }
 
 .event-message {
     flex: 1 1 20rem;
+    min-width: 0;
     overflow-wrap: anywhere;
 }
 
-.not-found h1 {
-    font-size: 1.15rem;
+/* Phone width: one column, with Actions and Links straight after the summary and before the history. */
+@media (max-width: 40rem) {
+    .detail-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .detail-rail {
+        order: -1;
+    }
+
+    .facts-numbers {
+        margin-left: 0;
+    }
+
+    .panel,
+    .summary {
+        padding: 0.85rem 0.9rem;
+    }
 }

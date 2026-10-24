@@ -1,35 +1,36 @@
+/* The root takes no box: the row sits beside the board's <h1> in its .page-head line, the problem wraps below. */
 .project {
-    padding: 0.35rem 0.6rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    display: contents;
 }
 
 .project-row {
     display: flex;
+    flex: 1 1 auto;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.4rem 0.6rem;
-}
-
-.project-name {
-    font-weight: 600;
+    gap: 0.4rem 0.65rem;
+    min-width: 0;
 }
 
 .project-row .button {
-    margin-left: auto;
-    min-height: 1.6rem;
-    padding: 0 0.6rem;
+    min-height: 1.75rem;
+    padding: 0 0.7rem;
 }
 
-.project-paused .project-name {
-    color: var(--muted);
+/* The agreement line and the button sit at the right; the button alone when there is no agreement yet. */
+.project-agreement,
+.project-row .button {
+    margin-left: auto;
+}
+
+.project-agreement + .button {
+    margin-left: 0;
 }
 
 .badge-caution {
     border-color: var(--caution-border);
     background: var(--caution-tint);
-    color: var(--fg);
+    color: var(--caution-fg);
 }
 
 .badge-paused {
@@ -39,8 +40,9 @@
 }
 
 .project-problem {
-    margin: 0.35rem 0 0.1rem;
-    padding: 0.35rem 0.6rem;
+    flex-basis: 100%;
+    margin: 0.2rem 0 0;
+    padding: 0.45rem 0.75rem;
     border-left: 3px solid var(--caution-border);
     background: var(--caution-tint);
     border-radius: 0 var(--radius) var(--radius) 0;
@@ -51,8 +53,8 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.1rem 1rem;
-    margin: 0.3rem 0 0.1rem;
+    margin-block: 0;
     color: var(--muted);
-    font-size: 0.82rem;
+    font-size: 0.86rem;
     font-variant-numeric: tabular-nums;
 }

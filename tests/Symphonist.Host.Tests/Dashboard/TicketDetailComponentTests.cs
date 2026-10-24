@@ -47,7 +47,10 @@ public sealed class TicketDetailComponentTests : IDisposable
         ctx.Services.AddSingleton<ITicketStore>(store);
         ctx.Services.AddSingleton(orchestrator);
         ctx.Services.AddSingleton<BoardQuery>();
+        ctx.Services.AddScoped<DashboardChrome>();
     }
+
+    private DashboardChrome Chrome => ctx.Services.GetRequiredService<DashboardChrome>();
 
     public void Dispose()
     {
@@ -67,10 +70,9 @@ public sealed class TicketDetailComponentTests : IDisposable
         return t;
     }
 
-    private IRenderedComponent<TicketDetail> Render(string key = "ORD-1", string project = "orders", string? from = null)
+    private IRenderedComponent<TicketDetail> Render(string key = "ORD-1", string project = "orders")
     {
-        ctx.Services.GetRequiredService<NavigationManager>()
-            .NavigateTo($"/tickets/{project}/{key}" + (from is null ? "" : $"?from={from}"));
+        ctx.Services.GetRequiredService<NavigationManager>().NavigateTo($"/tickets/{project}/{key}");
         return ctx.Render<TicketDetail>(p => p.Add(c => c.Project, project).Add(c => c.Key, key));
     }
 
@@ -80,7 +82,21 @@ public sealed class TicketDetailComponentTests : IDisposable
         return cut;
     }
 
-    private static string StatusLine(IRenderedComponent<TicketDetail> cut) => cut.Find("[role=status]").TextContent;
+    private string StatusLine(IRenderedComponent<TicketDetail> _) => Chrome.Message ?? "";
+
+    /// <summary>The page's scoped stylesheet, read from the source tree.</summary>
+    private static string PageCss()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (!File.Exists(Path.Combine(dir.FullName, "Symphonist.slnx"))) dir = dir.Parent!;
+        return File.ReadAllText(Path.Combine(dir.FullName, "src", "Symphonist.Host", "Components", "Pages", "TicketDetail.razor.css"));
+    }
+
+    /// <summary>The declarations of every rule whose selector list includes <paramref name="selector"/>.</summary>
+    private static IEnumerable<string> RulesFor(string css, string selector) =>
+        System.Text.RegularExpressions.Regex.Matches(css, @"([^{}]+)\{([^{}]*)\}")
+            .Where(m => m.Groups[1].Value.Split(',').Any(s => s.Trim() == selector))
+            .Select(m => m.Groups[2].Value);
 
     private static IElement Button(IRenderedComponent<TicketDetail> cut, string text) =>
         cut.FindAll("button").Single(b => b.TextContent.Trim() == text);
@@ -357,17 +373,76 @@ public sealed class TicketDetailComponentTests : IDisposable
 
         cut.WaitForAssertion(() =>
             Assert.Contains("Ticket NOPE-1 was not found in project orders.", cut.Find(".not-found").TextContent));
-        Assert.Equal("/", cut.Find(".back a").GetAttribute("href"));
+        Assert.Equal("/?project=orders", cut.Find(".crumbs a").GetAttribute("href"));
     }
 
     [Fact]
-    public async Task Back_link_keeps_the_board_filter()
+    public async Task Breadcrumb_links_to_the_ticket_project()
     {
         await Seed("ORD-1", "implement", StageStatus.Pending);
 
-        var cut = Loaded(Render(from: "orders"));
+        var cut = Loaded(Render());
 
-        Assert.Equal("/?project=orders", cut.Find(".back a").GetAttribute("href"));
+        var crumb = cut.Find(".crumbs a");
+        Assert.Equal("/?project=orders", crumb.GetAttribute("href"));
+        Assert.Equal("Project orders", crumb.TextContent.Trim());
+        Assert.Equal("orders", Chrome.CurrentProject);
+        Assert.Equal("ORD-1", Chrome.PageLabel);
+    }
+
+    [Fact]
+    public async Task Stepper_marks_done_current_and_upcoming()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+
+        var cut = Loaded(Render());
+
+        IElement Step(string id) => cut.Find($".stepper [data-step='{id}']");
+        Assert.Equal("Pipeline", cut.Find("ol.stepper").GetAttribute("aria-label"));
+        Assert.True(Step("triage").ClassList.Contains("step-done"));
+        Assert.True(Step("plan").ClassList.Contains("step-done"));
+        var current = Step("implement");
+        Assert.True(current.ClassList.Contains("step-current"));
+        Assert.True(current.ClassList.Contains("step-waiting"));
+        Assert.Equal("step", current.GetAttribute("aria-current"));
+        Assert.Contains("gate · your approval", current.TextContent);
+        Assert.True(Step("done").ClassList.Contains("step-upcoming"));
+        Assert.DoesNotContain("gate", Step("done").TextContent);
+        Assert.Single(cut.FindAll("[aria-current=step]"));
+    }
+
+    [Fact]
+    public async Task Unknown_project_has_no_stepper_and_falls_back_to_the_id()
+    {
+        await Seed("GONE-1", "implement", StageStatus.Pending, t => t.ProjectId = "gone");
+
+        var cut = Loaded(Render("GONE-1", "gone"));
+
+        Assert.Empty(cut.FindAll(".stepper"));
+        Assert.Equal("gone", cut.Find(".crumbs a").TextContent.Trim());
+    }
+
+    [Fact]
+    public async Task Actions_and_links_sit_in_the_rail()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+
+        var cut = Loaded(Render());
+
+        Assert.NotNull(Button(cut, "Approve").Closest("aside.detail-rail"));
+    }
+
+    [Fact]
+    public async Task Long_title_and_key_wrap()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, t => t.Title = new string('x', 200));
+
+        var cut = Loaded(Render());
+
+        Assert.Equal(new string('x', 200), Assert.Single(cut.FindAll("h1")).TextContent.Trim());
+        var css = PageCss();
+        Assert.Contains(RulesFor(css, "h1"), r => r.Contains("overflow-wrap: anywhere"));
+        Assert.Contains(RulesFor(css, ".crumbs"), r => r.Contains("overflow-wrap: anywhere"));
     }
 
     [Fact]
@@ -411,5 +486,54 @@ public sealed class TicketDetailComponentTests : IDisposable
 
         cut.WaitForAssertion(() => Assert.Contains("Could not refresh the ticket: database is locked", StatusLine(cut)));
         Assert.Contains("Title ORD-1", cut.Markup);
+    }
+
+    /// <summary>Waits for <paramref name="done"/>, then lets every continuation queued on the renderer run.</summary>
+    private async Task SettleAfter(Func<bool> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!done() && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.True(done());
+        for (var i = 0; i < 10; i++)
+        {
+            await Task.Delay(10);
+            await ctx.Renderer.Dispatcher.InvokeAsync(() => { });
+        }
+    }
+
+    [Fact]
+    public async Task Command_finishing_after_the_page_is_gone_leaves_the_frame_alone()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.HoldSaves = hold;
+        Button(cut, "Approve").Click(); // in flight: the approval's save waits
+
+        await ctx.DisposeComponentsAsync(); // navigated away: the next page has its own message, errors and label
+        Chrome.ClearForNavigation();
+        Chrome.SetPage(null, null);
+        store.HoldSaves = null;
+        hold.SetResult();
+
+        await SettleAfter(() => store.Single("ORD-1").Status == StageStatus.Approved);
+        Assert.Null(Chrome.Message);
+        Assert.Null(Chrome.PageLabel);
+    }
+
+    [Fact]
+    public void Not_found_page_uses_the_frame()
+    {
+        Chrome.SetPage("ORD-1", "orders");
+        Chrome.ShowMessage("ORD-1: approved");
+
+        var cut = ctx.Render<NotFound>();
+
+        Assert.Equal("Not found", Chrome.PageLabel);
+        Assert.Null(Chrome.CurrentProject);
+        Assert.Null(Chrome.Message);
+        Assert.Equal("Not found", Assert.Single(cut.FindAll("h1")).TextContent.Trim());
+        Assert.Equal("/", cut.Find("a").GetAttribute("href"));
+        Assert.Empty(cut.FindAll(".back"));
     }
 }

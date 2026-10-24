@@ -39,7 +39,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         {
             var inColumn = cards.Where(c => ColumnOf(c.Card, byId.GetValueOrDefault(c.Card.Project), filter) == def.Id)
                 .Select(c => c.Card);
-            columns.Add(Column(def.Id, def.Title, inColumn, def.Kind == StageKind.Done, tickets));
+            columns.Add(Column(def.Id, def.Title, inColumn, def.Kind == StageKind.Done, tickets, def.Kind));
         }
 
         var unknown = cards.Where(c => ColumnOf(c.Card, byId.GetValueOrDefault(c.Card.Project), filter) is null)
@@ -51,6 +51,32 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             cards.Count(c => c.Card.Status == StageStatus.Running),
             cards.Count(c => c.Card.Status == StageStatus.Blocked));
         return new BoardModel(boardProjects, filter?.Id, columns, counts);
+    }
+
+    /// <summary>Every configured project with its counts, and totals across all tickets; the app frame shows these on every page.</summary>
+    public async Task<ShellModel> LoadShellAsync(CancellationToken ct)
+    {
+        var configured = projects.Projects;
+        var byId = configured.ToDictionary(p => p.Id);
+        var tickets = await store.ListAsync(null, ct);
+        var noCosts = new Dictionary<Guid, decimal>();
+        var cards = tickets.Select(t => (Ticket: t, Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), noCosts))).ToList();
+        var byProject = cards.ToLookup(c => c.Card.Project);
+
+        var shellProjects = configured.OrderBy(p => p.Id, StringComparer.Ordinal)
+            .Select(p =>
+            {
+                var own = byProject[p.Id].Select(c => c.Card).ToList();
+                return new ShellProject(p.Id, p.Name, projects.IsPaused(p.Id), orchestrator.ProblemOf(p.Id),
+                    own.Count(c => c.WaitingOnYou),
+                    own.Count(c => p.Pipeline.FirstOrDefault(s => s.Id == c.StageId)?.Kind != StageKind.Done));
+            })
+            .ToList();
+
+        return new ShellModel(shellProjects, new BoardCounts(
+            cards.Count(c => c.Card.WaitingOnYou),
+            cards.Count(c => c.Card.Status == StageStatus.Running),
+            cards.Count(c => c.Card.Status == StageStatus.Blocked)));
     }
 
     /// <summary>One ticket with its runs and events (newest first), or null when it is not in the store.</summary>
@@ -75,19 +101,21 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var sendBack = known && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
         return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
-            known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews);
+            known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews,
+            project?.Name ?? t.ProjectId,
+            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, s.Gate)).ToList() ?? []);
     }
 
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
-        IReadOnlyList<Ticket> tickets)
+        IReadOnlyList<Ticket> tickets, StageKind? kind = null)
     {
         if (!isDone)
             return new BoardColumn(id, title, cards.OrderBy(StatusRank).ThenBy(c => c.Since is null).ThenBy(c => c.Since)
-                .ThenBy(c => c.Key, StringComparer.Ordinal).ToList(), 0);
+                .ThenBy(c => c.Key, StringComparer.Ordinal).ToList(), 0, Kind: kind);
 
         var updated = tickets.ToDictionary(t => (t.ProjectId, t.Key), t => t.UpdatedAt);
         var ordered = cards.OrderByDescending(c => updated[(c.Project, c.Key)]).ThenBy(c => c.Key, StringComparer.Ordinal).ToList();
-        return new BoardColumn(id, title, ordered.Take(DoneLimit).ToList(), Math.Max(0, ordered.Count - DoneLimit), IsDone: true);
+        return new BoardColumn(id, title, ordered.Take(DoneLimit).ToList(), Math.Max(0, ordered.Count - DoneLimit), IsDone: true, Kind: kind);
     }
 
     /// <summary>The column id a card belongs in, or null when its project or stage is not in the configuration.</summary>
@@ -108,12 +136,18 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         _ => 5,
     };
 
-    private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs) =>
-        new(t.ProjectId, t.Key, t.Title, t.StageId, t.Status, t.BlockedReason,
+    private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs)
+    {
+        var stages = p?.Pipeline.ToList();
+        var index = stages?.FindIndex(s => s.Id == t.StageId) ?? -1;
+        var known = index >= 0;
+        var placed = known && stages![index].Kind != StageKind.Done;
+        return new(t.ProjectId, t.Key, t.Title, t.StageId, t.Status, t.BlockedReason,
             t.Attempts, p?.MaxAttemptsPerStage, Since(t), costs.TryGetValue(t.Id, out var cost) ? cost : null,
             TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p),
-            p?.Pipeline.Any(s => s.Id == t.StageId) == true, t.Risk,
-            p?.Pipeline.Any(s => s.Id == t.StageId) == true && PipelineEngine.WaitsOnReviewer(p, t));
+            known, t.Risk, known && PipelineEngine.WaitsOnReviewer(p!, t),
+            placed ? index + 1 : null, placed ? stages!.Count : null);
+    }
 
     private static DateTimeOffset? Since(Ticket t) => t.Status switch
     {

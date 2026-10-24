@@ -1,5 +1,248 @@
 @inherits LayoutComponentBase
+@implements IAsyncDisposable
+@inject BoardQuery Query
+@inject BoardNotifier Notifier
+@inject Orchestrator Orchestrator
+@inject DashboardChrome Chrome
+@inject NavigationManager Navigation
+@inject ILogger<MainLayout> Log
+@inject IJSRuntime JS
 
-<main>
-    @Body
-</main>
+<PageTitle>@TabTitle(shell?.Totals.WaitingOnYou ?? 0, Chrome.PageLabel)</PageTitle>
+
+@* Keys reach the server only while the phone menu is open, for Escape; wherever focus is inside the frame. *@
+<div class="app @(sidebarOpen ? "sidebar-open" : null)" @onkeydown="MenuKeys">
+    <header class="topbar">
+        <button type="button" class="menu-button" aria-label="Projects" aria-controls="sidebar"
+                aria-expanded="@(sidebarOpen ? "true" : "false")" @onclick="OpenSidebar" @ref="menuButton">
+            <span class="menu-icon" aria-hidden="true"></span>
+        </button>
+        <a class="brand" href="/">
+            <svg class="logo" viewBox="0 0 26 26" aria-hidden="true" focusable="false">
+                <rect width="26" height="26" rx="7" />
+                <path d="M11 17.5V8.5l7-1.5v9" />
+                <circle cx="9" cy="17.5" r="2" />
+                <circle cx="16" cy="16" r="2" />
+            </svg>
+            Symphonist
+        </a>
+        @{ var totals = shell?.Totals ?? new BoardCounts(0, 0, 0); }
+        <p class="topbar-counts">
+            <span class="chip @(totals.WaitingOnYou > 0 ? "chip-waiting" : null)" data-count="waiting"><span class="chip-dot" aria-hidden="true"></span><b>@totals.WaitingOnYou</b><span class="chip-words"> waiting on you</span></span>
+            <span class="chip" data-count="running"><b>@totals.Running</b><span class="chip-words"> running</span></span>
+            <span class="chip @(totals.Blocked > 0 ? "chip-blocked" : null)" data-count="blocked"><b>@totals.Blocked</b><span class="chip-words"> blocked</span></span>
+        </p>
+        <div class="top-actions">
+            <button type="button" class="top-button" @onclick="PollNow">Poll now</button>
+            <button type="button" class="top-button theme-button" data-theme-toggle aria-label="@ThemeLabel" title="@ThemeLabel" @onclick="ToggleThemeAsync">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="12" cy="12" r="8" />
+                    <path d="M12 4a8 8 0 0 1 0 16z" class="theme-half" />
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    @if (sidebarOpen)
+    {
+        <button type="button" class="sidebar-backdrop" aria-label="Close projects" @onclick="CloseSidebarAsync"></button>
+    }
+    <aside class="sidebar" id="sidebar">
+        <ProjectSidebar Shell="shell" CurrentProject="@Chrome.CurrentProject" />
+    </aside>
+
+    <main class="content" @ref="content">
+        <StatusLine Message="@Chrome.Message" IsError="@Chrome.IsError" />
+        @Body
+    </main>
+</div>
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private ShellModel? shell;
+    private int loadVersion;
+    private bool sidebarOpen;
+    private ElementReference menuButton;
+    private ElementReference content;
+    private IJSObjectReference? themeModule;
+    private IJSObjectReference? frameModule;
+    private string[]? focusAfterRender; // selectors for the frame module to focus once the render is in the browser
+    private bool scrollAfterRender;
+    private string? theme; // "light" or "dark"; null until the browser has told us
+
+    /// <summary>The current project's row, else the first one: where focus goes when the phone menu opens.</summary>
+    private static readonly string[] SidebarFocus = ["#sidebar [data-sidebar-project][aria-current=page]", "#sidebar [data-sidebar-project]"];
+
+    /// <summary>The page heading: where focus goes when picking a project closes the phone menu.</summary>
+    private static readonly string[] HeadingFocus = ["h1"];
+
+    private string ThemeLabel => theme switch
+    {
+        "light" => "Switch to dark mode",
+        "dark" => "Switch to light mode",
+        _ => "Switch light or dark mode",
+    };
+
+    /// <summary>The browser tab title: the global waiting count, the page label (e.g. a ticket key), then the app name.</summary>
+    public static string TabTitle(int waiting, string? label) =>
+        (waiting > 0 ? $"({waiting}) " : "") + (string.IsNullOrEmpty(label) ? "" : $"{label} · ") + "Symphonist";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Notifier.Changed += OnBoardChanged;
+        Chrome.Changed += OnChromeChanged;
+        Navigation.LocationChanged += OnLocationChanged;
+        await ReloadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await MoveFocusAndScrollAsync();
+        if (!firstRender) return;
+        try
+        {
+            themeModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/theme.js");
+            theme = await themeModule.InvokeAsync<string>("current");
+        }
+        catch (Exception e)
+        {
+            // The toggle is a convenience: JS failures (and disconnects) must never reach the circuit.
+            Log.LogDebug(e, "Reading the theme failed");
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>Makes the focus and scroll moves the last state change asked for, now that the browser has its render.</summary>
+    private async Task MoveFocusAndScrollAsync()
+    {
+        var focus = focusAfterRender;
+        var scroll = scrollAfterRender;
+        if (focus is null && !scroll) return;
+        focusAfterRender = null;
+        scrollAfterRender = false;
+        try
+        {
+            frameModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/frame.js");
+            if (scroll) await frameModule.InvokeVoidAsync("scrollToTop", content);
+            if (focus is not null) await frameModule.InvokeAsync<bool>("focus", (object)focus);
+        }
+        catch (Exception e)
+        {
+            // Convenience moves: JS failures (and disconnects) must never reach the circuit.
+            Log.LogDebug(e, "Moving focus or scroll in the frame failed");
+        }
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        var next = theme == "dark" ? "light" : "dark";
+        try
+        {
+            themeModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/theme.js");
+            await themeModule.InvokeAsync<bool>("set", next); // false: not remembered, but applied for now
+            theme = next;
+        }
+        catch (Exception e)
+        {
+            Log.LogDebug(e, "Switching the theme failed");
+        }
+    }
+
+    private void OnBoardChanged() => _ = InvokeAsync(async () =>
+    {
+        await ReloadAsync();
+        StateHasChanged();
+    });
+
+    private void OnChromeChanged() => _ = InvokeAsync(StateHasChanged);
+
+    // Every navigation starts at the top of the page: its scroll container is the frame's, which outlives pages.
+    // Picking a project in the phone menu changes only the query, so FocusOnNavigate does not run and the focused row
+    // is hidden as the menu closes: focus the page heading instead, which also brings it into view.
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(() =>
+    {
+        scrollAfterRender = true;
+        if (sidebarOpen)
+        {
+            sidebarOpen = false;
+            focusAfterRender = HeadingFocus;
+        }
+        StateHasChanged();
+    });
+
+    /// <summary>Loads the projects and totals; a failure keeps the last ones and reports the error in the status line.</summary>
+    private async Task ReloadAsync()
+    {
+        var version = ++loadVersion;
+        try
+        {
+            var loaded = await Query.LoadShellAsync(disposed.Token);
+            if (version != loadVersion) return; // a newer load started meanwhile
+            shell = loaded;
+            Chrome.SetError(StatusSource.Shell, null);
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            if (version == loadVersion) Chrome.SetError(StatusSource.Shell, $"Could not refresh the projects: {e.Message}");
+        }
+    }
+
+    private void PollNow()
+    {
+        Orchestrator.RequestTick();
+        Chrome.ShowMessage("Poll requested");
+    }
+
+    private void OpenSidebar()
+    {
+        sidebarOpen = true;
+        focusAfterRender = SidebarFocus;
+    }
+
+    private async Task CloseSidebarAsync()
+    {
+        sidebarOpen = false;
+        focusAfterRender = null;
+        try
+        {
+            await menuButton.FocusAsync();
+        }
+        catch (Exception e)
+        {
+            Log.LogDebug(e, "Returning focus to the projects menu button failed"); // e.g. the circuit is going away
+        }
+    }
+
+    /// <summary>The frame's keydown handler: none while the phone menu is closed, so keys stay in the browser.</summary>
+    private EventCallback<KeyboardEventArgs> MenuKeys =>
+        sidebarOpen ? EventCallback.Factory.Create<KeyboardEventArgs>(this, MenuKeyDown) : default;
+
+    private async Task MenuKeyDown(KeyboardEventArgs e)
+    {
+        if (sidebarOpen && e.Key == "Escape") await CloseSidebarAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Notifier.Changed -= OnBoardChanged;
+        Chrome.Changed -= OnChromeChanged;
+        Navigation.LocationChanged -= OnLocationChanged;
+        disposed.Cancel();
+        foreach (var module in new[] { themeModule, frameModule })
+        {
+            if (module is null) continue;
+            try
+            {
+                await module.DisposeAsync();
+            }
+            catch (Exception e)
+            {
+                Log.LogDebug(e, "Releasing a frame module failed"); // e.g. the circuit is already gone
+            }
+        }
+    }
+}

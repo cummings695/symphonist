@@ -7,214 +7,248 @@
 @inject BoardQuery Query
 @inject BoardNotifier Notifier
 @inject Orchestrator Orchestrator
+@inject DashboardChrome Chrome
+@inject TimeProvider Time
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
 @inject ILogger<TicketDetail> Log
 
-<PageTitle>@Key · Symphonist</PageTitle>
-
-<p class="back"><a href="@BackUrl">← Back to the board</a></p>
-
-<StatusLine Message="@(refreshError ?? commandMessage)" IsError="@(refreshError is not null)" />
-
-@if (model is null)
-{
-    @if (notFound)
-    {
-        <section class="not-found">
-            <h1>Not found</h1>
-            <p>Ticket @Key was not found in project @Project.</p>
-        </section>
-    }
-    else if (refreshError is null)
-    {
-        <p class="loading">Loading the ticket…</p>
-    }
+@{
+    var card = model?.Card;
 }
-else
-{
-    var card = model.Card;
-    <div data-ticket-loaded>
-        <header class="ticket-header">
-            <h1><span class="ticket-key">@card.Key</span> <span class="ticket-title">@card.Title</span></h1>
-            <p class="ticket-facts">
-                <span class="badge">@card.Source</span>
-                <span class="ticket-status ticket-@card.Status.ToString().ToLowerInvariant()" data-status>@TicketCard.StatusLabel(card)</span>
-                <RiskBadge Risk="card.Risk" />
-                <span>stage <strong>@card.StageId</strong></span>
-                <span>@(card.MaxAttempts is { } max ? $"attempt {card.Attempts}/{max}" : $"attempt {card.Attempts}")</span>
+<nav class="crumbs" aria-label="Breadcrumb">
+    <a href="@($"/?project={Uri.EscapeDataString(Project)}")">@(model?.ProjectName ?? Project)</a>
+    <span class="crumb-sep" aria-hidden="true">/</span>
+    <span aria-current="page">@Key</span>
+</nav>
+
+@* Exactly one page <h1>, always this element, so the focus FocusOnNavigate gives it survives every load; only its
+   text changes (the key while loading, then the title, or "Not found"). *@
+<section class="summary @SummaryClass" aria-label="Summary" data-ticket-loaded="@(model is not null)">
+    @if (card is not null)
+    {
+        <div class="facts">
+            <span class="ticket-key">@card.Key</span>
+            <span class="badge">@card.Source</span>
+            <span class="ticket-status ticket-@StatusClass(card)" data-status><span class="status-dot" aria-hidden="true"></span>@TicketCard.StatusLabel(card)</span>
+            <RiskBadge Risk="card.Risk" />
+            <span class="facts-numbers">
+                @if (!model!.Pipeline.Any(s => s.Id == card.StageId))
+                {
+                    <span>stage <strong>@card.StageId</strong></span>
+                }
+                <span>attempt <strong>@(card.MaxAttempts is { } max ? $"{card.Attempts}/{max}" : card.Attempts.ToString(CultureInfo.InvariantCulture))</strong></span>
                 @if (card.CostUsd is { } cost)
                 {
-                    <span>$@cost.ToString("0.00", CultureInfo.InvariantCulture)</span>
+                    <span>cost <strong>$@cost.ToString("0.00", CultureInfo.InvariantCulture)</strong></span>
                 }
-            </p>
-            @if (card.BlockedReason is { Length: > 0 } reason)
-            {
-                <p class="ticket-reason" data-blocked-reason><strong>Blocked:</strong> @reason</p>
-            }
-            @if (model.Feedback is { Length: > 0 } feedbackText)
-            {
-                <p class="ticket-feedback" data-feedback><strong>Last feedback:</strong> @feedbackText</p>
-            }
-        </header>
-
-        <section class="ticket-links" aria-label="Links">
-            @if (card.IssueUrl is not null)
-            {
-                <a href="@card.IssueUrl" target="_blank" rel="noopener noreferrer">Tracker issue</a>
-            }
-            @if (card.PrUrl is not null)
-            {
-                <a href="@card.PrUrl" target="_blank" rel="noopener noreferrer">Pull request</a>
-            }
-            @if (model.ReleasePrUrl is not null)
-            {
-                <a href="@model.ReleasePrUrl" target="_blank" rel="noopener noreferrer">Release pull request</a>
-            }
-            @if (model.Branch is { Length: > 0 } branch)
-            {
-                <span>Branch <code>@branch</code></span>
-            }
-            @if (model.SpecPath is { Length: > 0 } spec)
-            {
-                <span>Spec <code>@spec</code></span>
-            }
-            @if (model.PlanPath is { Length: > 0 } plan)
-            {
-                <span>Plan <code>@plan</code></span>
-            }
-        </section>
-
-        @if (model.CanApprove || model.CanUnblock || model.CanSendBack)
+                @if (card.Since is { } since && TicketCard.TimeVerb(card) is { } verb)
+                {
+                    <span>@verb <strong>@TicketCard.Elapsed(Time.GetUtcNow() - since)</strong></span>
+                }
+            </span>
+        </div>
+    }
+    <h1>@(notFound ? "Not found" : card?.Title ?? Key)</h1>
+    @if (notFound)
+    {
+        <p>Ticket @Key was not found in project @Project.</p>
+    }
+    else if (model is null)
+    {
+        @if (ticketError is null)
         {
-            <section class="ticket-actions" aria-label="Actions">
-                @if (model.CanApprove || model.CanUnblock)
+            <p class="loading">Loading the ticket…</p>
+        }
+    }
+    else
+    {
+        @if (model.Pipeline.Count > 0)
+        {
+            <StageStepper Pipeline="model.Pipeline" CurrentStageId="@card!.StageId" Status="card.Status" WaitingOnYou="card.WaitingOnYou" />
+        }
+        @if (card!.BlockedReason is { Length: > 0 } reason)
+        {
+            <p class="ticket-reason" data-blocked-reason><strong>Blocked:</strong> @reason</p>
+        }
+        @if (model.Feedback is { Length: > 0 } feedbackText)
+        {
+            <p class="ticket-feedback" data-feedback><strong>Last feedback:</strong> @feedbackText</p>
+        }
+    }
+</section>
+
+@if (model is not null && card is not null)
+{
+    <div class="detail-grid">
+        <div class="detail-history">
+            <section class="panel" aria-labelledby="reviews-heading">
+                <h2 id="reviews-heading">Gate reviews</h2>
+                @if (model.Reviews.Count == 0)
                 {
-                    <div class="action-row">
-                        @if (model.CanApprove)
-                        {
-                            <button type="button" class="button button-primary" disabled="@busy" aria-busy="@(busy ? "true" : null)"
-                                    @onclick="ApproveAsync">Approve</button>
-                        }
-                        @if (model.CanUnblock)
-                        {
-                            <button type="button" class="button" disabled="@busy" aria-busy="@(busy ? "true" : null)"
-                                    @onclick="UnblockAsync">Unblock</button>
-                        }
-                    </div>
+                    <p class="empty">No gate reviews yet.</p>
                 }
-                @if (model.CanSendBack)
+                else
                 {
-                    <div class="send-back">
-                        <label for="send-back-feedback">Send back with feedback</label>
-                        <textarea id="send-back-feedback" rows="3" required @bind="feedback" @bind:event="oninput"></textarea>
-                        <div class="action-row">
-                            <label class="target">
-                                <span>Stage</span>
-                                <select @bind="sendBackTarget">
-                                    @foreach (var target in model.SendBackTargets)
-                                    {
-                                        <option value="@target">@target</option>
-                                    }
-                                </select>
-                            </label>
-                            <button type="button" class="button" disabled="@(busy || string.IsNullOrWhiteSpace(feedback))"
-                                    aria-busy="@(busy ? "true" : null)" @onclick="SendBackAsync">Send back</button>
-                        </div>
+                    <ol class="reviews">
+                        @foreach (var review in model.Reviews)
+                        {
+                            <li class="review" data-gate-review>
+                                <p class="review-head">
+                                    <strong>@review.StageId</strong>
+                                    <time datetime="@review.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(review.At)</time>
+                                    <span class="badge">@review.Mode.ToString().ToLowerInvariant()</span>
+                                    <RiskBadge Risk="review.Verdict.Risk" />
+                                    <span class="review-outcome">@Outcome(review)</span>
+                                </p>
+                                <p class="review-summary">@review.Verdict.Summary</p>
+                                @if (review.Verdict.Error is { Length: > 0 } error)
+                                {
+                                    <p class="review-error" data-review-error><strong>Error:</strong> @error</p>
+                                }
+                                <ReviewList Title="Reasons" Items="review.Verdict.Reasons" Marker="data-reasons" />
+                                <ReviewList Title="Checked" Items="review.Verdict.Checked" Marker="data-checked" />
+                                <ReviewList Title="Risk areas touched" Items="review.Verdict.AreasTouched" Marker="data-areas" />
+                            </li>
+                        }
+                    </ol>
+                }
+            </section>
+
+            <section class="panel" aria-labelledby="runs-heading">
+                <h2 id="runs-heading">Agent runs</h2>
+                @if (model.Runs.Count == 0)
+                {
+                    <p class="empty">No agent runs yet.</p>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table class="runs">
+                            <thead>
+                                <tr><th>Stage</th><th>Started</th><th>Duration</th><th>Result</th><th>Cost</th><th>Summary or error</th><th>Log</th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var run in model.Runs)
+                                {
+                                    <tr data-run>
+                                        <td>@run.StageId</td>
+                                        <td>@LocalTime(run.StartedAt)</td>
+                                        <td>@Duration(run.Duration)</td>
+                                        <td class="@(run.Succeeded ? "run-ok" : "run-failed")">@(run.Succeeded ? "succeeded" : "failed")</td>
+                                        <td>@(run.CostUsd is { } c ? "$" + c.ToString("0.00", CultureInfo.InvariantCulture) : "")</td>
+                                        <td class="run-text">@(run.Succeeded ? run.Summary : run.Error ?? run.Summary)</td>
+                                        <td class="run-log">
+                                            <code>@run.RawLogPath</code>
+                                            <button type="button" class="button button-quiet" aria-label="@($"Copy path of the {run.StageId} log")"
+                                                    @onclick="() => CopyPathAsync(run.RawLogPath)">Copy path</button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
                     </div>
                 }
             </section>
-        }
 
-        <section aria-labelledby="reviews-heading">
-            <h2 id="reviews-heading">Gate reviews</h2>
-            @if (model.Reviews.Count == 0)
+            <section class="panel" aria-labelledby="events-heading">
+                <h2 id="events-heading">Events</h2>
+                @if (model.Events.Count == 0)
+                {
+                    <p class="empty">No events yet.</p>
+                }
+                else
+                {
+                    <ol class="events">
+                        @foreach (var e in model.Events)
+                        {
+                            <li data-event>
+                                <time datetime="@e.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(e.At)</time>
+                                <span class="event-stage">@e.StageId</span>
+                                <span class="event-message">@e.Message</span>
+                            </li>
+                        }
+                    </ol>
+                }
+            </section>
+        </div>
+
+        <aside class="detail-rail" aria-label="Actions and links">
+            @if (model.CanApprove || model.CanUnblock || model.CanSendBack)
             {
-                <p class="empty">No gate reviews yet.</p>
-            }
-            else
-            {
-                <ol class="reviews">
-                    @foreach (var review in model.Reviews)
+                <section class="panel ticket-actions" aria-labelledby="actions-heading">
+                    <h2 id="actions-heading">Actions</h2>
+                    @if (model.CanApprove || model.CanUnblock)
                     {
-                        <li class="review" data-gate-review>
-                            <p class="review-head">
-                                <strong>@review.StageId</strong>
-                                <time datetime="@review.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(review.At)</time>
-                                <span class="badge">@review.Mode.ToString().ToLowerInvariant()</span>
-                                <RiskBadge Risk="review.Verdict.Risk" />
-                                <span class="review-outcome">@Outcome(review)</span>
-                            </p>
-                            <p class="review-summary">@review.Verdict.Summary</p>
-                            @if (review.Verdict.Error is { Length: > 0 } error)
+                        <div class="action-row">
+                            @if (model.CanApprove)
                             {
-                                <p class="review-error" data-review-error><strong>Error:</strong> @error</p>
+                                <button type="button" class="button button-primary" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                                        @onclick="ApproveAsync">Approve</button>
                             }
-                            <ReviewList Title="Reasons" Items="review.Verdict.Reasons" Marker="data-reasons" />
-                            <ReviewList Title="Checked" Items="review.Verdict.Checked" Marker="data-checked" />
-                            <ReviewList Title="Risk areas touched" Items="review.Verdict.AreasTouched" Marker="data-areas" />
-                        </li>
+                            @if (model.CanUnblock)
+                            {
+                                <button type="button" class="button" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                                        @onclick="UnblockAsync">Unblock</button>
+                            }
+                        </div>
                     }
-                </ol>
-            }
-        </section>
-
-        <section aria-labelledby="runs-heading">
-            <h2 id="runs-heading">Agent runs</h2>
-            @if (model.Runs.Count == 0)
-            {
-                <p class="empty">No agent runs yet.</p>
-            }
-            else
-            {
-                <div class="table-wrap">
-                    <table class="runs">
-                        <thead>
-                            <tr><th>Stage</th><th>Started</th><th>Duration</th><th>Result</th><th>Cost</th><th>Summary or error</th><th>Log</th></tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var run in model.Runs)
-                            {
-                                <tr data-run>
-                                    <td>@run.StageId</td>
-                                    <td>@LocalTime(run.StartedAt)</td>
-                                    <td>@Duration(run.Duration)</td>
-                                    <td class="@(run.Succeeded ? null : "run-failed")">@(run.Succeeded ? "succeeded" : "failed")</td>
-                                    <td>@(run.CostUsd is { } c ? "$" + c.ToString("0.00", CultureInfo.InvariantCulture) : "")</td>
-                                    <td class="run-text">@(run.Succeeded ? run.Summary : run.Error ?? run.Summary)</td>
-                                    <td class="run-log">
-                                        <code>@run.RawLogPath</code>
-                                        <button type="button" class="button button-quiet" aria-label="@($"Copy path of the {run.StageId} log")"
-                                                @onclick="() => CopyPathAsync(run.RawLogPath)">Copy path</button>
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-            }
-        </section>
-
-        <section aria-labelledby="events-heading">
-            <h2 id="events-heading">Events</h2>
-            @if (model.Events.Count == 0)
-            {
-                <p class="empty">No events yet.</p>
-            }
-            else
-            {
-                <ol class="events">
-                    @foreach (var e in model.Events)
+                    @if (model.CanSendBack)
                     {
-                        <li data-event>
-                            <time datetime="@e.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(e.At)</time>
-                            <span class="event-stage">@e.StageId</span>
-                            <span class="event-message">@e.Message</span>
-                        </li>
+                        <div class="send-back">
+                            <label for="send-back-feedback">Send back with feedback</label>
+                            <textarea id="send-back-feedback" rows="3" required @bind="feedback" @bind:event="oninput"></textarea>
+                            <div class="action-row">
+                                <label class="target">
+                                    <span>Stage</span>
+                                    <select @bind="sendBackTarget">
+                                        @foreach (var target in model.SendBackTargets)
+                                        {
+                                            <option value="@target">@target</option>
+                                        }
+                                    </select>
+                                </label>
+                                <button type="button" class="button" disabled="@(busy || string.IsNullOrWhiteSpace(feedback))"
+                                        aria-busy="@(busy ? "true" : null)" @onclick="SendBackAsync">Send back</button>
+                            </div>
+                        </div>
                     }
-                </ol>
+                </section>
             }
-        </section>
+
+            <section class="panel ticket-links" aria-labelledby="links-heading">
+                <h2 id="links-heading">Links</h2>
+                @if (card.IssueUrl is null && card.PrUrl is null && model.ReleasePrUrl is null && string.IsNullOrEmpty(model.Branch)
+                     && string.IsNullOrEmpty(model.SpecPath) && string.IsNullOrEmpty(model.PlanPath))
+                {
+                    <p class="empty">No links yet.</p>
+                }
+                @if (card.IssueUrl is not null)
+                {
+                    <a href="@card.IssueUrl" target="_blank" rel="noopener noreferrer">Tracker issue<span aria-hidden="true"> ↗</span></a>
+                }
+                @if (card.PrUrl is not null)
+                {
+                    <a href="@card.PrUrl" target="_blank" rel="noopener noreferrer">Pull request<span aria-hidden="true"> ↗</span></a>
+                }
+                @if (model.ReleasePrUrl is not null)
+                {
+                    <a href="@model.ReleasePrUrl" target="_blank" rel="noopener noreferrer">Release pull request<span aria-hidden="true"> ↗</span></a>
+                }
+                @if (model.Branch is { Length: > 0 } branch)
+                {
+                    <div><span class="link-label">Branch</span> <code>@branch</code></div>
+                }
+                @if (model.SpecPath is { Length: > 0 } spec)
+                {
+                    <div><span class="link-label">Spec</span> <code>@spec</code></div>
+                }
+                @if (model.PlanPath is { Length: > 0 } plan)
+                {
+                    <div><span class="link-label">Plan</span> <code>@plan</code></div>
+                }
+            </section>
+        </aside>
     </div>
 }
 
@@ -222,8 +256,7 @@ else
     private readonly CancellationTokenSource disposed = new();
     private TicketDetailModel? model;
     private bool notFound;
-    private string? refreshError;
-    private string? commandMessage;
+    private string? ticketError; // the last load's error, also reported to the status line
     private bool busy;
     private int loadVersion;
     private string? loadedFor;
@@ -235,14 +268,16 @@ else
 
     [Parameter] public string Key { get; set; } = "";
 
-    /// <summary>The board's project filter, kept in the back link.</summary>
-    [SupplyParameterFromQuery(Name = "from")]
-    public string? From { get; set; }
-
     /// <summary>Set while prerendering, so a missing ticket answers 404 with the not-found page.</summary>
     [CascadingParameter] private HttpContext? HttpContext { get; set; }
 
-    private string BackUrl => From is { Length: > 0 } from ? $"/?project={Uri.EscapeDataString(from)}" : "/";
+    /// <summary>The summary panel's rail: ochre when waiting on you, red when blocked, none otherwise.</summary>
+    private string SummaryClass =>
+        notFound ? "not-found"
+        : model?.Card is not { } card ? ""
+        : card.WaitingOnYou ? "summary-waiting"
+        : card.Status == StageStatus.Blocked ? "summary-blocked"
+        : "";
 
     protected override void OnInitialized() => Notifier.Changed += OnTicketChanged;
 
@@ -253,7 +288,9 @@ else
         loadedFor = current;
         model = null;
         notFound = false;
-        commandMessage = null;
+        ticketError = null;
+        Chrome.ClearForNavigation(); // the previous page's (or ticket's) message and errors
+        Chrome.SetPage(Key, Project);
         await ReloadAsync();
         // While prerendering, answer 404 with the not-found page (a bare status would reach the browser with no body).
         if (notFound && HttpContext is { Response.HasStarted: false }) Navigation.NotFound();
@@ -272,10 +309,11 @@ else
         try
         {
             var loaded = await Query.LoadTicketAsync(Project, Key, disposed.Token);
-            if (version != loadVersion) return; // a newer load started meanwhile
+            if (disposed.IsCancellationRequested || version != loadVersion) return; // gone, or a newer load started meanwhile
             model = loaded;
             notFound = loaded is null;
-            refreshError = null;
+            ticketError = null;
+            Chrome.SetError(StatusSource.Ticket, null);
             if (loaded is not null && (sendBackTarget is null || !loaded.SendBackTargets.Contains(sendBackTarget)))
                 sendBackTarget = loaded.SendBackTargets.FirstOrDefault();
         }
@@ -285,7 +323,9 @@ else
         }
         catch (Exception e)
         {
-            if (version == loadVersion) refreshError = $"Could not refresh the ticket: {e.Message}";
+            if (disposed.IsCancellationRequested || version != loadVersion) return;
+            ticketError = $"Could not refresh the ticket: {e.Message}";
+            Chrome.SetError(StatusSource.Ticket, ticketError);
         }
     }
 
@@ -320,7 +360,8 @@ else
         try
         {
             var outcome = await command(disposed.Token);
-            commandMessage = $"{Key}: {outcome.Message}";
+            if (disposed.IsCancellationRequested) return false; // the next page owns the frame now
+            Chrome.ShowMessage($"{Key}: {outcome.Message}");
             applied = outcome.Changed;
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)
@@ -329,7 +370,8 @@ else
         }
         catch (KeyNotFoundException e)
         {
-            commandMessage = e.Message; // e.g. the ticket, its project or the target stage was removed meanwhile
+            if (disposed.IsCancellationRequested) return false;
+            Chrome.ShowMessage(e.Message); // e.g. the ticket, its project or the target stage was removed meanwhile
         }
         catch (Exception e)
         {
@@ -341,15 +383,16 @@ else
             busy = false;
         }
         await ReloadAsync();
+        if (disposed.IsCancellationRequested) return false;
 
         // The orchestrator stores the change before recording and syncing it, so a failure (e.g. of the store) may
         // come after the ticket has already moved: word the message from the ticket's state as reloaded.
         if (failure is not null)
         {
-            var moved = refreshError is null && model is { } now && (now.Card.StageId, now.Card.Status) != before;
-            commandMessage = moved
+            var moved = ticketError is null && model is { } now && (now.Card.StageId, now.Card.Status) != before;
+            Chrome.ShowMessage(moved
                 ? $"{Key}: {pastTense}, but a follow-up step failed: {failure.Message}"
-                : $"{Key}: {verb} failed: {failure.Message}";
+                : $"{Key}: {verb} failed: {failure.Message}");
             applied = moved;
         }
         return applied;
@@ -360,17 +403,21 @@ else
         try
         {
             clipboard ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/clipboard.js");
-            commandMessage = await clipboard.InvokeAsync<bool>("copyText", path)
-                ? "Copied the log path"
-                : "Could not copy the log path";
+            var copied = await clipboard.InvokeAsync<bool>("copyText", path);
+            if (disposed.IsCancellationRequested) return; // the next page owns the frame now
+            Chrome.ShowMessage(copied ? "Copied the log path" : "Could not copy the log path");
         }
         catch (Exception e)
         {
             // Copying is a convenience: nothing here may reach the circuit (timeouts, disposed module, disconnects).
             Log.LogWarning(e, "Copying a log path from the dashboard failed");
-            commandMessage = "Could not copy the log path";
+            if (!disposed.IsCancellationRequested) Chrome.ShowMessage("Could not copy the log path");
         }
     }
+
+    /// <summary>The status pill's colour class; "reviewing" stays neutral, as only waiting on you is ochre.</summary>
+    private static string StatusClass(BoardCard card) =>
+        card.Reviewing ? "reviewing" : card.Status.ToString().ToLowerInvariant();
 
     private static string LocalTime(DateTimeOffset at) =>
         at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);

@@ -1,0 +1,45 @@
+@* The project's pipeline, left to right: finished stages ticked, the ticket's stage ringed in its state's colour,
+   later stages hollow. A ticket in the Done-kind stage has finished them all. *@
+@{
+    var current = Pipeline.ToList().FindIndex(s => s.Id == CurrentStageId);
+    var finished = current >= 0 && Pipeline[current].Kind == StageKind.Done;
+}
+<ol class="stepper" aria-label="Pipeline">
+    @for (var i = 0; i < Pipeline.Count; i++)
+    {
+        var stage = Pipeline[i];
+        var state = finished || i < current ? "step-done" : i == current ? $"step-current {CurrentModifier}" : "step-upcoming";
+        <li class="step @state.TrimEnd()" data-step="@stage.Id" aria-current="@(i == current ? "step" : null)">
+            <span class="step-circle" aria-hidden="true">@(finished || i < current ? "✓" : (i + 1).ToString())</span>
+            <span class="step-name">@stage.Id</span>
+            @if (finished || i < current)
+            {
+                <span class="visually-hidden">(done)</span>
+            }
+            @if (stage.Gate != GatePolicy.None)
+            {
+                <span class="step-gate">@(i == current && WaitingOnYou && !finished ? "gate · your approval" : "gate")</span>
+            }
+        </li>
+    }
+</ol>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<PipelineStage> Pipeline { get; set; } = [];
+
+    [Parameter, EditorRequired] public string CurrentStageId { get; set; } = "";
+
+    [Parameter] public StageStatus Status { get; set; }
+
+    /// <summary>At a gate and not still with the reviewer: the only state that gets the ochre ring.</summary>
+    [Parameter] public bool WaitingOnYou { get; set; }
+
+    private string CurrentModifier =>
+        WaitingOnYou ? "step-waiting"
+        : Status switch
+        {
+            StageStatus.Blocked => "step-blocked",
+            StageStatus.Running => "step-running",
+            _ => "",
+        };
+}

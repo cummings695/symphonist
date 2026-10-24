@@ -1,0 +1,70 @@
+<p class="sidebar-label" id="sidebar-label">Projects</p>
+<nav aria-labelledby="sidebar-label">
+    <ul class="project-list">
+        <li>
+            <a class="project-row" href="/" data-sidebar-project="" aria-current="@(CurrentProject is null ? "page" : null)">
+                <span class="project-colour project-colour-all" aria-hidden="true"></span>
+                <span class="project-name">All projects</span>
+                @if (Shell is not null)
+                {
+                    @CountPill(Shell.Totals.WaitingOnYou, Shell.Projects.Sum(p => p.Active))
+                }
+            </a>
+        </li>
+        @foreach (var p in Shell?.Projects ?? [])
+        {
+            <li>
+                <a class="project-row @(p.Paused ? "project-paused" : null)" href="@($"/?project={Uri.EscapeDataString(p.Id)}")"
+                   data-sidebar-project="@p.Id" aria-current="@(p.Id == CurrentProject ? "page" : null)">
+                    <span class="project-colour" style="background: @ColourOf(p.Id)" aria-hidden="true"></span>
+                    <span class="project-name" title="@p.Name">@p.Name</span>
+                    @if (p.Problem is { Length: > 0 } problem)
+                    {
+                        <span class="project-problem" title="@problem"><span class="visually-hidden">has a problem</span></span>
+                    }
+                    @if (p.Paused)
+                    {
+                        <span class="project-paused-tag">Paused</span>
+                    }
+                    @CountPill(p.WaitingOnYou, p.Active)
+                </a>
+            </li>
+        }
+    </ul>
+</nav>
+@if (Shell is { Projects.Count: 0 })
+{
+    <p class="sidebar-empty">No projects configured</p>
+}
+
+@code {
+    // The --project-0..7 tokens in app.css: no ochre (waiting on you) and no red (blocked).
+    private const int PaletteSize = 8;
+
+    [Parameter] public ShellModel? Shell { get; set; }
+
+    /// <summary>The highlighted project id; null highlights All projects.</summary>
+    [Parameter] public string? CurrentProject { get; set; }
+
+    /// <summary>A stable colour for the project's square: FNV-1a over the id into the <c>--project-N</c> palette tokens.</summary>
+    public static string ColourOf(string projectId)
+    {
+        var hash = 2166136261u;
+        foreach (var c in projectId)
+            hash = (hash ^ c) * 16777619u;
+        return $"var(--project-{hash % PaletteSize})";
+    }
+
+    /// <summary>The ochre waiting count when above 0, else the quiet active count when above 0, else nothing.</summary>
+    private static RenderFragment CountPill(int waiting, int active) => __builder =>
+    {
+        if (waiting > 0)
+        {
+            <span class="project-count project-count-waiting">@waiting<span class="visually-hidden"> waiting on you</span></span>
+        }
+        else if (active > 0)
+        {
+            <span class="project-count">@active<span class="visually-hidden"> active</span></span>
+        }
+    };
+}

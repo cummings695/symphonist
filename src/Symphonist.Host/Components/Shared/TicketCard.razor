@@ -1,34 +1,53 @@
 @using System.Globalization
 @using Symphonist.Core.Risk
 
+@{
+    var elapsed = ElapsedText();
+    var progress = Card is { StageNumber: > 0, StageCount: > 0 };
+    var footer = FooterItems(elapsed, progress).ToList();
+}
 <article class="card card-@(Card.Reviewing ? "reviewing" : Card.Status.ToString().ToLowerInvariant())" data-key="@Card.Key" data-project-card="@Card.Project">
     <div class="card-top">
         <a class="card-key" href="@DetailUrl">@Card.Key</a>
-        <span class="badge">@Card.Source</span>
-        <span class="status-label"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
         <RiskBadge Risk="Card.Risk" />
+        <span class="status-label"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
     </div>
     <p class="card-title">@Card.Title</p>
     @if (ProjectName is not null)
     {
         <p class="card-project">@ProjectName</p>
     }
-    @if (Meta().Any() || Card.PrUrl is not null)
+    @if (progress)
+    {
+        <div class="card-progress" data-stage-progress>
+            <div class="progress-row">
+                <span>Stage @Card.StageNumber of @Card.StageCount</span>
+                @if (elapsed is not null)
+                {
+                    <span>@elapsed</span>
+                }
+            </div>
+            <div class="progress-track" aria-hidden="true">
+                <div class="progress-fill" style="width: @ProgressPercent%"></div>
+            </div>
+        </div>
+    }
+    @if (Card.BlockedReason is { Length: > 0 } reason)
+    {
+        <p class="card-reason">@Truncate(reason)</p>
+    }
+    @if (footer.Count > 0 || Card.PrUrl is not null)
     {
         <p class="card-meta">
-            @foreach (var item in Meta())
+            @foreach (var item in footer)
             {
                 <span>@item</span>
             }
             @if (Card.PrUrl is not null)
             {
-                <a href="@Card.PrUrl" target="_blank" rel="noopener noreferrer">PR</a>
+                <a class="card-pr" href="@Card.PrUrl" target="_blank" rel="noopener noreferrer">PR</a>
             }
         </p>
-    }
-    @if (Card.BlockedReason is { Length: > 0 } reason)
-    {
-        <p class="card-reason">@Truncate(reason)</p>
     }
     @if (Card.WaitingOnYou && Card.Known)
     {
@@ -52,11 +71,9 @@
 
     [Parameter] public EventCallback OnApprove { get; set; }
 
-    /// <summary>The board's project filter, carried to the detail page so its back link keeps it.</summary>
-    [Parameter] public string? From { get; set; }
+    private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}";
 
-    private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}"
-        + (From is { Length: > 0 } from ? $"?from={Uri.EscapeDataString(from)}" : "");
+    private int ProgressPercent => (int)Math.Round(100.0 * Card.StageNumber!.Value / Card.StageCount!.Value, MidpointRounding.AwayFromZero);
 
     private string StatusText => StatusLabel(Card);
 
@@ -73,18 +90,23 @@
         _ => "Pending",
     };
 
-    private IEnumerable<string> Meta()
+    private string? ElapsedText() =>
+        Card.Since is { } since && TimeVerb(Card) is { } verb ? $"{verb} {Elapsed(Now - since)}" : null;
+
+    /// <summary>The footer line; the elapsed text moves here when there is no progress row to carry it.</summary>
+    private IEnumerable<string> FooterItems(string? elapsed, bool progress)
     {
         if (Card.Attempts > 0)
             yield return Card.MaxAttempts is { } max ? $"attempt {Card.Attempts}/{max}" : $"attempt {Card.Attempts}";
-        if (Card.Since is { } since && TimeVerb is { } verb) yield return $"{verb} {Elapsed(Now - since)}";
+        if (!progress && elapsed is not null) yield return elapsed;
         if (Card.CostUsd is { } cost) yield return "$" + cost.ToString("0.00", CultureInfo.InvariantCulture);
     }
 
-    private string? TimeVerb => Card.Status switch
+    /// <summary>What the elapsed time measures ("running", "waiting", …); null when the status has no clock.</summary>
+    public static string? TimeVerb(BoardCard card) => card.Status switch
     {
         StageStatus.Running => "running",
-        StageStatus.AwaitingApproval => Card.Reviewing ? "reviewing" : "waiting",
+        StageStatus.AwaitingApproval => card.Reviewing ? "reviewing" : "waiting",
         StageStatus.Blocked => "blocked",
         _ => null,
     };

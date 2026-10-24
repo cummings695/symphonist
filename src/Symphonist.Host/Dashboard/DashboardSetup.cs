@@ -44,6 +44,7 @@ public static class DashboardSetup
         services.AddSingleton(new DashboardAddress(port));
         services.AddSingleton<DashboardLogin>();
         services.AddSingleton<BoardQuery>();
+        services.AddScoped<DashboardChrome>();
 
         // Persisted keys keep the cookie valid across host restarts; on Windows they are encrypted to the user (DPAPI).
         var keys = SymphonistPaths.Resolve("keys");
