@@ -75,6 +75,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(t => t.StageStartedAt).HasConversion(dto);
             e.Property(t => t.WaitingSince).HasConversion(dto);
             e.Property(t => t.ClaudeCommentsHandledAt).HasConversion(dto);
+            e.Property(t => t.MergeAcceptedAt).HasConversion(dto);
             e.Property(t => t.Risk).HasConversion<string>();
         });
 

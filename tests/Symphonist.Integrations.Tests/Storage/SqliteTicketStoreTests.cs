@@ -403,9 +403,11 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Equal(RiskLevel.High, found.Risk);
 
         (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead) = ("main", "abc123", "def456");
+        t.MergeAcceptedAt = Now;
         await _store.SaveAsync(t, default);
         found = (await _store.FindAsync("orders", "A", default))!;
         Assert.Equal(("main", "abc123", "def456"), (found.ApprovedBranch, found.ApprovedHead, found.ApprovedBaseHead));
+        Assert.Equal(Now, found.MergeAcceptedAt);
 
         t.ReviewDue = false;
         t.Risk = null;

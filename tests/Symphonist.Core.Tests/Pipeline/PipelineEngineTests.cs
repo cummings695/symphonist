@@ -489,7 +489,7 @@ public class PipelineEngineTests
         var round = t.WaitingSince!.Value;
         PipelineEngine.ReviewCompleted(p, t, Low, round, allowAutoApprove: true, Now);
         Assert.Equal(StageStatus.Approved, t.Status);
-        (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.Attempts) = ("main", "m1", "p1", 2);
+        (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.Attempts, t.MergeAcceptedAt) = ("main", "m1", "p1", 2, Now);
 
         var o = PipelineEngine.MergeHeld(p, t, "main moved since auto-approval (m1 → m2)", round.AddTicks(1)); // same ms
 
@@ -497,14 +497,16 @@ public class PipelineEngineTests
         Assert.Equal("merge held: main moved since auto-approval (m1 → m2)", o.Message);
         Assert.Equal((StageStatus.AwaitingApproval, true, 0), (t.Status, t.ReviewDue, t.Attempts));
         Assert.Equal(round.AddMilliseconds(1), t.WaitingSince); // a different round key even on the same clock
-        Assert.Equal((null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
+        Assert.Equal((null, null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.MergeAcceptedAt));
         Assert.False(PipelineEngine.MergeHeld(p, t, "again", Now).Changed);
     }
 
     [Fact] public void Approved_heads_are_cleared_by_a_new_round_a_human_approval_and_a_new_stage()
     {
-        static void Pin(Ticket t) => (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead) = ("b", "h", "p");
-        static void AssertCleared(Ticket t) => Assert.Equal((null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
+        static void Pin(Ticket t) =>
+            (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.MergeAcceptedAt) = ("b", "h", "p", Now);
+        static void AssertCleared(Ticket t) => Assert.Equal((null, null, null, null),
+            (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.MergeAcceptedAt));
 
         var t = At("implement");
         Pin(t);

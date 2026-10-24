@@ -27,6 +27,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 {
     private const string LeftQuery = "no longer matches tracker query";
 
+    /// <summary>
+    /// How long a merge the host accepted (and performs asynchronously) is given to land before it is requested again,
+    /// through the usual head check.
+    /// </summary>
+    public static readonly TimeSpan MergeAcceptedWait = TimeSpan.FromMinutes(10);
+
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
     private readonly CancellationTokenSource shutdown = new();
@@ -401,8 +407,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 // Checked only when a merge is about to be requested: a pull request already merged (by the host, by
                 // hand, or before a crash) has moved the branches itself and completes normally.
                 string? holdReason = null;
-                var result = await executor.PostApprovalAsync(p, io, t, ct,
-                    async c => holdReason = await MergeHeldAsync(p, io, t, c));
+                var result = await executor.PostApprovalAsync(p, io, t, ct, async c =>
+                {
+                    // An accepted merge still under way on the host: don't ask again yet (nor merge unchecked later).
+                    if (t.MergeAcceptedAt is { } accepted && time.GetUtcNow() - accepted < MergeAcceptedWait)
+                        return "waiting for the host to finish merging";
+                    t.MergeAcceptedAt = null;
+                    return holdReason = await MergeHeldAsync(p, io, t, c);
+                });
                 var now = time.GetUtcNow();
                 if (holdReason is not null)
                 {
@@ -412,11 +424,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                     await ApplyAsync(io, t, fromStageId, held, ct);
                     return;
                 }
-                if (result.MergeStarted)
-                {
-                    // The host is merging the commits just checked; it may land and move them before the next tick.
-                    t.ApprovedBranch = t.ApprovedHead = t.ApprovedBaseHead = null;
-                }
+                // The host is merging the commits just checked. The recorded heads stay: if the merge never lands, a later
+                // request is checked against them again.
+                if (result.MergeStarted) t.MergeAcceptedAt = now;
                 TransitionOutcome? outcome = null;
                 switch (result.Status)
                 {
@@ -563,7 +573,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             && await UnconfirmedHeadAsync(p, io, t, stage, result, ct) is { } unconfirmed)
         {
             // A low verdict on a commit that is no longer the head. First, so the "needs you" event names it.
-            verdict = verdict with { Risk = RiskLevel.High, Reasons = [unconfirmed, .. verdict.Reasons] };
+            verdict = verdict.WithForcedHighFirst(unconfirmed);
         }
         await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
             p.Review.Mode, stage.Gate, verdict), ct);

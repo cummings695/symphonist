@@ -1545,24 +1545,65 @@ public sealed class OrchestratorTests : IDisposable
         Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("merge held", StringComparison.Ordinal));
     }
 
-    [Fact] public async Task Accepted_merge_in_progress_is_not_held_when_it_lands()
+    [Fact] public async Task Accepted_merge_that_never_lands_is_not_merged_unchecked_after_a_push()
+    {
+        await AutoApproveAndMoveHeads("implement", move: false);
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "merge in progress", Accepted: true));
+        var o = Create();
+
+        await TickIdle(o); // the merge is requested and accepted (202), but it never lands
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Approved, "head000", Now), (t.Status, t.ApprovedHead, t.MergeAcceptedAt));
+
+        scm.BranchHeads["symphonist/ORD-1"] = "pushed"; // an unreviewed commit
+        time.Advance(TimeSpan.FromMinutes(5));
+        await TickIdle(o);
+        await TickIdle(o);
+        Assert.Equal([7L], scm.MergeCalls); // not requested again within the wait
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "waiting for the host to finish merging");
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(6));
+        await TickIdle(o);
+
+        t = store.Single("ORD-1");
+        Assert.Equal([7L], scm.MergeCalls);
+        Assert.Equal((StageStatus.AwaitingApproval, null, null), (t.Status, t.ApprovedHead, t.MergeAcceptedAt));
+        Assert.Equal("merge held: symphonist/ORD-1 moved since auto-approval (head000 → pushed)", store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Fact] public async Task Accepted_merge_that_lands_completes_without_a_head_check()
     {
         await AutoApproveAndMoveHeads("release", move: false);
         var pr = store.Single("ORD-1").ReleasePullRequestId!.Value;
         scm.MergeResults.Enqueue(new MergeResult(false, null, "merge in progress", Accepted: true));
         var o = Create();
+        await TickIdle(o); // accepted (202)
 
-        await TickIdle(o); // the merge is requested and accepted (202)
-        Assert.Equal((StageStatus.Approved, null), (store.Single("ORD-1").Status, store.Single("ORD-1").ApprovedHead));
-        Assert.Contains("waiting to merge: merge in progress", store.EventMessages("ORD-1"));
-
-        scm.BranchHeads["production"] = "prod-merged"; // the merge lands, but the PR still reads open for a moment
+        scm.PullRequests[pr] = FakeSourceControl.Pr(pr, PullRequestState.Merged, "merged-by-hand");
+        scm.BranchHeads["production"] = "prod-merged"; // moved by the merge itself
         await TickIdle(o);
 
-        Assert.Equal([pr, pr], scm.MergeCalls);
+        Assert.Equal([pr], scm.MergeCalls);
         Assert.Equal("deploy", store.Single("ORD-1").StageId);
         Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("merge held", StringComparison.Ordinal));
     }
+
+    [Fact] public async Task Accepted_merge_still_open_after_the_wait_is_requested_again_through_the_head_check()
+    {
+        await AutoApproveAndMoveHeads("implement", move: false);
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "merge in progress", Accepted: true));
+        var o = Create();
+        await TickIdle(o); // accepted (202), never lands
+
+        time.Advance(MergeAcceptedWaitPlus);
+        await TickIdle(o); // heads unchanged: the check passes and the merge is requested once more
+
+        Assert.Equal([7L, 7L], scm.MergeCalls);
+        Assert.Equal("build", store.Single("ORD-1").StageId);
+    }
+
+    private static TimeSpan MergeAcceptedWaitPlus => Orchestrator.MergeAcceptedWait + TimeSpan.FromSeconds(1);
 
     /// <summary>An auto-approved round at <paramref name="stageId"/> (Approved, heads pinned); then the heads move.</summary>
     private async Task AutoApproveAndMoveHeads(string stageId, bool move = true)

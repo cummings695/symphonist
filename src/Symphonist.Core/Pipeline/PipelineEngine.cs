@@ -284,6 +284,7 @@ public static class PipelineEngine
         t.ApprovedBranch = null;
         t.ApprovedHead = null;
         t.ApprovedBaseHead = null;
+        t.MergeAcceptedAt = null;
     }
 
     private static int IndexOf(ProjectConfig p, string stageId)

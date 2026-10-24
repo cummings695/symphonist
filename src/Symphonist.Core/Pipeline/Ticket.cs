@@ -62,6 +62,12 @@ public sealed class Ticket
     /// <summary>For an auto-approved release: the production commit the change was reviewed against.</summary>
     public string? ApprovedBaseHead { get; set; }
 
+    /// <summary>
+    /// When the host accepted a merge it performs asynchronously (still open meanwhile); the merge is not requested again
+    /// for a while. Cleared with <see cref="ApprovedHead"/>.
+    /// </summary>
+    public DateTimeOffset? MergeAcceptedAt { get; set; }
+
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();
 }

@@ -57,6 +57,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<string>("LastSourceStatus")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("MergeAcceptedAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("MergeCommit")
                         .HasColumnType("TEXT");
 

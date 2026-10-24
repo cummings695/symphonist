@@ -5,6 +5,16 @@ namespace Symphonist.Core.Tests.Risk;
 
 public class GateVerdictParserTests
 {
+    [Fact]
+    public void Forced_high_first_puts_the_reason_first()
+    {
+        var v = new GateVerdict(RiskLevel.Low, "ok", ["a"], ["diff"], []);
+        var forced = v.WithForcedHighFirst("b");
+        Assert.Equal(RiskLevel.High, forced.Risk);
+        Assert.Equal(["b", "a"], forced.Reasons);
+        Assert.Equal(["a", "b"], v.WithForcedHigh("b").Reasons);
+    }
+
     private static GateVerdict Parse(string json) => GateVerdictParser.Parse(JsonDocument.Parse(json).RootElement);
 
     [Fact]

@@ -10,6 +10,10 @@ public sealed record GateVerdict(RiskLevel Risk, string Summary, IReadOnlyList<s
 
     public GateVerdict WithForcedHigh(string reason) =>
         this with { Risk = RiskLevel.High, Reasons = [.. Reasons, reason] };
+
+    /// <summary>Like <see cref="WithForcedHigh"/>, with <paramref name="reason"/> first (the one a "needs you" event quotes).</summary>
+    public GateVerdict WithForcedHighFirst(string reason) =>
+        this with { Risk = RiskLevel.High, Reasons = [reason, .. Reasons] };
 }
 
 public static class GateReviewSchema
