@@ -10,7 +10,8 @@
 
 <PageTitle>@TabTitle(shell?.Totals.WaitingOnYou ?? 0, Chrome.PageLabel)</PageTitle>
 
-<div class="app @(sidebarOpen ? "sidebar-open" : null)">
+@* Keys reach the server only while the phone menu is open, for Escape; wherever focus is inside the frame. *@
+<div class="app @(sidebarOpen ? "sidebar-open" : null)" @onkeydown="MenuKeys">
     <header class="topbar">
         <button type="button" class="menu-button" aria-label="Projects" aria-controls="sidebar"
                 aria-expanded="@(sidebarOpen ? "true" : "false")" @onclick="OpenSidebar" @ref="menuButton">
@@ -46,11 +47,11 @@
     {
         <button type="button" class="sidebar-backdrop" aria-label="Close projects" @onclick="CloseSidebarAsync"></button>
     }
-    <aside class="sidebar" id="sidebar" @onkeydown="SidebarKeyDown">
+    <aside class="sidebar" id="sidebar">
         <ProjectSidebar Shell="shell" CurrentProject="@Chrome.CurrentProject" />
     </aside>
 
-    <main class="content">
+    <main class="content" @ref="content">
         <StatusLine Message="@Chrome.Message" IsError="@Chrome.IsError" />
         @Body
     </main>
@@ -62,8 +63,18 @@
     private int loadVersion;
     private bool sidebarOpen;
     private ElementReference menuButton;
+    private ElementReference content;
     private IJSObjectReference? themeModule;
+    private IJSObjectReference? frameModule;
+    private string[]? focusAfterRender; // selectors for the frame module to focus once the render is in the browser
+    private bool scrollAfterRender;
     private string? theme; // "light" or "dark"; null until the browser has told us
+
+    /// <summary>The current project's row, else the first one: where focus goes when the phone menu opens.</summary>
+    private static readonly string[] SidebarFocus = ["#sidebar [data-sidebar-project][aria-current=page]", "#sidebar [data-sidebar-project]"];
+
+    /// <summary>The page heading: where focus goes when picking a project closes the phone menu.</summary>
+    private static readonly string[] HeadingFocus = ["h1"];
 
     private string ThemeLabel => theme switch
     {
@@ -86,6 +97,7 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        await MoveFocusAndScrollAsync();
         if (!firstRender) return;
         try
         {
@@ -98,6 +110,27 @@
             Log.LogDebug(e, "Reading the theme failed");
         }
         StateHasChanged();
+    }
+
+    /// <summary>Makes the focus and scroll moves the last state change asked for, now that the browser has its render.</summary>
+    private async Task MoveFocusAndScrollAsync()
+    {
+        var focus = focusAfterRender;
+        var scroll = scrollAfterRender;
+        if (focus is null && !scroll) return;
+        focusAfterRender = null;
+        scrollAfterRender = false;
+        try
+        {
+            frameModule ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/frame.js");
+            if (scroll) await frameModule.InvokeVoidAsync("scrollToTop", content);
+            if (focus is not null) await frameModule.InvokeAsync<bool>("focus", (object)focus);
+        }
+        catch (Exception e)
+        {
+            // Convenience moves: JS failures (and disconnects) must never reach the circuit.
+            Log.LogDebug(e, "Moving focus or scroll in the frame failed");
+        }
     }
 
     private async Task ToggleThemeAsync()
@@ -123,11 +156,17 @@
 
     private void OnChromeChanged() => _ = InvokeAsync(StateHasChanged);
 
-    // Picking a project in the phone menu navigates; focus then goes to the new page's heading, not the menu button.
+    // Every navigation starts at the top of the page: its scroll container is the frame's, which outlives pages.
+    // Picking a project in the phone menu changes only the query, so FocusOnNavigate does not run and the focused row
+    // is hidden as the menu closes: focus the page heading instead, which also brings it into view.
     private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(() =>
     {
-        if (!sidebarOpen) return;
-        sidebarOpen = false;
+        scrollAfterRender = true;
+        if (sidebarOpen)
+        {
+            sidebarOpen = false;
+            focusAfterRender = HeadingFocus;
+        }
         StateHasChanged();
     });
 
@@ -158,11 +197,16 @@
         Chrome.ShowMessage("Poll requested");
     }
 
-    private void OpenSidebar() => sidebarOpen = true;
+    private void OpenSidebar()
+    {
+        sidebarOpen = true;
+        focusAfterRender = SidebarFocus;
+    }
 
     private async Task CloseSidebarAsync()
     {
         sidebarOpen = false;
+        focusAfterRender = null;
         try
         {
             await menuButton.FocusAsync();
@@ -173,7 +217,11 @@
         }
     }
 
-    private async Task SidebarKeyDown(KeyboardEventArgs e)
+    /// <summary>The frame's keydown handler: none while the phone menu is closed, so keys stay in the browser.</summary>
+    private EventCallback<KeyboardEventArgs> MenuKeys =>
+        sidebarOpen ? EventCallback.Factory.Create<KeyboardEventArgs>(this, MenuKeyDown) : default;
+
+    private async Task MenuKeyDown(KeyboardEventArgs e)
     {
         if (sidebarOpen && e.Key == "Escape") await CloseSidebarAsync();
     }
@@ -184,15 +232,16 @@
         Chrome.Changed -= OnChromeChanged;
         Navigation.LocationChanged -= OnLocationChanged;
         disposed.Cancel();
-        if (themeModule is not null)
+        foreach (var module in new[] { themeModule, frameModule })
         {
+            if (module is null) continue;
             try
             {
-                await themeModule.DisposeAsync();
+                await module.DisposeAsync();
             }
             catch (Exception e)
             {
-                Log.LogDebug(e, "Releasing the theme module failed"); // e.g. the circuit is already gone
+                Log.LogDebug(e, "Releasing a frame module failed"); // e.g. the circuit is already gone
             }
         }
     }

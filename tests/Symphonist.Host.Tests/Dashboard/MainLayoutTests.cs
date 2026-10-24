@@ -1,5 +1,6 @@
 using AngleSharp.Dom;
 using Bunit;
+using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.JSInterop;
@@ -31,6 +32,7 @@ public sealed class MainLayoutTests : IDisposable
     private readonly Orchestrator orchestrator;
     private readonly DashboardChrome chrome = new();
     private readonly BunitJSModuleInterop theme;
+    private readonly BunitJSModuleInterop frame;
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
@@ -47,6 +49,9 @@ public sealed class MainLayoutTests : IDisposable
 
         ctx.JSInterop.Mode = JSRuntimeMode.Strict;
         theme = ctx.JSInterop.SetupModule("./js/theme.js");
+        frame = ctx.JSInterop.SetupModule("./js/frame.js");
+        frame.Setup<bool>("focus", _ => true).SetResult(true);
+        frame.SetupVoid("scrollToTop", _ => true).SetVoidResult();
         ctx.Services.AddSingleton<TimeProvider>(time);
         ctx.Services.AddSingleton(notifier);
         ctx.Services.AddSingleton(registry);
@@ -239,6 +244,90 @@ public sealed class MainLayoutTests : IDisposable
         cut.Find("#sidebar").KeyDown(key: "Escape");
 
         Assert.DoesNotContain("sidebar-open", cut.Find(".app").ClassList);
+    }
+
+    /// <summary>The selector lists the layout asked the frame module to focus, in call order.</summary>
+    private string[][] FocusRequests() =>
+        frame.Invocations["focus"].Select(i => ((IEnumerable<string>)i.Arguments[0]!).ToArray()).ToArray();
+
+    [Fact]
+    public void Opening_the_phone_menu_moves_focus_to_the_current_project()
+    {
+        chrome.SetPage(null, "orders");
+        var cut = RenderLayout();
+
+        cut.Find("button[aria-controls=sidebar]").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("#sidebar [data-sidebar-project][aria-current=page]", Assert.Single(FocusRequests())[0]));
+    }
+
+    [Fact]
+    public void Escape_closes_the_phone_menu_right_after_opening_and_returns_focus_to_the_button()
+    {
+        var cut = RenderLayout();
+        var menu = cut.Find("button[aria-controls=sidebar]");
+        menu.Click();
+
+        cut.Find("button[aria-controls=sidebar]").KeyDown(key: "Escape"); // focus is still on the button
+
+        Assert.DoesNotContain("sidebar-open", cut.Find(".app").ClassList);
+        ctx.JSInterop.VerifyFocusAsyncInvoke();
+    }
+
+    [Fact]
+    public void Keys_do_not_reach_the_server_while_the_phone_menu_is_closed()
+    {
+        var cut = RenderLayout();
+
+        Assert.Throws<MissingEventHandlerException>(() => cut.Find("button[aria-controls=sidebar]").KeyDown(key: "Escape"));
+        Assert.Throws<MissingEventHandlerException>(() => cut.Find("#sidebar").KeyDown(key: "a"));
+    }
+
+    [Fact]
+    public void Picking_a_project_in_the_phone_menu_closes_it_and_focuses_the_page_heading()
+    {
+        var cut = RenderLayout();
+        cut.Find("button[aria-controls=sidebar]").Click();
+
+        ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/?project=orders"); // query only: no FocusOnNavigate
+
+        cut.WaitForAssertion(() =>
+        {
+            Assert.DoesNotContain("sidebar-open", cut.Find(".app").ClassList);
+            Assert.Equal(["h1"], FocusRequests().Last());
+        });
+    }
+
+    [Fact]
+    public void Navigating_scrolls_the_page_back_to_the_top()
+    {
+        var cut = RenderLayout();
+        var navigation = ctx.Services.GetRequiredService<NavigationManager>();
+
+        navigation.NavigateTo("/?project=orders");
+        cut.WaitForAssertion(() => Assert.Single(frame.Invocations["scrollToTop"]));
+        navigation.NavigateTo("/?project=billing");
+        cut.WaitForAssertion(() => Assert.Equal(2, frame.Invocations["scrollToTop"].Count));
+
+        Assert.Empty(FocusRequests()); // the menu was closed: focus is left to the page
+    }
+
+    [Fact]
+    public void A_chosen_theme_also_sets_the_native_colour_scheme()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (!File.Exists(Path.Combine(dir.FullName, "Symphonist.slnx"))) dir = dir.Parent!;
+        var css = System.Text.RegularExpressions.Regex.Replace(
+            File.ReadAllText(Path.Combine(dir.FullName, "src", "Symphonist.Host", "wwwroot", "app.css")), @"/\*.*?\*/", "",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        foreach (var theme in new[] { "light", "dark" })
+        {
+            var rules = System.Text.RegularExpressions.Regex.Matches(css, @"([^{}]+)\{([^{}]*)\}")
+                .Where(m => m.Groups[1].Value.Split(',').Any(s => s.Trim() == $":root[data-theme=\"{theme}\"]"))
+                .Select(m => m.Groups[2].Value);
+            Assert.Contains(rules, r => System.Text.RegularExpressions.Regex.IsMatch(r, $@"color-scheme:\s*{theme}\s*;"));
+        }
     }
 
     [Fact]

@@ -83,6 +83,11 @@
     --radius-lane: 14px;
 }
 
+/* A chosen theme also picks the native controls' scheme (scrollbars, select popups), whatever the OS says. */
+:root[data-theme="light"] {
+    color-scheme: light;
+}
+
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
         --bg: #12161b;
@@ -153,6 +158,7 @@
 }
 
 :root[data-theme="dark"] {
+    color-scheme: dark;
     --bg: #12161b;
     --fg: #e3e7ec;
     --muted: #97a2ae;
