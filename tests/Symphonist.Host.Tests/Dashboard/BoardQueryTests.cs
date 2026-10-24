@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
@@ -29,7 +30,8 @@ public sealed class BoardQueryTests : IDisposable
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         var time = new FakeTimeProvider(Now);
         orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time), time,
+            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
         query = new BoardQuery(registry, store, orchestrator);
     }

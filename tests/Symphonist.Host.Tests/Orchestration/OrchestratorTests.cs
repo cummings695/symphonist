@@ -1,8 +1,11 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 
@@ -43,6 +46,7 @@ public sealed class OrchestratorTests : IDisposable
           - { id: release,   kind: release,   gate: human }
           - { id: deploy,    kind: deploy }
           - { id: done,      kind: done,      onEnterStatus: Done }
+        review: { mode: off }
         """;
 
     private readonly string home = Path.Combine(Path.GetTempPath(), "symphonist-tests-" + Guid.NewGuid().ToString("N"));
@@ -55,14 +59,16 @@ public sealed class OrchestratorTests : IDisposable
     private readonly FakeBuildWatcher builds = new();
     private readonly ProjectRegistry registry;
 
+    private static AgentRunResult StageResult => FakeAgentRunner.Ok(FakeAgentRunner.Output(
+        summary: "done", specPath: "docs/spec.md", planPath: "docs/plan.md", prTitle: "Export orders"));
+
     public OrchestratorTests()
     {
         Environment.SetEnvironmentVariable("SYMPHONIST_HOME", home);
         Directory.CreateDirectory(Path.Combine(home, "projects"));
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
-        agent.OnRun = _ => FakeAgentRunner.Ok(FakeAgentRunner.Output(
-            summary: "done", specPath: "docs/spec.md", planPath: "docs/plan.md", prTitle: "Export orders"));
+        agent.OnRun = _ => StageResult;
     }
 
     public void Dispose()
@@ -76,8 +82,11 @@ public sealed class OrchestratorTests : IDisposable
     /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), time,
+            new StageExecutor(git, agent, store, time), Reviewer(), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
+
+    private GateReviewer Reviewer() =>
+        new(git, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
 
     private void Source(string key, string status, params SourceComment[] comments) =>
         tracker.Tickets.Add(new SourceTicket(key, $"Title {key}", $"Description {key}", status, comments,
@@ -888,6 +897,8 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(("implement", StageStatus.Pending), (t.StageId, t.Status));
         Assert.Contains("applying source move to 'In Progress': advanced to implement", store.EventMessages("ORD-1"));
         Assert.Empty(tracker.Transitions);
+        var d = Assert.Single(store.GateDecisions); // the developer's decision, with no review of its round
+        Assert.Equal(("plan", GateDecision.Approved, false), (d.StageId, d.Decision, d.Auto));
     }
 
     [Fact] public async Task Approval_stored_during_runs_that_end_blocked_does_not_approve_after_unblock()
@@ -1116,7 +1127,7 @@ public sealed class OrchestratorTests : IDisposable
         tracker.OnQuery = () => Interlocked.Increment(ref queries) % 2 == 0 ? throw new HttpRequestException("flaky") : [];
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1142,7 +1153,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1175,7 +1186,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1234,5 +1245,388 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(3, agent.Requests.Count);
         Assert.Equal(3, store.AgentRuns.Count);
         Assert.Equal("advanced to done", store.EventMessages("ORD-1")[^1]);
+    }
+
+    // ---- Gate reviews ----
+
+    /// <summary>Rewrites the project with a review mode, a risk area, and the given stage gates.</summary>
+    private void Configure(string mode, params (string Stage, string Gate)[] gates)
+    {
+        var yaml = OrdersYaml.Replace("review: { mode: off }",
+            $"review: {{ mode: {mode} }}\nriskAreas:\n  - {{ name: pricing, description: Prices and tax, paths: [\"src/Pricing/**\"] }}");
+        foreach (var (stage, gate) in gates)
+            yaml = Regex.Replace(yaml, $@"(\{{ id: {stage},\s+kind: \w+,\s+gate: )\w+", "${1}" + gate);
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), yaml);
+        registry.Reload();
+        Assert.Equal(mode, registry.Get("orders").Review.Mode.ToString(), ignoreCase: true);
+    }
+
+    /// <summary>Review runs answer with <paramref name="review"/>; stage runs succeed as usual.</summary>
+    private void AnswerReviews(Func<AgentRunResult> review) =>
+        agent.OnRun = r => FakeAgentRunner.IsReview(r) ? review() : StageResult;
+
+    private int ReviewRequests => agent.Requests.Count(FakeAgentRunner.IsReview);
+
+    private static AgentRunResult Low() =>
+        FakeAgentRunner.Review("low", "small change", checkedItems: ["spec matches the ticket"]);
+
+    private IReadOnlyList<string> AutoApprovalComments =>
+        tracker.Comments.Select(c => c.Markdown).Where(m => m.StartsWith("Auto-approved", StringComparison.Ordinal)).ToList();
+
+    private Task SeedWaiting(string key, string stageId, string sourceStatus, Action<Ticket>? with = null) =>
+        Seed(key, stageId, StageStatus.AwaitingApproval, sourceStatus, t =>
+        {
+            t.ReviewDue = true;
+            t.SpecPath = "docs/spec.md";
+            t.PlanPath = "docs/plan.md";
+            with?.Invoke(t);
+        });
+
+    [Fact] public async Task Low_risk_auto_gate_is_approved_with_comment()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(Low);
+        var autoCommentsAtMove = -1;
+        tracker.OnTransition = (_, _) => { autoCommentsAtMove = AutoApprovalComments.Count; return true; };
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o); // plan run: waits at the gate with a review owed
+        var waiting = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (waiting.Status, waiting.ReviewDue));
+        await TickIdle(o); // review run: low
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Pending, RiskLevel.Low), (t.StageId, t.Status, t.Risk));
+        var review = Assert.Single(agent.Requests, FakeAgentRunner.IsReview);
+        Assert.True(review.ReadOnlyWorkspace);
+        var comment = tracker.Comments[^1]; // after the plan stage's own comment
+        Assert.Equal("ORD-1", comment.Key);
+        Assert.StartsWith("Auto-approved plan: low risk.", comment.Markdown);
+        Assert.Contains("- spec matches the ticket", comment.Markdown);
+        Assert.True(TrackerComments.IsSymphonist(comment.Markdown));
+        Assert.Single(AutoApprovalComments);
+        Assert.Equal([("ORD-1", "In Progress")], tracker.Transitions);
+        Assert.Equal(1, autoCommentsAtMove); // posted before the approval moved the card
+        var decision = Assert.Single(store.GateDecisions);
+        Assert.Equal(("plan", waiting.WaitingSince!.Value, GateDecision.Approved, true),
+            (decision.StageId, decision.WaitingSince, decision.Decision, decision.Auto));
+        var stored = Assert.Single(store.GateReviews);
+        Assert.Equal((ReviewMode.Active, GatePolicy.AutoWhenLowRisk, RiskLevel.Low, waiting.WaitingSince.Value),
+            (stored.Mode, stored.Gate, stored.Verdict.Risk, stored.WaitingSince));
+        Assert.Equal(["picked up at plan", "plan awaiting approval", "reviewing plan", "auto-approved plan: low risk"],
+            store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task High_risk_auto_gate_waits_on_you()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Review("high", "touches tax", reasons: ["changes the tax rule"]));
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, RiskLevel.High, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
+        Assert.Contains("plan needs you: high risk — changes the tax rule", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.GateDecisions);
+        Assert.Equal(1, ReviewRequests);
+    }
+
+    [Fact] public async Task Shadow_mode_records_verdict_and_never_approves()
+    {
+        Configure("shadow", ("plan", "auto"));
+        AnswerReviews(Low);
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.Low), (t.Status, t.Risk));
+        Assert.Contains("reviewer (shadow): low risk — small change", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Comments);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+
+        var review = (await store.GateReviewsAsync(t.Id, CancellationToken.None))[0];
+        Assert.Equal((GateDecision.Approved, false), (review.Decision, review.AutoDecided));
+        var agreement = Assert.Single(await store.ReviewAgreementAsync("orders", CancellationToken.None));
+        Assert.Equal(("plan", 1, 1), (agreement.StageId, agreement.Decided, agreement.Agreed));
+    }
+
+    [Fact] public async Task Human_decision_during_review_wins_and_still_counts()
+    {
+        Configure("active", ("plan", "auto"));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => { started.TrySetResult(); return release.Task; };
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the review is running, blocked
+
+        var outcome = await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        Assert.True(outcome.Changed);
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+
+        release.SetResult(Low());
+        await o.WhenIdleAsync();
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Contains("review of plan finished after the gate was decided; not applied", store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Comments);
+        var review = Assert.Single(await store.GateReviewsAsync(t.Id, CancellationToken.None));
+        Assert.Equal((RiskLevel.Low, GateDecision.Approved, false), (review.Verdict.Risk, review.Decision, review.AutoDecided));
+        Assert.Equal(1, Assert.Single(await store.ReviewAgreementAsync("orders", CancellationToken.None)).Agreed);
+    }
+
+    [Fact] public async Task Review_failure_fails_closed_without_retry()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Fail("timed out"));
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High, false), (t.Status, t.Risk, t.ReviewDue));
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "reviewer failed: timed out; waiting on you");
+        Assert.Equal("timed out", Assert.Single(store.GateReviews).Verdict.Error);
+
+        await TickIdle(o);
+        await TickIdle(o);
+        await TickIdle(o);
+        Assert.Equal(1, ReviewRequests);
+        Assert.Empty(tracker.Comments);
+    }
+
+    [Fact] public async Task Auto_approval_held_when_comment_fails()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(Low);
+        tracker.CommentError = new HttpRequestException("jira is down");
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, RiskLevel.Low, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
+        Assert.Contains("auto-approval held: could not post comment: jira is down; waiting on you", store.EventMessages("ORD-1"));
+        Assert.Empty(store.GateDecisions);
+        Assert.Empty(tracker.Transitions);
+    }
+
+    [Theory]
+    [InlineData("head000", true)]
+    [InlineData("pushed-later", false)]
+    [InlineData(null, false)] // the head cannot be looked up
+    public async Task Implement_gate_auto_approves_only_the_reviewed_head(string? currentHead, bool approved)
+    {
+        Configure("active", ("implement", "auto"));
+        AnswerReviews(Low);
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        if (currentHead is not null) scm.BranchHeads["symphonist/ORD-1"] = currentHead;
+        await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7);
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(RiskLevel.Low, t.Risk);
+        Assert.Equal(approved ? StageStatus.Approved : StageStatus.AwaitingApproval, t.Status);
+        Assert.Equal(approved ? 1 : 0, AutoApprovalComments.Count);
+        Assert.Equal(approved ? 1 : 0, store.GateDecisions.Count);
+        if (currentHead == "pushed-later")
+            Assert.Contains("auto-approval skipped: symphonist/ORD-1 moved since review; waiting on you", store.EventMessages("ORD-1"));
+        if (currentHead is null)
+            Assert.Contains(store.EventMessages("ORD-1"), m =>
+                m.StartsWith("auto-approval skipped: could not check symphonist/ORD-1", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Review_uses_a_concurrency_slot()
+    {
+        Configure("active", ("plan", "auto"));
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = r => FakeAgentRunner.IsReview(r) ? release.Task : Task.FromResult(StageResult);
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        Source("ORD-2", "Planned");
+        var o = Create(maxRuns: 1);
+
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-2").Status);
+        Assert.True(agent.Requests.All(FakeAgentRunner.IsReview));
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "reviewing plan");
+
+        release.SetResult(FakeAgentRunner.Review("high", "unsure"));
+        await o.WhenIdleAsync();
+        await TickIdle(o);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-2").Status);
+    }
+
+    [Fact] public async Task Forget_refused_while_reviewing()
+    {
+        Configure("active", ("plan", "auto"));
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => release.Task;
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(ForgetResult.Running, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+
+        release.SetResult(Low());
+        await o.WhenIdleAsync();
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+    }
+
+    [Fact] public async Task Review_interrupted_by_restart_runs_again()
+    {
+        Configure("active", ("plan", "auto"));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runs = 0;
+        agent.OnRunCancellableAsync = async (_, ct) =>
+        {
+            if (Interlocked.Increment(ref runs) > 1) return Low();
+            started.TrySetResult();
+            await Task.Delay(Timeout.Infinite, ct);
+            return Low();
+        };
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var first = Create();
+        await first.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        first.CancelRuns(); // host shutdown: not a verdict
+        await first.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(store.GateReviews);
+        Assert.Equal((StageStatus.AwaitingApproval, true), (store.Single("ORD-1").Status, store.Single("ORD-1").ReviewDue));
+
+        var restarted = Create();
+        await restarted.RecoverAsync(CancellationToken.None);
+        await TickIdle(restarted);
+
+        Assert.Equal(2, ReviewRequests);
+        Assert.Single(store.GateReviews);
+        Assert.Equal("implement", store.Single("ORD-1").StageId);
+    }
+
+    [Fact] public async Task Send_back_records_gate_decision()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review");
+        var o = Create();
+
+        Assert.True((await o.SendBackAsync("orders", "ORD-1", "rename it", null, CancellationToken.None)).Changed);
+
+        var d = Assert.Single(store.GateDecisions);
+        Assert.Equal((store.Single("ORD-1").Id, "orders", "implement", Now, GateDecision.SentBack, false),
+            (d.TicketId, d.ProjectId, d.StageId, d.WaitingSince, d.Decision, d.Auto));
+    }
+
+    [Fact] public async Task Approve_with_stale_waiting_since_changes_nothing()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create();
+
+        var outcome = await o.ApproveAsync("orders", "ORD-1", CancellationToken.None, "plan", Now.AddMinutes(-30));
+
+        Assert.False(outcome.Changed);
+        Assert.Equal("plan is waiting on a newer round; reload to see it", outcome.Message);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(store.GateDecisions);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None, "plan", Now)).Changed);
+        var d = Assert.Single(store.GateDecisions);
+        Assert.Equal((GateDecision.Approved, false), (d.Decision, d.Auto));
+    }
+
+    [Fact] public async Task Claude_comment_rerun_at_auto_triage_is_reviewed_again()
+    {
+        Configure("active", ("triage", "auto"));
+        var verdicts = new Queue<AgentRunResult>([FakeAgentRunner.Review("high", "unclear", reasons: ["which format?"]), Low()]);
+        AnswerReviews(verdicts.Dequeue);
+        Source("ORD-1", "Backlog");
+        var o = Create();
+
+        await TickIdle(o); // triage run
+        await TickIdle(o); // review: high
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High), (store.Single("ORD-1").Status, store.Single("ORD-1").Risk));
+
+        time.Advance(TimeSpan.FromMinutes(10));
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: CSV"));
+        await TickIdle(o); // rerun triage with the answers
+        await TickIdle(o); // review: low
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", RiskLevel.Low), (t.StageId, t.Risk));
+        Assert.Equal(2, ReviewRequests);
+        Assert.StartsWith("Auto-approved triage: low risk.", Assert.Single(AutoApprovalComments));
+        Assert.Equal([(GateDecision.SentBack, false), (GateDecision.Approved, true)],
+            store.GateDecisions.Select(d => (d.Decision, d.Auto)));
+        Assert.NotEqual(store.GateDecisions[0].WaitingSince, store.GateDecisions[1].WaitingSince);
+    }
+
+    [Fact] public async Task Release_gate_auto_approves_low_risk_production_change()
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Review("low", "one safe change", checkedItems: ["diff", "build passed"]));
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        scm.BranchHeads["main"] = "main000";
+        builds.Statuses["merge-1"] = BuildStatus.Succeeded;
+        var o = Create();
+
+        await TickIdle(o); // release PR opened, waiting at the gate
+        Assert.Equal((StageStatus.AwaitingApproval, true), (store.Single("ORD-1").Status, store.Single("ORD-1").ReviewDue));
+        await TickIdle(o); // review: low -> approved
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+        await TickIdle(o); // merge
+        await TickIdle(o); // deploy
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal([1L], scm.MergeCalls);
+        Assert.StartsWith("Auto-approved release: low risk.", Assert.Single(AutoApprovalComments));
+        Assert.True(Assert.Single(store.GateDecisions).Auto);
+    }
+
+    [Fact] public async Task Human_release_gate_is_reviewed_but_never_auto_approved()
+    {
+        Configure("active");
+        AnswerReviews(Low);
+        scm.BranchHeads["main"] = "main000";
+        await SeedWaiting("ORD-1", "release", "In Review", t => t.ReleasePullRequestId = 3);
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.Low, false), (t.Status, t.Risk, t.ReviewDue));
+        Assert.Contains("reviewer: low risk — small change", store.EventMessages("ORD-1"));
+        Assert.Equal(GatePolicy.Human, Assert.Single(store.GateReviews).Gate);
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.GateDecisions);
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Review_off_runs_no_reviewer()
+    {
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.False(store.Single("ORD-1").ReviewDue);
+        Assert.Equal(0, ReviewRequests);
+        Assert.Empty(store.GateReviews);
     }
 }

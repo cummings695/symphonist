@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
@@ -17,11 +18,12 @@ public enum ForgetResult { Forgotten, NotFound, Running }
 
 /// <summary>
 /// Syncs tracker tickets into the store, drives each ticket through the pipeline, and mirrors state back to the tracker.
-/// Ticks, commands (approve / send back / unblock) and agent-run completions all run under one lock, and every one of
-/// them loads the ticket fresh from the store, so no two writers ever save a ticket from stale copies.
+/// Ticks, commands (approve / send back / unblock) and agent-run and review completions all run under one lock, and
+/// every one of them loads the ticket fresh from the store, so no two writers ever save a ticket from stale copies.
 /// </summary>
 public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, IIntegrationFactory integrations,
-    StageExecutor executor, TimeProvider time, OrchestratorOptions options, ILogger<Orchestrator> log) : IDisposable
+    StageExecutor executor, GateReviewer reviewer, TimeProvider time, OrchestratorOptions options,
+    ILogger<Orchestrator> log) : IDisposable
 {
     private const string LeftQuery = "no longer matches tracker query";
 
@@ -110,10 +112,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <param name="expectedStageId">The stage the developer saw waiting (dashboard); when the ticket is at another stage
     /// nothing changes, so a stale view can never approve a later gate (e.g. a production deploy).</param>
+    /// <param name="expectedWaitingSince">The gate round the developer saw; a different round changes nothing.</param>
     public Task<TransitionOutcome> ApproveAsync(string projectId, string key, CancellationToken ct,
-        string? expectedStageId = null) =>
-        CommandAsync(projectId, key, (p, t, now) => expectedStageId is not null && t.StageId != expectedStageId
-            ? new TransitionOutcome(false, null, $"{expectedStageId} is not awaiting approval")
+        string? expectedStageId = null, DateTimeOffset? expectedWaitingSince = null) =>
+        CommandAsync(projectId, key, (p, t, now) =>
+            expectedStageId is not null && t.StageId != expectedStageId
+                ? new TransitionOutcome(false, null, $"{expectedStageId} is not awaiting approval")
+            : expectedWaitingSince is { } seen && t.Status == StageStatus.AwaitingApproval && t.WaitingSince != seen
+                ? new TransitionOutcome(false, null, $"{t.StageId} is waiting on a newer round; reload to see it")
             : PipelineEngine.Approve(p, t, now), ct);
 
     public Task<TransitionOutcome> SendBackAsync(string projectId, string key, string feedback, string? toStageId,
@@ -125,7 +131,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Removes a ticket (with its events and runs) from Symphonist only; the tracker, repo and workspace are untouched.
-    /// Refused while an agent run for it is in flight, since the run's completion would write to the deleted ticket.
+    /// Refused while an agent or review run for it is in flight, since the run's completion would write to the deleted
+    /// ticket.
     /// </summary>
     public async Task<ForgetResult> ForgetAsync(string projectId, string key, CancellationToken ct)
     {
@@ -349,6 +356,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 inFlight[t.Id] = RunAgentStageAsync(p, io, t.Clone(), source);
                 return;
 
+            case StageStatus.AwaitingApproval
+                when t is { ReviewDue: true, WaitingSince: not null } && p.Reviews(p.Stage(t.StageId)):
+                // The round's review (also one interrupted by a restart): runs like an agent stage; nothing is saved.
+                if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                inFlight[t.Id] = RunReviewAsync(p, io, t.Clone(), source);
+                await AddEventOnceAsync(t, $"reviewing {t.StageId}", ct);
+                return;
+
             case StageStatus.Running when agentStage:
                 // Not in flight (in-flight tickets are skipped), so its run's result was lost: retry like a restart.
                 t.Status = StageStatus.Pending;
@@ -473,14 +488,137 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await ApplyAsync(io, t, fromStageId, outcome, ct);
     }
 
+    /// <summary>Reviews the gate round on a private copy, then applies the verdict to the ticket re-loaded under the lock.</summary>
+    private async Task RunReviewAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, SourceTicket? source)
+    {
+        await Task.Yield();
+        GateReviewOutcome? result = null;
+        try
+        {
+            result = await reviewer.ReviewAsync(p, run, source, shutdown.Token);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Not a verdict: ReviewDue stays set, so the next start reviews the round again.
+            log.LogInformation("Review of {Project}/{Key} cancelled by shutdown", p.Id, run.Key);
+        }
+        catch (Exception e)
+        {
+            result = new GateReviewOutcome(GateVerdict.Failed(e.Message), null);
+        }
+
+        await gate.WaitAsync(CancellationToken.None);
+        try
+        {
+            if (result is not null) await CompleteReviewAsync(p, io, run, result, CancellationToken.None);
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Applying review result for {Project}/{Key} failed", p.Id, run.Key);
+            await TryAddEventOnceAsync(run, $"{run.StageId} review result could not be applied: {e.Message}");
+        }
+        finally
+        {
+            inFlight.TryRemove(run.Id, out _);
+            gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Records the verdict for its round (always, even when the gate was decided meanwhile) and applies it. A low verdict
+    /// at an active auto gate approves only when the reviewed commit is still the head and the auto-approval comment
+    /// was posted; otherwise the gate waits on the developer.
+    /// </summary>
+    private async Task CompleteReviewAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, GateReviewOutcome result,
+        CancellationToken ct)
+    {
+        var t = await store.FindAsync(p.Id, run.Key, ct);
+        if (t is null || t.Id != run.Id)
+        {
+            log.LogWarning("Ticket {Project}/{Key} disappeared during its review", p.Id, run.Key);
+            return;
+        }
+
+        var verdict = result.Verdict;
+        var waitingSince = run.WaitingSince!.Value; // the round key as loaded from the store, never a fresh clock read
+        var stage = p.Stage(run.StageId);
+        await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
+            p.Review.Mode, stage.Gate, verdict), ct);
+
+        var allowAutoApprove = true;
+        if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)
+            && await AutoApprovalHeldAsync(p, io, t, stage, result, ct) is { } held)
+        {
+            allowAutoApprove = false;
+            await AddEventAsync(t, held, ct);
+        }
+
+        var fromStageId = t.StageId;
+        var outcome = PipelineEngine.ReviewCompleted(p, t, verdict, waitingSince, allowAutoApprove, time.GetUtcNow());
+        if (!outcome.Changed)
+        {
+            // ApplyAsync skips unchanged outcomes. Named after the reviewed stage: the ticket may have moved on since.
+            await AddEventAsync(t, $"review of {run.StageId} finished after the gate was decided; not applied", ct);
+            return;
+        }
+        await store.SaveAsync(t, ct);
+        await ApplyAsync(io, t, fromStageId, outcome, ct);
+        if (verdict.Error is { } error) await AddEventAsync(t, $"reviewer failed: {error}; waiting on you", ct);
+    }
+
+    /// <summary>
+    /// Why a low verdict must not auto-approve after all (the event to record), or null once the signed auto-approval
+    /// comment is posted. An implement or release verdict covers only the reviewed commit, so the branch that would be
+    /// merged (the ticket branch, or main for a release) must still be at it; any doubt holds the approval.
+    /// </summary>
+    private async Task<string?> AutoApprovalHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t,
+        StageDefinition stage, GateReviewOutcome result, CancellationToken ct)
+    {
+        var branch = stage.Kind switch
+        {
+            StageKind.Implement => t.Branch ?? $"symphonist/{t.Key}",
+            StageKind.Release => p.Repo.MainBranch,
+            _ => null, // triage and plan review the ticket and its documents, not a commit
+        };
+        if (branch is not null)
+        {
+            if (result.ReviewedHead is not { } reviewed)
+                return $"auto-approval skipped: no reviewed commit of {branch}; waiting on you";
+            string current;
+            try
+            {
+                current = await io.SourceControl.GetBranchHeadAsync(branch, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Head of {Branch} for {Key} could not be checked", branch, t.Key);
+                return $"auto-approval skipped: could not check {branch}: {e.Message}; waiting on you";
+            }
+            if (!string.Equals(current, reviewed, StringComparison.OrdinalIgnoreCase))
+                return $"auto-approval skipped: {branch} moved since review; waiting on you";
+        }
+
+        try
+        {
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(AutoApprovalComment.Format(stage.Id, result.Verdict)), ct);
+            return null;
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Auto-approval comment on {Key} failed", t.Key);
+            return $"auto-approval held: could not post comment: {e.Message}; waiting on you";
+        }
+    }
+
     private Task ApplyAsync(ProjectIntegrations io, Ticket t, string fromStageId, TransitionOutcome outcome,
         CancellationToken ct) =>
         ApplyAsync(() => io, t, fromStageId, outcome, ct);
 
     /// <summary>
-    /// Records the outcome and mirrors its status to the tracker. Integrations that cannot be created (missing secret)
-    /// and a missing or failing transition never throw; they are recorded as events, and a skipped or failed move is
-    /// kept in <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry. A new move, or leaving
+    /// Records the outcome, and the gate decision it made (whoever made it: CLI, API, dashboard, tracker move, @claude or
+    /// the reviewer), then mirrors its status to the tracker. Integrations that cannot be created (missing secret) and a
+    /// missing or failing transition never throw; they are recorded as events, and a skipped or failed move is kept in
+    /// <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry. A new move, or leaving
     /// <paramref name="fromStageId"/> (the stage before the outcome), cancels the move still waiting to be retried.
     /// </summary>
     private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, string fromStageId, TransitionOutcome outcome,
@@ -488,6 +626,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     {
         if (!outcome.Changed) return;
         await AddEventAsync(t, outcome.Message, ct);
+        if (outcome.Decision is { } d)
+            await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, t.ProjectId, d.StageId, d.WaitingSince, d.Decision,
+                d.Auto, time.GetUtcNow()), ct);
 
         var target = outcome.SourceStatusToSet;
         if (t.TrackerRetryStatus is not null && (target is not null || t.StageId != fromStageId))
