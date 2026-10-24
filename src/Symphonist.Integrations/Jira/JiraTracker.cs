@@ -34,7 +34,7 @@ public sealed partial class JiraTracker(HttpClient http, TrackerConfig config, s
             var root = doc.RootElement;
             if (root.TryGetProperty("issues", out var issues))
                 foreach (var issue in issues.EnumerateArray())
-                    tickets.Add(Map(issue, me));
+                    tickets.Add(await MapAsync(issue, me, ct));
 
             pageToken = root.TryGetProperty("nextPageToken", out var next) && next.ValueKind == JsonValueKind.String
                 ? next.GetString()
@@ -72,7 +72,7 @@ public sealed partial class JiraTracker(HttpClient http, TrackerConfig config, s
         (await SendAsync(HttpMethod.Post, $"rest/api/3/issue/{Uri.EscapeDataString(key)}/comment",
             new { body = Adf.FromMarkdown(markdown) }, ct)).Dispose();
 
-    private SourceTicket Map(JsonElement issue, string myAccountId)
+    private async Task<SourceTicket> MapAsync(JsonElement issue, string myAccountId, CancellationToken ct)
     {
         var key = issue.GetProperty("key").GetString()!;
         var fields = issue.GetProperty("fields");
@@ -80,18 +80,24 @@ public sealed partial class JiraTracker(HttpClient http, TrackerConfig config, s
         if (fields.TryGetProperty("comment", out var c) && c.ValueKind == JsonValueKind.Object
             && c.TryGetProperty("comments", out var list))
         {
+            var seen = new HashSet<string>();
             foreach (var cm in list.EnumerateArray())
+                AddComment(cm, myAccountId, seen, comments);
+
+            // Search truncates the thread; read it in full from the comment endpoint.
+            var total = c.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt32() : 0;
+            if (total > comments.Count)
             {
-                var author = cm.TryGetProperty("author", out var a) ? a : default;
-                var accountId = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("accountId", out var id)
-                    ? id.GetString() : null;
-                var name = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("displayName", out var dn)
-                    ? dn.GetString() : null;
-                comments.Add(new SourceComment(
-                    name ?? accountId ?? "unknown",
-                    accountId is not null && accountId == myAccountId,
-                    ParseJiraDate(cm.GetProperty("created").GetString()!),
-                    cm.TryGetProperty("body", out var b) ? Adf.ToPlainText(b) : ""));
+                var startAt = 0;
+                while (startAt < total)
+                {
+                    using var page = await SendAsync(HttpMethod.Get,
+                        $"rest/api/3/issue/{Uri.EscapeDataString(key)}/comment?startAt={startAt}&maxResults=100", null, ct);
+                    if (!page.RootElement.TryGetProperty("comments", out var items) || items.GetArrayLength() == 0) break;
+                    foreach (var cm in items.EnumerateArray())
+                        AddComment(cm, myAccountId, seen, comments);
+                    startAt += items.GetArrayLength();
+                }
             }
         }
 
@@ -102,6 +108,21 @@ public sealed partial class JiraTracker(HttpClient http, TrackerConfig config, s
             fields.TryGetProperty("status", out var st) && st.TryGetProperty("name", out var sn) ? sn.GetString() ?? "" : "",
             comments.OrderBy(x => x.Created).ToList(),
             new Uri($"{config.Site.ToString().TrimEnd('/')}/browse/{key}"));
+    }
+
+    private static void AddComment(JsonElement cm, string myAccountId, HashSet<string> seen, List<SourceComment> comments)
+    {
+        if (cm.TryGetProperty("id", out var cid) && cid.GetString() is { } idText && !seen.Add(idText)) return;
+        var author = cm.TryGetProperty("author", out var a) ? a : default;
+        var accountId = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("accountId", out var id)
+            ? id.GetString() : null;
+        var name = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("displayName", out var dn)
+            ? dn.GetString() : null;
+        comments.Add(new SourceComment(
+            name ?? accountId ?? "unknown",
+            accountId is not null && accountId == myAccountId,
+            ParseJiraDate(cm.GetProperty("created").GetString()!),
+            cm.TryGetProperty("body", out var b) ? Adf.ToPlainText(b) : ""));
     }
 
     // Jira emits offsets like +0000 (no colon); normalise to +00:00 before parsing.

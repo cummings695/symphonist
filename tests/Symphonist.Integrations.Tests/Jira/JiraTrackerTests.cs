@@ -56,6 +56,63 @@ public class JiraTrackerTests
         Assert.Equal(new DateTimeOffset(2026, 3, 2, 10, 15, 30, 123, TimeSpan.Zero), first.Comments[1].Created);
     }
 
+    private static string CommentJson(string id, string text, string created) =>
+        "{\"id\":\"" + id + "\",\"author\":{\"accountId\":\"u1\",\"displayName\":\"Pat\"},\"created\":\"" + created
+        + "\",\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + text + "\"}]}]}}";
+
+    private static string SearchJson(int total, params string[] comments) =>
+        "{\"issues\":[{\"key\":\"PROJ-9\",\"fields\":{\"summary\":\"s\",\"status\":{\"name\":\"Planned\"},\"comment\":{\"total\":"
+        + total + ",\"comments\":[" + string.Join(",", comments) + "]}}}]}";
+
+    private const string C1 = "2026-03-01T10:00:00.000+0000";
+    private const string C2 = "2026-03-02T10:00:00.000+0000";
+    private const string C3 = "2026-03-03T10:00:00.000+0000";
+
+    [Fact]
+    public async Task Fetches_remaining_comments_when_truncated()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/myself", HttpStatusCode.OK, Fixture("jira-myself.json"))
+            .On(HttpMethod.Post, "/rest/api/3/search/jql", HttpStatusCode.OK, SearchJson(3, CommentJson("2", "second", C2)))
+            .On(HttpMethod.Get, "/rest/api/3/issue/PROJ-9/comment?startAt=0", HttpStatusCode.OK,
+                "{\"startAt\":0,\"maxResults\":100,\"total\":3,\"comments\":["
+                + CommentJson("3", "newest", C3) + "," + CommentJson("1", "first", C1) + "," + CommentJson("2", "second", C2) + "]}");
+        var (tracker, _) = Create(stub);
+
+        var ticket = Assert.Single(await tracker.QueryAsync(CancellationToken.None));
+
+        Assert.Equal(["first", "second", "newest"], ticket.Comments.Select(x => x.Body));
+    }
+
+    [Fact]
+    public async Task Does_not_fetch_comments_when_complete()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/myself", HttpStatusCode.OK, Fixture("jira-myself.json"))
+            .On(HttpMethod.Post, "/rest/api/3/search/jql", HttpStatusCode.OK,
+                SearchJson(2, CommentJson("1", "first", C1), CommentJson("2", "second", C2)));
+        var (tracker, _) = Create(stub);
+
+        var ticket = Assert.Single(await tracker.QueryAsync(CancellationToken.None));
+
+        Assert.Equal(2, ticket.Comments.Count);
+        Assert.DoesNotContain(stub.Requests, r => r.PathAndQuery.Contains("/comment"));
+    }
+
+    [Fact]
+    public async Task Comment_page_failure_throws()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/myself", HttpStatusCode.OK, Fixture("jira-myself.json"))
+            .On(HttpMethod.Post, "/rest/api/3/search/jql", HttpStatusCode.OK, SearchJson(3, CommentJson("2", "second", C2)))
+            .On(HttpMethod.Get, "/rest/api/3/issue/PROJ-9/comment", HttpStatusCode.InternalServerError, "{}");
+        var (tracker, _) = Create(stub);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => tracker.QueryAsync(CancellationToken.None));
+
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+    }
+
     [Fact]
     public async Task Query_throws_on_http_error()
     {
