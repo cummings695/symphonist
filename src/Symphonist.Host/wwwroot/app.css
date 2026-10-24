@@ -27,7 +27,6 @@
     --caution-tint: #fff7d6;
     --caution-border: #e3c56a;
     --caution-fg: #5a4600;
-    --caution-mark: #b8932a;
     --track: #e9edf1;
     --backdrop: rgb(20 30 50 / 0.35);
 
@@ -104,7 +103,6 @@
         --caution-tint: #2a2614;
         --caution-border: #6d5d22;
         --caution-fg: #e8d79a;
-        --caution-mark: #d9bf62;
         --track: #2a313a;
         --backdrop: rgb(0 0 0 / 0.55);
 
@@ -171,7 +169,6 @@
     --caution-tint: #2a2614;
     --caution-border: #6d5d22;
     --caution-fg: #e8d79a;
-    --caution-mark: #d9bf62;
     --track: #2a313a;
     --backdrop: rgb(0 0 0 / 0.55);
 

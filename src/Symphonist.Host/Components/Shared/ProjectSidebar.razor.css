@@ -75,13 +75,13 @@
     font-weight: 400;
 }
 
-/* A small caution triangle; the words are in the visually-hidden text and the title. */
+/* A small neutral caution triangle (no ochre, no red); the words are in the visually-hidden text and the title. */
 .project-problem {
     flex: none;
     width: 0;
     height: 0;
     border-right: 0.32rem solid transparent;
-    border-bottom: 0.55rem solid var(--caution-mark);
+    border-bottom: 0.55rem solid var(--sidebar-muted);
     border-left: 0.32rem solid transparent;
 }
 
