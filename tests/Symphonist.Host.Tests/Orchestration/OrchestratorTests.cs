@@ -312,6 +312,22 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Null(t.TrackerRetryStatus);
     }
 
+    [Fact] public async Task Stage_change_without_a_move_cancels_the_retry()
+    {
+        // The move into plan failed, so the card is still in Backlog with a retry to Planned pending.
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Backlog", t => t.TrackerRetryStatus = "Planned");
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.SendBackAsync("orders", "ORD-1", "rethink", "triage", CancellationToken.None); // triage sets no status
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal("triage", t.StageId);
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Empty(tracker.Transitions);
+    }
+
     [Fact] public async Task No_transition_is_not_retried()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");

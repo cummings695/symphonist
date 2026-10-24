@@ -163,12 +163,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             var t = await store.FindAsync(projectId, key, ct)
                     ?? throw new KeyNotFoundException($"Ticket '{key}' not found in project '{projectId}'");
+            var fromStageId = t.StageId;
             outcome = apply(p, t, time.GetUtcNow());
             if (outcome.Changed)
             {
                 await store.SaveAsync(t, ct);
                 // Resolved inside ApplyAsync: a missing secret must not undo (or hide) a command that took effect.
-                await ApplyAsync(() => IntegrationsFor(p), t, outcome, ct);
+                await ApplyAsync(() => IntegrationsFor(p), t, fromStageId, outcome, ct);
             }
         }
         finally
@@ -264,16 +265,17 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 continue;
             }
 
+            var fromStageId = t.StageId;
             var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t), now);
             await store.SaveAsync(t, ct); // LastSourceStatus changes even when the outcome doesn't
-            await ApplyAsync(io, t, outcome, ct);
+            await ApplyAsync(io, t, fromStageId, outcome, ct);
         }
 
         foreach (var t in known.Values.Where(t => IsActive(t) && !sources.ContainsKey(t.Key)))
         {
             var outcome = PipelineEngine.Block(t, LeftQuery, now);
             await store.SaveAsync(t, ct);
-            await ApplyAsync(io, t, outcome, ct);
+            await ApplyAsync(io, t, t.StageId, outcome, ct); // blocking keeps the stage
         }
     }
 
@@ -326,10 +328,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var requests = comments.Select(c => c.Request!).Where(r => r.Length > 0).ToList();
         var feedback = requests.Count > 0 ? string.Join("\n\n", requests) : "(no details given)";
         await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct); // the cause before its effects
-        var outcome = PipelineEngine.SendBack(p, t, feedback, t.StageId, now);
+        var stageId = t.StageId;
+        var outcome = PipelineEngine.SendBack(p, t, feedback, stageId, now);
         t.ClaudeCommentsHandledAt = comments[^1].Created;
         await store.SaveAsync(t, ct);
-        await ApplyAsync(io, t, outcome, ct);
+        await ApplyAsync(io, t, stageId, outcome, ct);
         return true;
     }
 
@@ -357,6 +360,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
             case StageStatus.Pending or StageStatus.Running when !agentStage:
             {
+                var fromStageId = t.StageId;
                 var result = await executor.ExecuteAsync(p, io, t, source, ct);
                 var now = time.GetUtcNow();
                 var outcome = result.Status switch
@@ -372,12 +376,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 }
                 await store.SaveAsync(t, ct); // also persists artifacts the executor recorded (e.g. release PR id)
                 if (result.Event is not null) await AddEventOnceAsync(t, result.Event, ct);
-                if (outcome is not null) await ApplyAsync(io, t, outcome, ct);
+                if (outcome is not null) await ApplyAsync(io, t, fromStageId, outcome, ct);
                 return;
             }
 
             case StageStatus.Approved:
             {
+                var fromStageId = t.StageId;
                 var result = await executor.PostApprovalAsync(p, io, t, ct);
                 var now = time.GetUtcNow();
                 TransitionOutcome? outcome = null;
@@ -393,7 +398,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                         break;
                 }
                 await store.SaveAsync(t, ct); // persists the merge commit
-                if (outcome is not null) await ApplyAsync(io, t, outcome, ct);
+                if (outcome is not null) await ApplyAsync(io, t, fromStageId, outcome, ct);
                 else await AddEventOnceAsync(t, result.Event ?? $"{t.StageId} waiting", ct);
                 return;
             }
@@ -458,35 +463,40 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
 
         var now = time.GetUtcNow();
+        var fromStageId = t.StageId;
         // The newest query result, not the run's start snapshot: a deferred send-back's comment came during the run.
         var source = latestSources.GetValueOrDefault(p.Id)?.GetValueOrDefault(t.Key);
         var outcome = result.Status == ExecutionStatus.Completed
             ? PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t))
             : PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now);
         await store.SaveAsync(t, ct);
-        await ApplyAsync(io, t, outcome, ct);
+        await ApplyAsync(io, t, fromStageId, outcome, ct);
     }
 
-    private Task ApplyAsync(ProjectIntegrations io, Ticket t, TransitionOutcome outcome, CancellationToken ct) =>
-        ApplyAsync(() => io, t, outcome, ct);
+    private Task ApplyAsync(ProjectIntegrations io, Ticket t, string fromStageId, TransitionOutcome outcome,
+        CancellationToken ct) =>
+        ApplyAsync(() => io, t, fromStageId, outcome, ct);
 
     /// <summary>
     /// Records the outcome and mirrors its status to the tracker. Integrations that cannot be created (missing secret)
     /// and a missing or failing transition never throw; they are recorded as events, and a skipped or failed move is
-    /// kept in <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry.
+    /// kept in <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry. A new move, or leaving
+    /// <paramref name="fromStageId"/> (the stage before the outcome), cancels the move still waiting to be retried.
     /// </summary>
-    private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, TransitionOutcome outcome, CancellationToken ct)
+    private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, string fromStageId, TransitionOutcome outcome,
+        CancellationToken ct)
     {
         if (!outcome.Changed) return;
         await AddEventAsync(t, outcome.Message, ct);
 
-        if (outcome.SourceStatusToSet is not { } target) return;
-        retryFailureRecorded.Remove(t.Id); // a new move: its own failure is recorded
-        if (t.TrackerRetryStatus is not null)
+        var target = outcome.SourceStatusToSet;
+        if (t.TrackerRetryStatus is not null && (target is not null || t.StageId != fromStageId))
         {
-            t.TrackerRetryStatus = null; // this move replaces the one still waiting to be retried
+            t.TrackerRetryStatus = null; // the old target belongs to a stage the ticket has left, or is replaced
             await store.SaveAsync(t, ct);
         }
+        if (target is null) return;
+        retryFailureRecorded.Remove(t.Id); // a new move: its own failure is recorded
         // Skip when the card is already there (e.g. the developer's move is what approved the stage).
         if (Same(target, t.LastSourceStatus)) return;
         ITracker tracker;
