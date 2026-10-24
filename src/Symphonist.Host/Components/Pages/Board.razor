@@ -90,7 +90,7 @@ else
                         <div class="column-cards" id="cards-@column.Id">
                             @foreach (var card in column.Cards)
                             {
-                                <TicketCard @key="(card.Project, card.Key)" Card="card" Now="now" From="@model.ProjectFilter"
+                                <TicketCard @key="(card.Project, card.Key)" Card="card" Now="now"
                                             ProjectName="@(model.ProjectFilter is null ? ProjectName(card.Project) : null)"
                                             Approving="approving.Contains((card.Project, card.Key))"
                                             OnApprove="() => ApproveAsync(card)" />

@@ -28,6 +28,8 @@
     --caution-border: #e3c56a;
     --caution-fg: #5a4600;
     --track: #e9edf1;
+    --card-shadow: 0 1px 2px rgb(20 30 50 / 0.05);
+    --card-border: transparent;
     --backdrop: rgb(20 30 50 / 0.35);
 
     /* The title bar */
@@ -104,6 +106,8 @@
         --caution-border: #6d5d22;
         --caution-fg: #e8d79a;
         --track: #2a313a;
+        --card-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+        --card-border: #262c34;
         --backdrop: rgb(0 0 0 / 0.55);
 
         --topbar-bg: #0b0f14;
@@ -170,6 +174,8 @@
     --caution-border: #6d5d22;
     --caution-fg: #e8d79a;
     --track: #2a313a;
+    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+    --card-border: #262c34;
     --backdrop: rgb(0 0 0 / 0.55);
 
     --topbar-bg: #0b0f14;

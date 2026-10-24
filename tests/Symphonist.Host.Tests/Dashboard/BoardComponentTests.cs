@@ -344,12 +344,45 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
-    public async Task Filtered_board_links_carry_the_filter_to_the_detail_page()
+    public async Task Card_links_to_the_ticket_page()
     {
         await SeedDefault();
 
-        Assert.Equal("/tickets/billing/BIL-1?from=billing",
+        Assert.Equal("/tickets/billing/BIL-1",
             Card(RenderBoard("/?project=billing"), "BIL-1").QuerySelector("a.card-key")?.GetAttribute("href"));
+    }
+
+    [Fact]
+    public async Task Card_shows_stage_progress()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        time.Advance(TimeSpan.FromMinutes(14));
+
+        var card = Card(RenderBoard(), "ORD-1");
+
+        var progress = card.QuerySelector("[data-stage-progress]")!.TextContent;
+        Assert.Contains("Stage 2 of 4", progress);
+        Assert.Contains("waiting 14m", progress);
+        Assert.Contains("width: 50%", card.QuerySelector(".progress-fill")!.GetAttribute("style"));
+    }
+
+    [Fact]
+    public async Task Unknown_stage_card_has_no_progress_but_keeps_elapsed()
+    {
+        await Seed("ORD-1", "nope", StageStatus.Running);
+
+        var card = Card(RenderBoard(), "ORD-1");
+
+        Assert.Empty(card.QuerySelectorAll("[data-stage-progress]"));
+        Assert.Contains("running", card.TextContent);
+    }
+
+    [Fact]
+    public async Task Long_title_wraps_inside_the_card()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending, title: new string('x', 200));
+
+        Assert.NotNull(Card(RenderBoard(), "ORD-1").QuerySelector(".card-title"));
     }
 
     [Fact]

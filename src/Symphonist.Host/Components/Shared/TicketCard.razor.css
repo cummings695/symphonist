@@ -2,24 +2,25 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
-    padding: 0.5rem 0.6rem 0.55rem;
+    gap: 0.35rem;
+    padding: 0.6rem 0.7rem 0.65rem;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--card-shadow);
 }
 
 /* The board's one loud signal: a thick ochre rail and a warm tint for cards waiting on the developer. */
 .card-awaitingapproval {
     background: var(--waiting-tint);
     border-color: var(--waiting-rail);
-    border-left-width: 4px;
-    padding-left: calc(0.6rem - 3px);
+    box-shadow: inset 4px 0 0 var(--waiting-rail), var(--card-shadow);
 }
 
 /* With the reviewer, not yet with the developer: quiet, dashed, no highlight. */
 .card-reviewing {
     border-style: dashed;
+    border-color: var(--border);
 }
 
 .card-reviewing .status-label {
@@ -28,8 +29,8 @@
 
 .card-blocked {
     background: var(--danger-tint);
-    border-left: 4px solid var(--danger);
-    padding-left: calc(0.6rem - 3px);
+    border-color: transparent;
+    box-shadow: inset 4px 0 0 var(--danger), var(--card-shadow);
 }
 
 .card-done {
@@ -117,14 +118,50 @@
     font-size: 0.8rem;
 }
 
+.card-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.progress-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.progress-track {
+    height: 5px;
+    border-radius: 3px;
+    background: var(--track);
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--stage, var(--muted));
+}
+
 .card-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 0.1rem 0.7rem;
-    margin: 0;
+    margin: 0.1rem 0 0;
+    padding-top: 0.4rem;
+    border-top: 1px solid var(--border);
     color: var(--muted);
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     font-variant-numeric: tabular-nums;
+}
+
+.card-pr {
+    margin-left: auto;
+    color: var(--accent);
+    font-weight: 600;
 }
 
 .card-reason {
