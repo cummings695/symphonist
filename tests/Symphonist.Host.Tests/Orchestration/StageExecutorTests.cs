@@ -550,6 +550,38 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Null(t.MergeCommit);
     }
 
+    [Fact] public async Task Before_merge_is_asked_only_when_a_merge_would_be_requested()
+    {
+        var asked = 0;
+        Task<string?> Hold(CancellationToken _) { asked++; return Task.FromResult<string?>("main moved"); }
+        var t = At("implement");
+        t.PullRequestId = 3;
+        scm.PullRequests[3] = FakeSourceControl.Pr(3);
+
+        var held = await executor.PostApprovalAsync(project, io, t, CancellationToken.None, Hold);
+        Assert.Equal((ExecutionStatus.InProgress, "main moved", 1), (held.Status, held.Event, asked));
+        Assert.Empty(scm.MergeCalls);
+
+        scm.PullRequests[3] = FakeSourceControl.Pr(3, PullRequestState.Merged, "byhand");
+        var merged = await executor.PostApprovalAsync(project, io, t, CancellationToken.None, Hold);
+        Assert.Equal((ExecutionStatus.Completed, 1), (merged.Status, asked)); // not asked for a merged PR
+    }
+
+    [Fact] public async Task Accepted_merge_reports_merge_started()
+    {
+        var t = At("implement");
+        t.PullRequestId = 3;
+        scm.PullRequests[3] = FakeSourceControl.Pr(3);
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "merge in progress", Accepted: true));
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "Requires 2 approvals"));
+
+        var accepted = await executor.PostApprovalAsync(project, io, t, CancellationToken.None);
+        var refused = await executor.PostApprovalAsync(project, io, t, CancellationToken.None);
+
+        Assert.Equal((ExecutionStatus.InProgress, true), (accepted.Status, accepted.MergeStarted));
+        Assert.Equal((ExecutionStatus.InProgress, false), (refused.Status, refused.MergeStarted));
+    }
+
     [Fact] public async Task Merge_already_done_by_hand_completes()
     {
         var t = At("implement");

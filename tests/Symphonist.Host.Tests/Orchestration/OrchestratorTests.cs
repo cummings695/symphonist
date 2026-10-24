@@ -1454,13 +1454,17 @@ public sealed class OrchestratorTests : IDisposable
         }
         if (currentHead == "pushed-later")
         {
-            Assert.Contains("reviewed head000 but symphonist/ORD-1 is now pushed-later", reasons);
-            Assert.Contains("auto-approval skipped: reviewed head000 but symphonist/ORD-1 is now pushed-later; waiting on you",
+            Assert.Equal("reviewed head000 but symphonist/ORD-1 is now pushed-later", reasons[0]);
+            Assert.Equal(["reviewing implement", "implement needs you: high risk — reviewed head000 but symphonist/ORD-1 is now pushed-later"],
                 store.EventMessages("ORD-1"));
         }
         if (currentHead is null)
-            Assert.Contains(store.EventMessages("ORD-1"), m =>
-                m.StartsWith("auto-approval skipped: could not confirm the reviewed commit of symphonist/ORD-1", StringComparison.Ordinal));
+        {
+            Assert.StartsWith("could not confirm the reviewed commit of symphonist/ORD-1", reasons[0]);
+            Assert.Equal(2, store.EventMessages("ORD-1").Count);
+            Assert.StartsWith("implement needs you: high risk — could not confirm the reviewed commit of symphonist/ORD-1",
+                store.EventMessages("ORD-1")[^1]);
+        }
     }
 
     [Theory]
@@ -1521,6 +1525,72 @@ public sealed class OrchestratorTests : IDisposable
 
         await TickIdle(o); // the new round is reviewed against the new heads
         Assert.Equal(2, ReviewRequests);
+    }
+
+    [Theory]
+    [InlineData("release")]
+    [InlineData("implement")]
+    public async Task Auto_approved_merge_already_done_on_the_host_completes_without_a_head_check(string stageId)
+    {
+        await AutoApproveAndMoveHeads(stageId);
+        var pr = stageId == "release" ? store.Single("ORD-1").ReleasePullRequestId!.Value : 7;
+        scm.PullRequests[pr] = FakeSourceControl.Pr(pr, PullRequestState.Merged, "merged-by-hand"); // and the heads moved
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(stageId == "release" ? "deploy" : "build", t.StageId);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("merge held", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Accepted_merge_in_progress_is_not_held_when_it_lands()
+    {
+        await AutoApproveAndMoveHeads("release", move: false);
+        var pr = store.Single("ORD-1").ReleasePullRequestId!.Value;
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "merge in progress", Accepted: true));
+        var o = Create();
+
+        await TickIdle(o); // the merge is requested and accepted (202)
+        Assert.Equal((StageStatus.Approved, null), (store.Single("ORD-1").Status, store.Single("ORD-1").ApprovedHead));
+        Assert.Contains("waiting to merge: merge in progress", store.EventMessages("ORD-1"));
+
+        scm.BranchHeads["production"] = "prod-merged"; // the merge lands, but the PR still reads open for a moment
+        await TickIdle(o);
+
+        Assert.Equal([pr, pr], scm.MergeCalls);
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("merge held", StringComparison.Ordinal));
+    }
+
+    /// <summary>An auto-approved round at <paramref name="stageId"/> (Approved, heads pinned); then the heads move.</summary>
+    private async Task AutoApproveAndMoveHeads(string stageId, bool move = true)
+    {
+        Configure("active", (stageId, "auto"));
+        AnswerReviews(Low);
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.BranchHeads["main"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        builds.Statuses["merged-by-hand"] = BuildStatus.Succeeded;
+        var pr = await scm.OpenPullRequestAsync("main", "production", "Release ORD-1", "", CancellationToken.None);
+        scm.Opened.Clear();
+        await SeedWaiting("ORD-1", stageId, "In Review", t =>
+        {
+            t.PullRequestId = 7;
+            t.MergeCommit = "build-1";
+            if (stageId == "release") t.ReleasePullRequestId = pr.Id;
+        });
+        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        var o = Create();
+        await TickIdle(o);
+        var approved = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Approved, true), (approved.Status, approved.ApprovedHead is not null));
+        if (!move) return;
+        scm.BranchHeads["symphonist/ORD-1"] = "head-merged";
+        scm.BranchHeads["main"] = "main-merged";
+        scm.BranchHeads["production"] = "prod-merged";
     }
 
     [Fact] public async Task Human_approved_merge_checks_no_heads()

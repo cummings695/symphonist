@@ -57,7 +57,7 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
             new { merge_strategy = config.MergeStrategy }, ct);
 
         if (status == HttpStatusCode.Accepted)
-            return new MergeResult(false, null, "merge in progress");
+            return new MergeResult(false, null, "merge in progress", Accepted: true);
 
         if ((int)status is >= 400 and < 500)
             return new MergeResult(false, null, ErrorMessage(text) ?? BitbucketApi.Excerpt(text));

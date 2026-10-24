@@ -398,16 +398,25 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             case StageStatus.Approved:
             {
                 var fromStageId = t.StageId;
-                if (await MergeHeldAsync(p, io, t, ct) is { } reason)
+                // Checked only when a merge is about to be requested: a pull request already merged (by the host, by
+                // hand, or before a crash) has moved the branches itself and completes normally.
+                string? holdReason = null;
+                var result = await executor.PostApprovalAsync(p, io, t, ct,
+                    async c => holdReason = await MergeHeldAsync(p, io, t, c));
+                var now = time.GetUtcNow();
+                if (holdReason is not null)
                 {
                     // The reviewed change is not what would be merged now: wait again, as a new round.
-                    var held = PipelineEngine.MergeHeld(p, t, reason, time.GetUtcNow());
+                    var held = PipelineEngine.MergeHeld(p, t, holdReason, now);
                     await store.SaveAsync(t, ct);
                     await ApplyAsync(io, t, fromStageId, held, ct);
                     return;
                 }
-                var result = await executor.PostApprovalAsync(p, io, t, ct);
-                var now = time.GetUtcNow();
+                if (result.MergeStarted)
+                {
+                    // The host is merging the commits just checked; it may land and move them before the next tick.
+                    t.ApprovedBranch = t.ApprovedHead = t.ApprovedBaseHead = null;
+                }
                 TransitionOutcome? outcome = null;
                 switch (result.Status)
                 {
@@ -550,16 +559,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var verdict = result.Verdict;
         var waitingSince = run.WaitingSince!.Value; // the round key as loaded from the store, never a fresh clock read
         var stage = p.Stage(run.StageId);
-        string? doubt = null;
         if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)
             && await UnconfirmedHeadAsync(p, io, t, stage, result, ct) is { } unconfirmed)
         {
-            doubt = unconfirmed;
-            verdict = verdict.WithForcedHigh(unconfirmed); // a low verdict on a commit that is no longer the head
+            // A low verdict on a commit that is no longer the head. First, so the "needs you" event names it.
+            verdict = verdict with { Risk = RiskLevel.High, Reasons = [unconfirmed, .. verdict.Reasons] };
         }
         await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
             p.Review.Mode, stage.Gate, verdict), ct);
-        if (doubt is not null) await AddEventAsync(t, $"auto-approval skipped: {doubt}; waiting on you", ct);
 
         var allowAutoApprove = true;
         if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)

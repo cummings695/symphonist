@@ -204,6 +204,7 @@ public class BitbucketTests
 
         Assert.False(result.Merged);
         Assert.Equal("merge in progress", result.Error);
+        Assert.True(result.Accepted);
     }
 
     [Fact]

@@ -4,7 +4,8 @@ public enum PullRequestState { Open, Merged, Declined }
 
 public sealed record PullRequestInfo(long Id, Uri WebUrl, PullRequestState State, string? MergeCommitHash);
 
-public sealed record MergeResult(bool Merged, string? MergeCommitHash, string? Error);
+/// <param name="Accepted">The host accepted the merge and is still performing it (not a refusal).</param>
+public sealed record MergeResult(bool Merged, string? MergeCommitHash, string? Error, bool Accepted = false);
 
 /// <summary>The host refused to open a pull request because the source branch has nothing the destination lacks.</summary>
 public sealed class NoChangesToPullException(string message) : Exception(message);
