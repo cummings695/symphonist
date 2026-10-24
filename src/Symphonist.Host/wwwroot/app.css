@@ -1,49 +1,219 @@
 /*
- * Tokens. Calm cool neutrals; the one loud colour is ochre, reserved for "waiting on you".
+ * Tokens. Calm cool neutrals under a slate title bar; the quiet accent is teal (links, keys, the active sidebar row,
+ * the title-bar edge). The one loud colour is ochre, reserved for "waiting on you"; red is for blocked only.
  * Status is always also spelled out in text — colour only reinforces it.
+ * Every colour has a dark value, in both dark blocks below: the OS setting (unless the page is set to light) and the
+ * page set to dark.
  */
 :root {
     color-scheme: light dark;
-    --bg: #eef1f4;
+    --bg: #f6f7f9;
     --fg: #1d232b;
     --muted: #5c6773;
     --surface: #ffffff;
-    --lane: #e4e8ed;
-    --border: #d3d9e0;
-    --accent: #2b5cad;
-    --focus: #2b5cad;
+    --lane: #eef1f5;
+    --border: #dde2e8;
+    --accent: #0f766e;
+    --focus: #0f766e;
     --waiting: #8a4b00;
-    --waiting-rail: #d98a1c;
-    --waiting-tint: #fff3df;
+    --waiting-rail: #e8a33d;
+    --waiting-on-rail: #2a1800;
+    --waiting-tint: #fff6e6;
     --danger: #a8202a;
     --danger-tint: #fdebec;
     --running: #2463c9;
+    --ok: #1d6b3d;
+    --ok-tint: #e3f4ea;
     --caution-tint: #fff7d6;
     --caution-border: #e3c56a;
+    --caution-fg: #5a4600;
+    --caution-mark: #b8932a;
+    --track: #e9edf1;
+    --backdrop: rgb(20 30 50 / 0.35);
+
+    /* The title bar */
+    --topbar-bg: #1e2733;
+    --topbar-fg: #e8edf3;
+    --topbar-edge: #14b8a6;
+    --topbar-shadow: 0 2px 10px rgb(20 30 50 / 0.18);
+    --topbar-chip-bg: rgb(255 255 255 / 0.1);
+    --topbar-button-bg: #ffffff;
+    --topbar-button-fg: #1e2733;
+    --topbar-blocked: #f2868c;
+    --logo-bg: #14b8a6;
+    --logo-fg: #06302c;
+
+    /* The project sidebar */
+    --sidebar-bg: #ffffff;
+    --sidebar-fg: #1d232b;
+    --sidebar-muted: #6b7682;
+    --sidebar-edge: #e6e9ee;
+    --sidebar-count-bg: #f0f2f5;
+    --sidebar-hover-bg: #f3f5f7;
+    --sidebar-active-bg: #e6f4f2;
+    --sidebar-active-fg: #0b5e58;
+
+    /* Stage lanes by kind: triage; plan; implement; build, uat and release; deploy and done */
+    --stage-triage: #7c8aa0;
+    --lane-triage-tint: #eef1f5;
+    --stage-plan: #8b5cf6;
+    --lane-plan-tint: #f2eefc;
+    --stage-implement: #2f80d1;
+    --lane-implement-tint: #eaf2fb;
+    --stage-release: #0f9488;
+    --lane-release-tint: #e7f5f3;
+    --stage-done: #5aa469;
+    --lane-done-tint: #ecf5ee;
+
+    /* Project squares (ProjectSidebar.ColourOf): no ochre, no red */
+    --project-0: #2f80d1;
+    --project-1: #8b5cf6;
+    --project-2: #0f9488;
+    --project-3: #5aa469;
+    --project-4: #6366f1;
+    --project-5: #0ea5e9;
+    --project-6: #7c8aa0;
+    --project-7: #c026d3;
+
     --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-    --radius: 6px;
+    --radius: 8px;
+    --radius-panel: 12px;
+    --radius-lane: 14px;
 }
 
 @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
         --bg: #12161b;
         --fg: #e3e7ec;
         --muted: #97a2ae;
         --surface: #1b2027;
         --lane: #171b21;
         --border: #2d353f;
-        --accent: #7aa7f0;
-        --focus: #8fb6f5;
+        --accent: #4fd1c0;
+        --focus: #4fd1c0;
         --waiting: #f2c27a;
         --waiting-rail: #e8a33d;
+        --waiting-on-rail: #2a1800;
         --waiting-tint: #2c2315;
         --danger: #f2868c;
         --danger-tint: #301a1d;
         --running: #74a7ff;
+        --ok: #7fd6a0;
+        --ok-tint: #163322;
         --caution-tint: #2a2614;
         --caution-border: #6d5d22;
+        --caution-fg: #e8d79a;
+        --caution-mark: #d9bf62;
+        --track: #2a313a;
+        --backdrop: rgb(0 0 0 / 0.55);
+
+        --topbar-bg: #0b0f14;
+        --topbar-fg: #e3e7ec;
+        --topbar-edge: #14b8a6;
+        --topbar-shadow: 0 2px 10px rgb(0 0 0 / 0.4);
+        --topbar-chip-bg: rgb(255 255 255 / 0.08);
+        --topbar-button-bg: #e3e7ec;
+        --topbar-button-fg: #0b0f14;
+        --topbar-blocked: #f2868c;
+        --logo-bg: #14b8a6;
+        --logo-fg: #06302c;
+
+        --sidebar-bg: #161a20;
+        --sidebar-fg: #d6dbe1;
+        --sidebar-muted: #8b96a2;
+        --sidebar-edge: #262c34;
+        --sidebar-count-bg: #232931;
+        --sidebar-hover-bg: #1d232b;
+        --sidebar-active-bg: #183532;
+        --sidebar-active-fg: #7fe3d5;
+
+        --stage-triage: #8d9ab0;
+        --lane-triage-tint: #191e25;
+        --stage-plan: #a78bfa;
+        --lane-plan-tint: #1d1a2a;
+        --stage-implement: #5a9fe6;
+        --lane-implement-tint: #16202b;
+        --stage-release: #2cb5a7;
+        --lane-release-tint: #142523;
+        --stage-done: #6dbb7c;
+        --lane-done-tint: #172219;
+
+        --project-0: #5a9fe6;
+        --project-1: #a78bfa;
+        --project-2: #2cb5a7;
+        --project-3: #6dbb7c;
+        --project-4: #818cf8;
+        --project-5: #38bdf8;
+        --project-6: #8d9ab0;
+        --project-7: #d863e6;
     }
+}
+
+:root[data-theme="dark"] {
+    --bg: #12161b;
+    --fg: #e3e7ec;
+    --muted: #97a2ae;
+    --surface: #1b2027;
+    --lane: #171b21;
+    --border: #2d353f;
+    --accent: #4fd1c0;
+    --focus: #4fd1c0;
+    --waiting: #f2c27a;
+    --waiting-rail: #e8a33d;
+    --waiting-on-rail: #2a1800;
+    --waiting-tint: #2c2315;
+    --danger: #f2868c;
+    --danger-tint: #301a1d;
+    --running: #74a7ff;
+    --ok: #7fd6a0;
+    --ok-tint: #163322;
+    --caution-tint: #2a2614;
+    --caution-border: #6d5d22;
+    --caution-fg: #e8d79a;
+    --caution-mark: #d9bf62;
+    --track: #2a313a;
+    --backdrop: rgb(0 0 0 / 0.55);
+
+    --topbar-bg: #0b0f14;
+    --topbar-fg: #e3e7ec;
+    --topbar-edge: #14b8a6;
+    --topbar-shadow: 0 2px 10px rgb(0 0 0 / 0.4);
+    --topbar-chip-bg: rgb(255 255 255 / 0.08);
+    --topbar-button-bg: #e3e7ec;
+    --topbar-button-fg: #0b0f14;
+    --topbar-blocked: #f2868c;
+    --logo-bg: #14b8a6;
+    --logo-fg: #06302c;
+
+    --sidebar-bg: #161a20;
+    --sidebar-fg: #d6dbe1;
+    --sidebar-muted: #8b96a2;
+    --sidebar-edge: #262c34;
+    --sidebar-count-bg: #232931;
+    --sidebar-hover-bg: #1d232b;
+    --sidebar-active-bg: #183532;
+    --sidebar-active-fg: #7fe3d5;
+
+    --stage-triage: #8d9ab0;
+    --lane-triage-tint: #191e25;
+    --stage-plan: #a78bfa;
+    --lane-plan-tint: #1d1a2a;
+    --stage-implement: #5a9fe6;
+    --lane-implement-tint: #16202b;
+    --stage-release: #2cb5a7;
+    --lane-release-tint: #142523;
+    --stage-done: #6dbb7c;
+    --lane-done-tint: #172219;
+
+    --project-0: #5a9fe6;
+    --project-1: #a78bfa;
+    --project-2: #2cb5a7;
+    --project-3: #6dbb7c;
+    --project-4: #818cf8;
+    --project-5: #38bdf8;
+    --project-6: #8d9ab0;
+    --project-7: #d863e6;
 }
 
 *, *::before, *::after {
@@ -55,10 +225,6 @@ body {
     background: var(--bg);
     color: var(--fg);
     font: 14px/1.45 var(--font);
-}
-
-main {
-    padding: 1rem 1rem 2rem;
 }
 
 a {

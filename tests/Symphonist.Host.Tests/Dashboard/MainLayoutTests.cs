@@ -1,0 +1,249 @@
+using AngleSharp.Dom;
+using Bunit;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
+using Symphonist.Core;
+using Symphonist.Core.Agents;
+using Symphonist.Core.Integrations;
+using Symphonist.Core.Pipeline;
+using Symphonist.Core.Storage;
+using Symphonist.Host.Components.Layout;
+using Symphonist.Host.Components.Shared;
+using Symphonist.Host.Dashboard;
+using Symphonist.Host.Orchestration;
+using Symphonist.Host.Tests.Fakes;
+
+namespace Symphonist.Host.Tests.Dashboard;
+
+[Collection(SymphonistHomeCollection.Name)]
+public sealed class MainLayoutTests : IDisposable
+{
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-21T12:00:00Z");
+
+    private readonly TestHome home = new();
+    private readonly BunitContext ctx = new();
+    private readonly FakeTicketStore store = new();
+    private readonly FakeTimeProvider time = new(Now);
+    private readonly BoardNotifier notifier;
+    private readonly ProjectRegistry registry;
+    private readonly Orchestrator orchestrator;
+    private readonly DashboardChrome chrome = new();
+    private readonly FakeIntegrationFactory integrations = new(
+        new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
+
+    public MainLayoutTests()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
+        registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
+        notifier = new BoardNotifier(time);
+        orchestrator = new Orchestrator(registry, store, integrations,
+            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
+
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose; // Task 4 sets up the theme module strictly
+        ctx.Services.AddSingleton<TimeProvider>(time);
+        ctx.Services.AddSingleton(notifier);
+        ctx.Services.AddSingleton(registry);
+        ctx.Services.AddSingleton<ITicketStore>(store);
+        ctx.Services.AddSingleton(orchestrator);
+        ctx.Services.AddSingleton<BoardQuery>();
+        ctx.Services.AddScoped(_ => chrome);
+    }
+
+    public void Dispose()
+    {
+        ctx.Dispose();
+        home.Dispose();
+    }
+
+    private async Task Seed(string key, string stage, StageStatus status, string project = "orders")
+    {
+        await store.SaveAsync(new Ticket
+        {
+            Id = Guid.NewGuid(), ProjectId = project, Key = key, Title = $"Title {key}", StageId = stage,
+            Status = status, Attempts = 1, CreatedAt = Now, UpdatedAt = Now, StageStartedAt = Now, WaitingSince = Now,
+        }, default);
+    }
+
+    private IRenderedComponent<MainLayout> RenderLayout()
+    {
+        var cut = ctx.Render<MainLayout>(p => p.Add(l => l.Body, b => b.AddContent(0, "page body")));
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-sidebar-project]")));
+        return cut;
+    }
+
+    private static IElement Row(IRenderedComponent<MainLayout> cut, string id) => cut.Find($"[data-sidebar-project='{id}']");
+
+    private static string StatusLine(IRenderedComponent<MainLayout> cut) => cut.Find("[role=status]").TextContent;
+
+    [Fact]
+    public async Task Title_bar_counts_cover_every_project()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        await Seed("BIL-1", "implement", StageStatus.Running, "billing");
+        await Seed("ORD-2", "implement", StageStatus.Blocked);
+        chrome.SetPage(null, "orders");
+
+        var cut = RenderLayout();
+
+        Assert.Contains("1 waiting on you", cut.Find("[data-count=waiting]").TextContent);
+        Assert.Contains("1 running", cut.Find("[data-count=running]").TextContent);
+        Assert.Contains("1 blocked", cut.Find("[data-count=blocked]").TextContent);
+    }
+
+    [Fact]
+    public void Sidebar_lists_projects_and_marks_the_current_one()
+    {
+        chrome.SetPage("ORD-1", "orders");
+
+        var cut = RenderLayout();
+
+        Assert.Equal(["", "billing", "orders"], cut.FindAll("[data-sidebar-project]").Select(e => e.GetAttribute("data-sidebar-project")));
+        Assert.Equal("page", Row(cut, "orders").GetAttribute("aria-current"));
+        Assert.Equal("/?project=orders", Row(cut, "orders").GetAttribute("href"));
+        Assert.Null(Row(cut, "").GetAttribute("aria-current"));
+        Assert.Equal("/", Row(cut, "").GetAttribute("href"));
+    }
+
+    [Fact]
+    public async Task Sidebar_shows_waiting_else_active_counts()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        await Seed("BIL-1", "implement", StageStatus.Running, "billing");
+        await Seed("BIL-2", "implement", StageStatus.Running, "billing");
+
+        var cut = RenderLayout();
+
+        var orders = Row(cut, "orders").QuerySelector(".project-count")!.TextContent;
+        Assert.Contains("1", orders);
+        Assert.Contains("waiting on you", orders);
+        var billing = Row(cut, "billing").QuerySelector(".project-count")!.TextContent;
+        Assert.Contains("2", billing);
+        Assert.Contains("active", billing);
+        Assert.Contains("waiting on you", Row(cut, "").QuerySelector(".project-count")!.TextContent);
+    }
+
+    [Fact]
+    public async Task Paused_and_problem_projects_are_marked()
+    {
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set; run: symphonist secret set jira-acme");
+        await orchestrator.TickAsync(CancellationToken.None);
+        registry.SetPaused("orders", true);
+
+        var cut = RenderLayout();
+
+        Assert.Contains("Paused", Row(cut, "orders").TextContent);
+        Assert.DoesNotContain("Paused", Row(cut, "billing").TextContent);
+        var billing = Row(cut, "billing");
+        Assert.Contains("has a problem", billing.TextContent);
+        Assert.Contains("secret", billing.QuerySelector(".project-problem")!.GetAttribute("title"));
+    }
+
+    [Fact]
+    public void No_projects_shows_an_empty_sidebar_and_zero_counts()
+    {
+        foreach (var f in Directory.GetFiles(home.Projects)) File.Delete(f);
+        registry.Reload();
+
+        var cut = RenderLayout();
+
+        Assert.Contains("No projects configured", cut.Markup);
+        Assert.Contains("0 waiting on you", cut.Find("[data-count=waiting]").TextContent);
+    }
+
+    [Fact]
+    public void Poll_now_shows_its_message()
+    {
+        var cut = RenderLayout();
+
+        Assert.Contains("status-line-empty", cut.Find("[role=status]").ClassList);
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Poll now").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            Assert.Equal("Poll requested", StatusLine(cut));
+            Assert.DoesNotContain("status-line-empty", cut.Find("[role=status]").ClassList);
+        });
+    }
+
+    [Fact]
+    public void Shell_refresh_failure_is_shown_and_clears()
+    {
+        var cut = RenderLayout();
+        store.FailNextList = true;
+
+        notifier.Notify();
+        time.Advance(BoardNotifier.Window);
+
+        cut.WaitForAssertion(() => Assert.Contains("Could not refresh the projects: database is locked", StatusLine(cut)));
+        Assert.NotEmpty(cut.FindAll("[data-sidebar-project='orders']"));
+        Assert.Contains("page body", cut.Markup);
+
+        notifier.Notify();
+        time.Advance(BoardNotifier.Window);
+        cut.WaitForAssertion(() => Assert.DoesNotContain("Could not refresh", StatusLine(cut)));
+    }
+
+    [Fact]
+    public void Long_project_name_stays_on_one_line()
+    {
+        var name = new string('x', 60);
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders").Replace("name: Project orders", $"name: {name}"));
+        registry.Reload();
+
+        var cut = RenderLayout();
+
+        var element = Row(cut, "orders").QuerySelector(".project-name")!;
+        Assert.Equal(name, element.TextContent.Trim());
+    }
+
+    [Fact]
+    public void Phone_menu_opens_and_closes()
+    {
+        var cut = RenderLayout();
+        var menu = cut.Find("button[aria-controls=sidebar]");
+        Assert.Equal("false", menu.GetAttribute("aria-expanded"));
+        Assert.Equal("Projects", menu.GetAttribute("aria-label") ?? menu.TextContent.Trim());
+
+        menu.Click();
+
+        Assert.Equal("true", cut.Find("button[aria-controls=sidebar]").GetAttribute("aria-expanded"));
+        Assert.Contains("sidebar-open", cut.Find(".app").ClassList);
+
+        cut.Find("button[aria-label='Close projects']").Click();
+
+        Assert.Equal("false", cut.Find("button[aria-controls=sidebar]").GetAttribute("aria-expanded"));
+        Assert.DoesNotContain("sidebar-open", cut.Find(".app").ClassList);
+    }
+
+    [Fact]
+    public void Escape_closes_the_phone_menu()
+    {
+        var cut = RenderLayout();
+        cut.Find("button[aria-controls=sidebar]").Click();
+
+        cut.Find("#sidebar").KeyDown(key: "Escape");
+
+        Assert.DoesNotContain("sidebar-open", cut.Find(".app").ClassList);
+    }
+
+    [Fact]
+    public void Tab_title_formats()
+    {
+        Assert.Equal("Symphonist", MainLayout.TabTitle(0, null));
+        Assert.Equal("(2) Symphonist", MainLayout.TabTitle(2, null));
+        Assert.Equal("ORD-1 · Symphonist", MainLayout.TabTitle(0, "ORD-1"));
+        Assert.Equal("(2) ORD-1 · Symphonist", MainLayout.TabTitle(2, "ORD-1"));
+    }
+
+    [Fact]
+    public void Project_colour_is_stable_and_from_the_palette()
+    {
+        Assert.Equal(ProjectSidebar.ColourOf("orders"), ProjectSidebar.ColourOf("orders"));
+        Assert.StartsWith("var(--project-", ProjectSidebar.ColourOf("billing"));
+    }
+}

@@ -1,10 +1,17 @@
 .status-line {
     min-height: 1.45em;
-    margin: 0 0 0.6rem;
+    margin: 0 0 0.75rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
     color: var(--muted);
+    overflow-wrap: anywhere;
 }
 
 .status-error {
+    border-color: var(--danger);
+    background: var(--danger-tint);
     color: var(--danger);
     font-weight: 600;
 }
@@ -15,4 +22,5 @@
     height: 0;
     margin: 0;
     padding: 0;
+    border: 0;
 }

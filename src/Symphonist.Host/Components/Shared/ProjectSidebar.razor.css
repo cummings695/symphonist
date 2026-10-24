@@ -1,0 +1,109 @@
+.sidebar-label {
+    margin: 0.25rem 0.65rem 0.5rem;
+    color: var(--sidebar-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.project-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.project-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    color: var(--sidebar-fg);
+    font-size: 0.96rem;
+    text-decoration: none;
+}
+
+.project-row:hover {
+    background: var(--sidebar-hover-bg);
+}
+
+.project-row[aria-current="page"] {
+    background: var(--sidebar-active-bg);
+    color: var(--sidebar-active-fg);
+    font-weight: 600;
+}
+
+.project-colour {
+    flex: none;
+    width: 9px;
+    height: 9px;
+    border-radius: 3px;
+}
+
+.project-colour-all {
+    background: var(--sidebar-muted);
+}
+
+/* A long name must never widen the sidebar. */
+.project-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-paused {
+    color: var(--sidebar-muted);
+}
+
+.project-paused .project-colour {
+    opacity: 0.45;
+}
+
+.project-paused-tag {
+    flex: none;
+    padding: 0 0.35rem;
+    border: 1px solid var(--sidebar-edge);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 400;
+}
+
+/* A small caution triangle; the words are in the visually-hidden text and the title. */
+.project-problem {
+    flex: none;
+    width: 0;
+    height: 0;
+    border-right: 0.32rem solid transparent;
+    border-bottom: 0.55rem solid var(--caution-mark);
+    border-left: 0.32rem solid transparent;
+}
+
+.project-count {
+    flex: none;
+    padding: 1px 0.45rem;
+    border-radius: 999px;
+    background: var(--sidebar-count-bg);
+    color: var(--sidebar-muted);
+    font-size: 0.82rem;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.project-count-waiting {
+    background: var(--waiting-rail);
+    color: var(--waiting-on-rail);
+    font-weight: 700;
+}
+
+.sidebar-empty {
+    margin: 0.5rem 0.65rem;
+    color: var(--sidebar-muted);
+    font-size: 0.9rem;
+}

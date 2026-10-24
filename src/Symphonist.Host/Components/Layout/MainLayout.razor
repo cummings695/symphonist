@@ -1,5 +1,142 @@
 @inherits LayoutComponentBase
+@implements IDisposable
+@inject BoardQuery Query
+@inject BoardNotifier Notifier
+@inject Orchestrator Orchestrator
+@inject DashboardChrome Chrome
+@inject NavigationManager Navigation
+@inject ILogger<MainLayout> Log
 
-<main>
-    @Body
-</main>
+<PageTitle>@TabTitle(shell?.Totals.WaitingOnYou ?? 0, Chrome.PageLabel)</PageTitle>
+
+<div class="app @(sidebarOpen ? "sidebar-open" : null)">
+    <header class="topbar">
+        <button type="button" class="menu-button" aria-label="Projects" aria-controls="sidebar"
+                aria-expanded="@(sidebarOpen ? "true" : "false")" @onclick="OpenSidebar" @ref="menuButton">
+            <span class="menu-icon" aria-hidden="true"></span>
+        </button>
+        <a class="brand" href="/">
+            <svg class="logo" viewBox="0 0 26 26" aria-hidden="true" focusable="false">
+                <rect width="26" height="26" rx="7" />
+                <path d="M11 17.5V8.5l7-1.5v9" />
+                <circle cx="9" cy="17.5" r="2" />
+                <circle cx="16" cy="16" r="2" />
+            </svg>
+            Symphonist
+        </a>
+        @{ var totals = shell?.Totals ?? new BoardCounts(0, 0, 0); }
+        <p class="topbar-counts">
+            <span class="chip @(totals.WaitingOnYou > 0 ? "chip-waiting" : null)" data-count="waiting"><span class="chip-dot" aria-hidden="true"></span><b>@totals.WaitingOnYou</b><span class="chip-words"> waiting on you</span></span>
+            <span class="chip" data-count="running"><b>@totals.Running</b><span class="chip-words"> running</span></span>
+            <span class="chip @(totals.Blocked > 0 ? "chip-blocked" : null)" data-count="blocked"><b>@totals.Blocked</b><span class="chip-words"> blocked</span></span>
+        </p>
+        <div class="top-actions">
+            <button type="button" class="top-button" @onclick="PollNow">Poll now</button>
+            @* The light/dark toggle goes here. *@
+        </div>
+    </header>
+
+    @if (sidebarOpen)
+    {
+        <button type="button" class="sidebar-backdrop" aria-label="Close projects" @onclick="CloseSidebarAsync"></button>
+    }
+    <aside class="sidebar" id="sidebar" @onkeydown="SidebarKeyDown">
+        <ProjectSidebar Shell="shell" CurrentProject="@Chrome.CurrentProject" />
+    </aside>
+
+    <main class="content">
+        <StatusLine Message="@Chrome.Message" IsError="@Chrome.IsError" />
+        @Body
+    </main>
+</div>
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private ShellModel? shell;
+    private int loadVersion;
+    private bool sidebarOpen;
+    private ElementReference menuButton;
+
+    /// <summary>The browser tab title: the global waiting count, the page label (e.g. a ticket key), then the app name.</summary>
+    public static string TabTitle(int waiting, string? label) =>
+        (waiting > 0 ? $"({waiting}) " : "") + (string.IsNullOrEmpty(label) ? "" : $"{label} · ") + "Symphonist";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Notifier.Changed += OnBoardChanged;
+        Chrome.Changed += OnChromeChanged;
+        Navigation.LocationChanged += OnLocationChanged;
+        await ReloadAsync();
+    }
+
+    private void OnBoardChanged() => _ = InvokeAsync(async () =>
+    {
+        await ReloadAsync();
+        StateHasChanged();
+    });
+
+    private void OnChromeChanged() => _ = InvokeAsync(StateHasChanged);
+
+    // Picking a project in the phone menu navigates; focus then goes to the new page's heading, not the menu button.
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => _ = InvokeAsync(() =>
+    {
+        if (!sidebarOpen) return;
+        sidebarOpen = false;
+        StateHasChanged();
+    });
+
+    /// <summary>Loads the projects and totals; a failure keeps the last ones and reports the error in the status line.</summary>
+    private async Task ReloadAsync()
+    {
+        var version = ++loadVersion;
+        try
+        {
+            var loaded = await Query.LoadShellAsync(disposed.Token);
+            if (version != loadVersion) return; // a newer load started meanwhile
+            shell = loaded;
+            Chrome.SetError(StatusSource.Shell, null);
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            if (version == loadVersion) Chrome.SetError(StatusSource.Shell, $"Could not refresh the projects: {e.Message}");
+        }
+    }
+
+    private void PollNow()
+    {
+        Orchestrator.RequestTick();
+        Chrome.ShowMessage("Poll requested");
+    }
+
+    private void OpenSidebar() => sidebarOpen = true;
+
+    private async Task CloseSidebarAsync()
+    {
+        sidebarOpen = false;
+        try
+        {
+            await menuButton.FocusAsync();
+        }
+        catch (Exception e)
+        {
+            Log.LogDebug(e, "Returning focus to the projects menu button failed"); // e.g. the circuit is going away
+        }
+    }
+
+    private async Task SidebarKeyDown(KeyboardEventArgs e)
+    {
+        if (sidebarOpen && e.Key == "Escape") await CloseSidebarAsync();
+    }
+
+    public void Dispose()
+    {
+        Notifier.Changed -= OnBoardChanged;
+        Chrome.Changed -= OnChromeChanged;
+        Navigation.LocationChanged -= OnLocationChanged;
+        disposed.Cancel();
+    }
+}
