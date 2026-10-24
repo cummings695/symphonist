@@ -250,6 +250,38 @@ select {
     font-variant-numeric: tabular-nums;
 }
 
+/* The stage toggle reads as the plain heading on a desktop; it only folds at phone width (below). */
+.column-toggle {
+    display: flex;
+    flex: 1;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: default;
+}
+
+.column-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.column-waiting {
+    font-size: 0.8rem;
+}
+
+.column-chevron {
+    display: none;
+}
+
 .column-cards {
     display: flex;
     flex-direction: column;
@@ -303,6 +335,47 @@ select {
 
     .column-empty {
         display: none;
+    }
+
+    /* A non-empty stage folds to its header line with a tap on the header. */
+    .column-toggle {
+        margin: -0.35rem -0.15rem;
+        padding: 0.35rem 0.15rem;
+        border-radius: calc(var(--radius) - 2px);
+        cursor: pointer;
+    }
+
+    .column-chevron {
+        display: inline-block;
+        width: 0.45rem;
+        height: 0.45rem;
+        margin-left: 0.1rem;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: translateY(-0.15rem) rotate(45deg);
+        transition: transform 0.15s ease;
+    }
+
+    .column-toggle[aria-expanded="false"] .column-chevron {
+        transform: translateY(-0.05rem) rotate(-45deg);
+    }
+
+    .column.collapsed {
+        padding-block: 0.4rem;
+    }
+
+    .column.collapsed .column-header {
+        margin-bottom: 0;
+    }
+
+    .column.collapsed .column-cards {
+        display: none;
+    }
+}
+
+@media (max-width: 40rem) and (prefers-reduced-motion: reduce) {
+    .column-chevron {
+        transition: none;
     }
 }
 

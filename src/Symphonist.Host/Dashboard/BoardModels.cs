@@ -11,7 +11,8 @@ public sealed record BoardCard(string Project, string Key, string Title, string 
     bool WaitingOnYou, string? BlockedReason, int Attempts, int? MaxAttempts, DateTimeOffset? Since,
     decimal? CostUsd, Uri? IssueUrl, Uri? PrUrl, string Source, bool Known);
 
-public sealed record BoardColumn(string Id, string Title, IReadOnlyList<BoardCard> Cards, int HiddenCount);
+/// <param name="IsDone">The column holds the Done-kind stage (finished tickets); the board starts it folded on phones.</param>
+public sealed record BoardColumn(string Id, string Title, IReadOnlyList<BoardCard> Cards, int HiddenCount, bool IsDone = false);
 
 public sealed record BoardCounts(int WaitingOnYou, int Running, int Blocked);
 

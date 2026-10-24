@@ -85,7 +85,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
 
         var updated = tickets.ToDictionary(t => (t.ProjectId, t.Key), t => t.UpdatedAt);
         var ordered = cards.OrderByDescending(c => updated[(c.Project, c.Key)]).ThenBy(c => c.Key, StringComparer.Ordinal).ToList();
-        return new BoardColumn(id, title, ordered.Take(DoneLimit).ToList(), Math.Max(0, ordered.Count - DoneLimit));
+        return new BoardColumn(id, title, ordered.Take(DoneLimit).ToList(), Math.Max(0, ordered.Count - DoneLimit), IsDone: true);
     }
 
     /// <summary>The column id a card belongs in, or null when its project or stage is not in the configuration.</summary>

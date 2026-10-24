@@ -58,6 +58,7 @@ public sealed class BoardQueryTests : IDisposable
 
         Assert.Equal(["Triage", "Plan", "Implement", "Done"], board.Columns.Select(c => c.Title));
         Assert.Equal(["Triage", "Plan", "Implement", "Done"], board.Columns.Select(c => c.Id));
+        Assert.Equal(["Done"], board.Columns.Where(c => c.IsDone).Select(c => c.Id));
         Assert.Null(board.ProjectFilter);
     }
 
@@ -71,6 +72,7 @@ public sealed class BoardQueryTests : IDisposable
 
         Assert.Equal("orders", board.ProjectFilter);
         Assert.Equal(["triage", "plan", "implement", "done"], board.Columns.Select(c => c.Id));
+        Assert.Equal(["done"], board.Columns.Where(c => c.IsDone).Select(c => c.Id));
         Assert.Equal(["ORD-1"], board.Columns.SelectMany(Keys));
     }
 

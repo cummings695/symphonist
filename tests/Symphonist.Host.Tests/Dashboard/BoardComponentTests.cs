@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.JSInterop;
 using Symphonist.Core;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
@@ -312,5 +313,119 @@ public sealed class BoardComponentTests : IDisposable
 
         Assert.Contains("No projects configured", cut.Markup);
         Assert.Contains(SymphonistPaths.Resolve("projects"), cut.Find(".setup-hint").TextContent);
+    }
+    /// <summary>The browser side of folding: at phone width, with <paramref name="stored"/> in localStorage.</summary>
+    private BunitJSModuleInterop SetupFolds(Dictionary<string, bool>? stored = null)
+    {
+        var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
+        module.Setup<Dictionary<string, bool>?>("load", _ => true).SetResult(stored);
+        module.Setup<bool>("watchPhone", _ => true).SetResult(true);
+        module.Setup<bool>("save", _ => true).SetResult(true);
+        return module;
+    }
+
+    private static IElement Column(IRenderedComponent<Board> cut, string id) => cut.Find($"[data-column='{id}']");
+
+    private static IElement Toggle(IRenderedComponent<Board> cut, string id) =>
+        cut.Find($"[data-column='{id}'] .column-header button");
+
+    [Fact]
+    public async Task Tapping_a_stage_header_folds_and_unfolds_it()
+    {
+        await SeedDefault();
+        var module = SetupFolds();
+        var cut = RenderBoard();
+        cut.WaitForAssertion(() => Assert.Single(module.Invocations["watchPhone"]));
+
+        Assert.Equal("true", Toggle(cut, "Plan").GetAttribute("aria-expanded"));
+        Assert.Equal("cards-Plan", Toggle(cut, "Plan").GetAttribute("aria-controls"));
+        Assert.NotNull(cut.Find("#cards-Plan"));
+
+        Toggle(cut, "Plan").Click();
+        Assert.Equal("false", Toggle(cut, "Plan").GetAttribute("aria-expanded"));
+        Assert.Contains("collapsed", Column(cut, "Plan").ClassList);
+
+        Toggle(cut, "Plan").Click();
+        Assert.Equal("true", Toggle(cut, "Plan").GetAttribute("aria-expanded"));
+        Assert.DoesNotContain("collapsed", Column(cut, "Plan").ClassList);
+        Assert.Equal(2, module.Invocations["save"].Count);
+        Assert.Equal(new Dictionary<string, bool> { ["Plan"] = false },
+            module.Invocations["save"][^1].Arguments[0] as Dictionary<string, bool>);
+    }
+
+    [Fact]
+    public async Task Done_stage_starts_folded_and_empty_stages_are_not_toggles()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending);
+        await Seed("ORD-9", "done", StageStatus.Done);
+
+        var cut = RenderBoard();
+
+        Assert.Contains("collapsed", Column(cut, "Done").ClassList);
+        Assert.Equal("false", Toggle(cut, "Done").GetAttribute("aria-expanded"));
+        Assert.DoesNotContain("collapsed", Column(cut, "Plan").ClassList);
+        Assert.Empty(cut.FindAll("[data-column='Triage'] button"));
+    }
+
+    [Fact]
+    public async Task Folded_stage_shows_how_many_wait_on_you()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        await Seed("ORD-2", "plan", StageStatus.Pending);
+        SetupFolds();
+        var cut = RenderBoard();
+        Assert.Empty(cut.FindAll("[data-column='Plan'] .column-waiting"));
+
+        Toggle(cut, "Plan").Click();
+
+        var badge = cut.Find("[data-column='Plan'] .column-waiting");
+        Assert.Equal("1 waiting", badge.TextContent.Trim());
+        Assert.Contains("count-waiting", badge.ClassList);
+    }
+
+    [Fact]
+    public async Task Stored_folds_apply_after_first_render()
+    {
+        await SeedDefault();
+        await Seed("ORD-9", "done", StageStatus.Done);
+        SetupFolds(new Dictionary<string, bool> { ["Plan"] = true, ["Done"] = false });
+
+        var cut = RenderBoard();
+
+        cut.WaitForAssertion(() => Assert.Contains("collapsed", Column(cut, "Plan").ClassList));
+        Assert.DoesNotContain("collapsed", Column(cut, "Done").ClassList);
+        Assert.Equal("true", Toggle(cut, "Done").GetAttribute("aria-expanded"));
+        Assert.Equal("2 waiting", cut.Find("[data-column='Plan'] .column-waiting").TextContent.Trim());
+    }
+
+    [Fact]
+    public async Task Desktop_width_renders_plain_headings()
+    {
+        await SeedDefault();
+        var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
+        module.Setup<Dictionary<string, bool>?>("load", _ => true).SetResult(null);
+        module.Setup<bool>("watchPhone", _ => true).SetResult(false);
+
+        var cut = RenderBoard();
+
+        cut.WaitForAssertion(() => Assert.Empty(cut.FindAll(".column-header button")));
+        Assert.Equal("Plan", cut.Find("[data-column='Plan'] .column-title").TextContent.Trim());
+    }
+
+    [Fact]
+    public async Task Folding_survives_a_failing_browser()
+    {
+        await SeedDefault();
+        await Seed("ORD-9", "done", StageStatus.Done);
+        var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
+        module.Setup<Dictionary<string, bool>?>("load", _ => true).SetException(new JSException("storage is blocked"));
+
+        var cut = RenderBoard();
+
+        cut.WaitForAssertion(() => Assert.Single(module.Invocations["load"]));
+        Assert.Contains("Title ORD-1", Card(cut, "ORD-1").TextContent);
+        Assert.Contains("collapsed", Column(cut, "Done").ClassList);
+        Toggle(cut, "Plan").Click(); // nothing to store into: still folds
+        Assert.Contains("collapsed", Column(cut, "Plan").ClassList);
     }
 }

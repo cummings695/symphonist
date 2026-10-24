@@ -1,11 +1,12 @@
 @page "/"
-@implements IDisposable
+@implements IAsyncDisposable
 @inject BoardQuery Query
 @inject BoardNotifier Notifier
 @inject Orchestrator Orchestrator
 @inject ProjectRegistry Registry
 @inject TimeProvider Time
 @inject NavigationManager Navigation
+@inject IJSRuntime JS
 @inject ILogger<Board> Log
 
 <PageTitle>@(model is { Counts.WaitingOnYou: > 0 } ? $"({model.Counts.WaitingOnYou}) Symphonist" : "Symphonist")</PageTitle>
@@ -68,13 +69,35 @@ else
             <div class="columns" role="list" aria-label="Pipeline">
                 @foreach (var column in model.Columns)
                 {
-                    <section class="column @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null)"
+                    var total = column.Cards.Count + column.HiddenCount;
+                    var folded = total > 0 && IsFolded(column);
+                    var waiting = column.Cards.Count(c => c.WaitingOnYou);
+                    <section class="column @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null) @(folded ? "collapsed" : null)"
                              role="listitem" data-column="@column.Id" aria-labelledby="col-@column.Id">
                         <h2 class="column-header" id="col-@column.Id">
-                            <span class="column-title">@column.Title</span>
-                            <span class="column-count" aria-label="@($"{column.Cards.Count + column.HiddenCount} tickets")">@(column.Cards.Count + column.HiddenCount)</span>
+                            @if (total > 0 && phone != false)
+                            {
+                                @* A toggle only at phone width; on a desktop the CSS shows it as the plain heading. *@
+                                <button type="button" class="column-toggle" aria-expanded="@(folded ? "false" : "true")"
+                                        aria-controls="cards-@column.Id" @onclick="() => ToggleAsync(column)">
+                                    <span class="column-title">@column.Title</span>
+                                    <span class="column-meta">
+                                        @if (folded && waiting > 0)
+                                        {
+                                            <span class="column-waiting count-waiting">@waiting waiting</span>
+                                        }
+                                        <span class="column-count" aria-label="@($"{total} tickets")">@total</span>
+                                        <span class="column-chevron" aria-hidden="true"></span>
+                                    </span>
+                                </button>
+                            }
+                            else
+                            {
+                                <span class="column-title">@column.Title</span>
+                                <span class="column-count" aria-label="@($"{total} tickets")">@total</span>
+                            }
                         </h2>
-                        <div class="column-cards">
+                        <div class="column-cards" id="cards-@column.Id">
                             @foreach (var card in column.Cards)
                             {
                                 <TicketCard @key="(card.Project, card.Key)" Card="card" Now="now" From="@model.ProjectFilter"
@@ -110,6 +133,10 @@ else
     private int loadVersion;
     private string? loadedFilter;
     private PeriodicTimer? clock;
+    private readonly Dictionary<string, bool> foldChoices = [];
+    private IJSObjectReference? folds;
+    private DotNetObjectReference<Board>? self;
+    private bool? phone; // unknown until the browser says; the CSS decides meanwhile
 
     [SupplyParameterFromQuery(Name = "project")]
     public string? Project { get; set; }
@@ -127,9 +154,55 @@ else
         await ReloadAsync();
     }
 
-    protected override void OnAfterRender(bool firstRender)
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender) _ = TickClockAsync();
+        if (!firstRender) return;
+        _ = TickClockAsync();
+        await LoadFoldsAsync();
+    }
+
+    /// <summary>A stage's folded state: the developer's choice in this browser, else folded for Done only.</summary>
+    private bool IsFolded(BoardColumn column) => foldChoices.TryGetValue(column.Id, out var folded) ? folded : column.IsDone;
+
+    /// <summary>Applies the folds stored in this browser and learns whether it is at phone width.</summary>
+    private async Task LoadFoldsAsync()
+    {
+        try
+        {
+            folds ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/board-folds.js");
+            var stored = await folds.InvokeAsync<Dictionary<string, bool>?>("load");
+            foreach (var (id, folded) in stored ?? [])
+                foldChoices.TryAdd(id, folded); // a tap made meanwhile wins
+            self ??= DotNetObjectReference.Create(this);
+            phone = await folds.InvokeAsync<bool>("watchPhone", self);
+        }
+        catch (Exception e)
+        {
+            // Folding is a convenience: storage or JS failures (and disconnects) must never reach the circuit.
+            Log.LogDebug(e, "Loading the folded board stages failed");
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>Called by the browser when the board crosses the phone-width breakpoint.</summary>
+    [JSInvokable]
+    public Task SetPhone(bool matches) => InvokeAsync(() =>
+    {
+        phone = matches;
+        StateHasChanged();
+    });
+
+    private async Task ToggleAsync(BoardColumn column)
+    {
+        foldChoices[column.Id] = !IsFolded(column);
+        try
+        {
+            if (folds is not null) await folds.InvokeAsync<bool>("save", foldChoices);
+        }
+        catch (Exception e)
+        {
+            Log.LogDebug(e, "Storing the folded board stages failed");
+        }
     }
 
     /// <summary>Re-renders elapsed times only; the board itself reloads on <see cref="BoardNotifier.Changed"/>.</summary>
@@ -251,10 +324,22 @@ else
 
     private string ProjectName(string id) => model?.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         Notifier.Changed -= OnBoardChanged;
         disposed.Cancel();
         clock?.Dispose();
+        self?.Dispose(); // the browser's breakpoint listener removes itself on its next failed call
+        if (folds is not null)
+        {
+            try
+            {
+                await folds.DisposeAsync();
+            }
+            catch (Exception e)
+            {
+                Log.LogDebug(e, "Releasing the board folds module failed"); // e.g. the circuit is already gone
+            }
+        }
     }
 }
