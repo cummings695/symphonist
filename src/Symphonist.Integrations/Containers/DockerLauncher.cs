@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Integrations.ClaudeCode;
 using Symphonist.Integrations.Processes;
 
@@ -17,6 +18,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     Func<string, string?> getSecret) : IAgentLauncher
 {
     public const string DefaultImage = "symphonist/agent-claude:1";
+    /// <summary>Repository of the images built from <c>agent.packages</c>; the tag is a hash of their Dockerfile.</summary>
+    public const string PackagesRepository = "symphonist/agent-packages";
     public const string TokenSecretName = "claude-code-token";
 
     private const string TokenVar = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -26,6 +29,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     private const string NameOption = "--name";
     private const string AgentLabel = "symphonist=agent";
     private const string ContextHashLabel = "symphonist.context-hash";
+    private const string BaseIdLabel = "symphonist.base-id";
+    private const string PipVenv = "/opt/symphonist-pip";
     private static readonly TimeSpan InspectTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RemoveTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(45);
@@ -82,11 +87,89 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
                 : $"docker build of '{image}' failed (exit {build.ExitCode}): {Tail(build.StandardError)}");
     }
 
+    /// <summary>
+    /// Makes sure the image <paramref name="settings"/> run in exists: the base image as in
+    /// <see cref="EnsureImageAsync(string, CancellationToken)"/>, plus, when there are <c>agent.packages</c>, the
+    /// <see cref="ImageFor">derived image</see> with them installed. That one is (re)built whenever it is missing or
+    /// was built from a different base image (its <c>symphonist.base-id</c> label differs from the base's image id).
+    /// </summary>
+    public async Task EnsureImageAsync(AgentSettings settings, CancellationToken ct)
+    {
+        var baseImage = settings.Image ?? DefaultImage;
+        await EnsureImageAsync(baseImage, ct);
+        if (settings.Packages.IsEmpty) return;
+
+        var image = ImageFor(settings);
+        var baseId = await runner.RunAsync(new ProcessSpec("docker",
+            ["image", "inspect", "--format", "{{.Id}}", baseImage], Timeout: InspectTimeout), ct);
+        if (baseId.ExitCode != 0)
+            throw new InvalidOperationException($"docker image '{baseImage}' not found; build or pull it first");
+        var id = baseId.StandardOutput.Trim();
+
+        var inspect = await runner.RunAsync(new ProcessSpec("docker",
+            ["image", "inspect", "--format", $"{{{{index .Config.Labels \"{BaseIdLabel}\"}}}}", image],
+            Timeout: InspectTimeout), ct);
+        if (inspect.ExitCode == 0 && inspect.StandardOutput.Trim() == id) return;
+
+        // No build context: the Dockerfile comes on stdin. Never pull: the base is the local image just checked.
+        var build = await runner.RunAsync(new ProcessSpec("docker",
+            ["build", "--pull=false", "-t", image, "--label", $"{BaseIdLabel}={id}", "-"],
+            StandardInput: PackagesDockerfile(baseImage, settings.Packages), Timeout: BuildTimeout), ct);
+        if (build.ExitCode != 0)
+            throw new InvalidOperationException(build.TimedOut
+                ? $"docker build of '{image}' (agent.packages on '{baseImage}') timed out"
+                : $"docker build of '{image}' (agent.packages on '{baseImage}') failed (exit {build.ExitCode}): {Tail(build.StandardError)}");
+    }
+
+    /// <summary>
+    /// The image an agent with <paramref name="settings"/> runs in: <c>agent.image</c> (or <see cref="DefaultImage"/>),
+    /// or, when there are <c>agent.packages</c>, <see cref="PackagesRepository"/> tagged with a hash of the Dockerfile
+    /// that adds them, so each distinct base and package set gets its own image.
+    /// </summary>
+    public static string ImageFor(AgentSettings settings)
+    {
+        var baseImage = settings.Image ?? DefaultImage;
+        ValidateImage(baseImage);
+        if (settings.Packages.IsEmpty) return baseImage;
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(PackagesDockerfile(baseImage, settings.Packages)));
+        return $"{PackagesRepository}:{Convert.ToHexStringLower(hash)[..16]}";
+    }
+
+    /// <summary>
+    /// The Dockerfile that installs <paramref name="packages"/> on <paramref name="baseImage"/>: apt packages, pip
+    /// packages into a virtualenv on PATH (with python3 and python3-venv from apt), and global npm packages. It runs as
+    /// the base image's build user, which must be root (it is for the default image). Items are single-quoted; the
+    /// project config loader only accepts items without quotes or shell characters.
+    /// </summary>
+    public static string PackagesDockerfile(string baseImage, AgentPackages packages)
+    {
+        var apt = packages.Pip.Count > 0 ? packages.Apt.Concat(["python3", "python3-venv"]).Distinct().ToList() : packages.Apt;
+        var sb = new StringBuilder();
+        sb.Append("# Generated by Symphonist from agent.packages.\n");
+        sb.Append($"FROM {baseImage}\n");
+        if (apt.Count > 0)
+            sb.Append("RUN apt-get update \\\n")
+              .Append($" && apt-get install -y --no-install-recommends {Quoted(apt)} \\\n")
+              .Append(" && rm -rf /var/lib/apt/lists/*\n");
+        if (packages.Pip.Count > 0)
+            sb.Append($"RUN python3 -m venv {PipVenv} \\\n")
+              .Append($" && {PipVenv}/bin/pip install --no-cache-dir {Quoted(packages.Pip)}\n")
+              .Append($"ENV PATH={PipVenv}/bin:$PATH\n");
+        if (packages.Npm.Count > 0)
+            sb.Append($"RUN npm install -g {Quoted(packages.Npm)} \\\n")
+              .Append(" && npm cache clean --force\n");
+        return sb.ToString();
+    }
+
+    private static string Quoted(IEnumerable<string> items) => string.Join(' ', items.Select(i =>
+        string.IsNullOrEmpty(i) || i.StartsWith('-') || i.Contains('\'') || i.Any(char.IsWhiteSpace)
+            ? throw new ArgumentException($"invalid package '{i}'", nameof(items))
+            : $"'{i}'"));
+
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
     {
         var settings = request.Settings;
-        var image = settings.Image ?? DefaultImage;
-        ValidateImage(image);
+        var image = ImageFor(settings);
         var args = new List<string>
         {
             // Never pull: a missing image must fail rather than fetch whatever owns the name on a registry.
@@ -186,7 +269,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
 
     private static void ValidateImage(string image)
     {
-        if (string.IsNullOrWhiteSpace(image) || image.StartsWith('-'))
+        // No whitespace: the name also goes into a generated Dockerfile's FROM line.
+        if (string.IsNullOrWhiteSpace(image) || image.StartsWith('-') || image.Any(char.IsWhiteSpace))
             throw new ArgumentException($"invalid docker image name '{image}'", nameof(image));
     }
 

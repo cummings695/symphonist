@@ -86,6 +86,35 @@ public sealed class DockerStartupTests : IDisposable
     }
 
     [Fact]
+    public async Task Builds_packages_images_and_disables_only_the_one_that_fails()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        home.WriteProject("graph.yaml", TestHome.ProjectYaml("graph", "type: claude-code\n  packages:\n    pip: [graphifyy]"));
+        var hash = DockerLauncher.ContextHash(context);
+        processes.OnRun = s => Verb(s) switch
+        {
+            "image inspect" when s.Arguments.Contains("{{.Id}}") => new ProcessResult(0, "sha256:base", "", false),
+            "image inspect" when s.Arguments.Any(a => a.StartsWith(DockerLauncher.PackagesRepository))
+                => new ProcessResult(1, "", "No such image", false),
+            "image inspect" => new ProcessResult(0, hash, "", false),
+            "build --pull=false" => new ProcessResult(1, "", "pip failed", false),
+            _ => new ProcessResult(0, "", "", false),
+        };
+
+        await StartAsync();
+
+        var build = Assert.Single(processes.Calls, s => s.Arguments[0] == "build");
+        Assert.Contains("'graphifyy'", build.StandardInput);
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request()).FileName);
+        var packaged = Request() with
+        {
+            Settings = Request().Settings with { Packages = new AgentPackages([], ["graphifyy"], []) },
+        };
+        var ex = Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), packaged));
+        Assert.Contains("pip failed", ex.Message);
+    }
+
+    [Fact]
     public async Task Leftover_cleanup_failure_does_not_stop_startup()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));

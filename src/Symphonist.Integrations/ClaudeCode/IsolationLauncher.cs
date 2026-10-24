@@ -21,7 +21,10 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
     /// <summary>Makes every container run fail with <paramref name="reason"/> (e.g. Docker is not running).</summary>
     public void DisableContainers(string reason) => containersProblem = reason;
 
-    /// <summary>Makes container runs that use <paramref name="image"/> fail with <paramref name="reason"/>.</summary>
+    /// <summary>
+    /// Makes container runs whose <see cref="DockerLauncher.ImageFor">image</see> is <paramref name="image"/> fail with
+    /// <paramref name="reason"/>.
+    /// </summary>
     public void DisableImage(string image, string reason) => imageProblems[image] = reason;
 
     public bool ProvidesIsolation(AgentRunRequest request) => For(request).ProvidesIsolation(request);
@@ -31,7 +34,7 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
         if (request.Settings.Isolation == Isolation.Container)
         {
             if (containersProblem is { } problem) throw new InvalidOperationException(problem);
-            if (imageProblems.TryGetValue(request.Settings.Image ?? DockerLauncher.DefaultImage, out var imageProblem))
+            if (imageProblems.TryGetValue(DockerLauncher.ImageFor(request.Settings), out var imageProblem))
                 throw new InvalidOperationException(imageProblem);
         }
         return For(request).Wrap(agentCommand, request);

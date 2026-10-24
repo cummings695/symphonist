@@ -7,19 +7,20 @@ namespace Symphonist.Host.Orchestration;
 /// <summary>
 /// Prepares Docker before the orchestrator starts, only when some project uses container isolation: removes agent
 /// containers left over from a previous run, then makes sure every image those projects use exists (building the
-/// default image when missing or stale). When Docker or an image is unavailable the affected agent runs fail with a
-/// clear error instead of the host failing to start. Registered before <see cref="OrchestratorService"/>, so no
-/// agent run starts until this has finished.
+/// default image and any <c>agent.packages</c> images when missing or stale). When Docker or an image is unavailable
+/// the affected agent runs fail with a clear error instead of the host failing to start. Registered before
+/// <see cref="OrchestratorService"/>, so no agent run starts until this has finished.
 /// </summary>
 public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docker, IsolationLauncher launcher,
     ILogger<DockerStartup> log) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // One entry per distinct image; the review agent runs in the same image as the project's agent.
         var images = projects.Projects
             .Where(p => p.Agent.Isolation == Isolation.Container)
-            .Select(p => p.Agent.Image ?? DockerLauncher.DefaultImage)
-            .Distinct(StringComparer.Ordinal)
+            .Select(p => p.Agent)
+            .DistinctBy(TryImageFor, StringComparer.Ordinal)
             .ToList();
         if (images.Count == 0) return;
 
@@ -41,12 +42,13 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
             log.LogWarning(e, "Removing leftover agent containers failed");
         }
 
-        foreach (var image in images)
+        foreach (var settings in images)
         {
+            var image = TryImageFor(settings);
             try
             {
                 log.LogInformation("Checking agent image {Image} (first build can take several minutes)", image);
-                await docker.EnsureImageAsync(image, cancellationToken);
+                await docker.EnsureImageAsync(settings, cancellationToken);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
@@ -54,6 +56,13 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
                 launcher.DisableImage(image, e.Message);
             }
         }
+    }
+
+    /// <summary>The run image, or the configured name when it is invalid (EnsureImage then reports why).</summary>
+    private static string TryImageFor(AgentSettings settings)
+    {
+        try { return DockerLauncher.ImageFor(settings); }
+        catch (ArgumentException) { return settings.Image ?? DockerLauncher.DefaultImage; }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

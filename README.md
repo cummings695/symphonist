@@ -78,9 +78,9 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
 - Every API call needs the token in `~/.symphonist/api-token` (created on first start); the CLI reads it for you.
 - State (ticket database, work copies, API token, `paused.json`) lives in `SYMPHONIST_HOME`, default `~/.symphonist`.
 - If any project uses container isolation, the host first removes agent containers left over from a previous run and
-  makes sure the agent image exists. The first image build can take several minutes and delays startup (and the first
-  poll) until it finishes. If Docker is not running, the host still starts, but agent stages of container projects fail
-  with a clear error until you start Docker and restart the host.
+  makes sure the agent image (and any `agent.packages` image) exists. The first image build can take several minutes
+  and delays startup (and the first poll) until it finishes. If Docker is not running, the host still starts, but agent
+  stages of container projects fail with a clear error until you start Docker and restart the host.
 
 ## Daily use
 
@@ -196,6 +196,20 @@ review:
   (`https://user:token@...`), Symphonist strips them from agent workspaces (and masks them in errors) and logs a
   warning; pushes then authenticate through your git credential helper, so make sure one is configured. Git never
   prompts (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`): missing credentials fail the stage with git's error.
+- Extra tools for the agent (for example the `graphify` CLI): list them under `agent.packages` in the project file,
+  as `apt`, `pip` and/or `npm` packages. At startup the host builds an image `symphonist/agent-packages:<hash>` on top
+  of the agent image (`agent.image` or the default) with them installed, and agent and reviewer runs of that project use
+  it. Installing happens at build time with normal network access; the agent still runs behind the allowlist, so a tool
+  that calls out at run time needs its hosts in `agent.allowedDomains`. pip packages go into a virtualenv on `PATH`
+  (python3 is installed for you). Items must be plain package names with an optional version (`graphifyy==0.8.33`,
+  `@scope/tool@1.2.0`); anything else is rejected when the project file loads. The image is rebuilt when the package
+  list or the base image changes. A failed build fails that project's agent stages with the build error.
+
+  ```yaml
+  agent:
+    packages:
+      pip: [graphifyy]
+  ```
 - `host`: the agent runs directly on your machine with no sandbox, restricted only by `agent.allowedTools`, which is
   therefore required. Use it only for projects you trust.
 

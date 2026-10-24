@@ -40,6 +40,13 @@ agent:
   # timeoutMinutes: 60          # per agent run; default: 60
   # model: ""                   # optional Claude model override
   # image: ""                   # optional Docker image; default: the image built from the bundled Dockerfile
+  # Extra tools baked into the agent image (container isolation only), installed when the host builds the image at
+  # startup, so the agent can use them behind the firewall. One package per item, optionally with a version.
+  # pip packages go into a virtualenv on PATH (python3 is added for you); npm packages are installed globally.
+  # packages:
+  #   apt: [ripgrep]
+  #   pip: [graphifyy]            # the graphify CLI
+  #   npm: []
 
 # Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
 # maxAttemptsPerStage: 3

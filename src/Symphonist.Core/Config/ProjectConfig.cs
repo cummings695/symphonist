@@ -20,7 +20,23 @@ public sealed record RepoConfig(string Type, string Workspace, string Slug, stri
 public sealed record BuildConfig(string Type, int TimeoutMinutes);
 
 public sealed record AgentSettings(string Type, Isolation Isolation, IReadOnlyList<string> AllowedDomains,
-    IReadOnlyList<string> AllowedTools, int TimeoutMinutes, string? Model, string? Image);
+    IReadOnlyList<string> AllowedTools, int TimeoutMinutes, string? Model, string? Image)
+{
+    /// <summary>Extra packages baked into the agent image (container isolation only).</summary>
+    public AgentPackages Packages { get; init; } = AgentPackages.None;
+}
+
+/// <summary>
+/// Packages to install on top of the agent image, by installer. Installed when the image is built, where the network
+/// is open; the agent itself still runs behind the firewall. Each item is one installer argument, such as
+/// <c>ripgrep</c>, <c>graphifyy==0.8.33</c> or <c>@scope/tool@1.2.0</c>.
+/// </summary>
+public sealed record AgentPackages(IReadOnlyList<string> Apt, IReadOnlyList<string> Pip, IReadOnlyList<string> Npm)
+{
+    public static readonly AgentPackages None = new([], [], []);
+
+    public bool IsEmpty => Apt.Count == 0 && Pip.Count == 0 && Npm.Count == 0;
+}
 
 public sealed record RiskArea(string Name, string Description, IReadOnlyList<string> Paths);
 

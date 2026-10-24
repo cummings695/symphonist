@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -6,7 +7,7 @@ namespace Symphonist.Core.Config;
 
 public sealed class ProjectConfigException(string message) : Exception(message);
 
-public static class ProjectConfigLoader
+public static partial class ProjectConfigLoader
 {
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
@@ -67,6 +68,7 @@ public static class ProjectConfigLoader
         if (isolation == Isolation.Host && allowedTools.Count == 0)
             throw new ProjectConfigException("host isolation requires agent.allowedTools");
 
+        var packages = MapPackages(agent.Packages);
         var pipeline = MapPipeline(d.Pipeline);
 
         var prompts = new Dictionary<StageKind, string>();
@@ -86,15 +88,42 @@ public static class ProjectConfigLoader
                 repo.MergeStrategy ?? "merge_commit"),
             new BuildConfig(Required(build.Type, "build.type"), build.TimeoutMinutes ?? 45),
             new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"), allowedTools,
-                agent.TimeoutMinutes ?? 60, agent.Model, agent.Image),
+                agent.TimeoutMinutes ?? 60, agent.Model, agent.Image) { Packages = packages },
             d.MaxAttemptsPerStage ?? 3,
             pipeline,
             prompts,
             dir)
         {
             RiskAreas = MapRiskAreas(d.RiskAreas),
-            Review = MapReview(d.Review, agent, isolation, dir),
+            Review = MapReview(d.Review, agent, isolation, packages, dir),
         };
+    }
+
+    // Every item ends up as one argument of an install command in a generated Dockerfile, so only plain package
+    // names with an optional version are accepted: no spaces, quotes, shell characters or leading '-'.
+    [GeneratedRegex(@"\A[a-z0-9][a-z0-9+.-]*(=[A-Za-z0-9.+:~-]+)?\z")]
+    private static partial Regex AptPackage();
+
+    [GeneratedRegex(@"\A[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?((==|>=|<=|~=|!=|>|<)[A-Za-z0-9.*+!-]+(,(==|>=|<=|~=|!=|>|<)[A-Za-z0-9.*+!-]+)*)?\z")]
+    private static partial Regex PipPackage();
+
+    [GeneratedRegex(@"\A(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*(@[A-Za-z0-9._~^+-]+)?\z")]
+    private static partial Regex NpmPackage();
+
+    private static AgentPackages MapPackages(PackagesDto? p)
+    {
+        if (p is null) return AgentPackages.None;
+        return new AgentPackages(Packages(p.Apt, "apt", AptPackage()), Packages(p.Pip, "pip", PipPackage()),
+            Packages(p.Npm, "npm", NpmPackage()));
+    }
+
+    private static List<string> Packages(List<string>? items, string installer, Regex valid)
+    {
+        var list = Items(items, $"agent.packages.{installer}");
+        foreach (var item in list)
+            if (!valid.IsMatch(item))
+                throw new ProjectConfigException($"invalid {installer} package '{item}' in agent.packages.{installer}");
+        return list.Distinct(StringComparer.Ordinal).ToList();
     }
 
     private static List<RiskArea> MapRiskAreas(List<RiskAreaDto?>? areas)
@@ -112,7 +141,8 @@ public static class ProjectConfigLoader
         return result;
     }
 
-    private static ReviewConfig MapReview(ReviewDto? r, AgentDto agent, Isolation isolation, string dir)
+    private static ReviewConfig MapReview(ReviewDto? r, AgentDto agent, Isolation isolation, AgentPackages packages,
+        string dir)
     {
         var mode = ParseEnum<ReviewMode>(r?.Mode ?? "off", "review.mode");
         var ra = r?.Agent;
@@ -120,7 +150,7 @@ public static class ProjectConfigLoader
         var tools = ra?.AllowedTools is null ? ReviewConfig.ReadOnlyTools : Items(ra.AllowedTools, "review.agent.allowedTools");
         if (tools.Count == 0) tools = ReviewConfig.ReadOnlyTools;
         var settings = new AgentSettings(ra?.Type ?? agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
-            tools, ra?.TimeoutMinutes ?? 20, ra?.Model ?? agent.Model, agent.Image);
+            tools, ra?.TimeoutMinutes ?? 20, ra?.Model ?? agent.Model, agent.Image) { Packages = packages };
         var prompt = r?.Prompt is null ? null : Path.GetFullPath(Required(r.Prompt, "review.prompt"), dir);
         return new ReviewConfig(mode, settings, prompt);
     }
@@ -250,6 +280,14 @@ public static class ProjectConfigLoader
         public int? TimeoutMinutes { get; set; }
         public string? Model { get; set; }
         public string? Image { get; set; }
+        public PackagesDto? Packages { get; set; }
+    }
+
+    private sealed class PackagesDto
+    {
+        public List<string>? Apt { get; set; }
+        public List<string>? Pip { get; set; }
+        public List<string>? Npm { get; set; }
     }
 
     private sealed class StageDto
