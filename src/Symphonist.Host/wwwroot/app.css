@@ -624,24 +624,32 @@ select {
     }
 }
 
-/* Reconnect modal */
+/* Reconnect modal: a surface panel on the page tokens, its Reload button the primary button. */
 
 #components-reconnect-modal {
-    max-width: 24rem;
-    padding: 1.5rem;
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
+    max-width: min(24rem, calc(100vw - 2rem));
+    padding: 1.25rem 1.5rem;
+    border: 1px solid var(--card-border);
+    border-top: 3px solid var(--topbar-edge);
+    border-radius: var(--radius-panel);
     background: var(--surface);
+    box-shadow: var(--topbar-shadow);
     color: var(--fg);
+    font: 14px/1.45 var(--font);
     text-align: center;
 }
 
+/* showModal() focuses the dialog itself; it is not a control, so no focus ring around the panel. */
+#components-reconnect-modal:focus-visible {
+    outline: none;
+}
+
 #components-reconnect-modal::backdrop {
-    background: rgb(0 0 0 / 0.4);
+    background: var(--backdrop);
 }
 
 #components-reconnect-modal p {
-    margin: 0 0 1rem;
+    margin: 0;
 }
 
 .reconnect-retrying-visible,
@@ -657,11 +665,18 @@ select {
 }
 
 #components-reconnect-modal button {
-    margin: 0 auto;
-    padding: 0.25rem 1.5rem;
-    border: 0;
-    border-radius: 0.25rem;
-    background: var(--accent);
-    color: var(--bg);
+    margin: 1rem auto 0;
+    padding: 0.2rem 1.25rem;
+    min-height: 1.9rem;
+    border: 1px solid var(--fg);
+    border-radius: var(--radius);
+    background: var(--fg);
+    color: var(--surface);
     font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#components-reconnect-modal button:hover {
+    opacity: 0.88;
 }

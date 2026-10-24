@@ -20,8 +20,8 @@ Review findings judged minor or deferred, and **not** fixed in plan 2. Items fix
 ## UI
 
 - Status line shows a refresh error in place of a command outcome; command messages never expire.
-- If the first board load fails, the header (and "Poll now") is hidden.
-- After a "rejected" reconnect the page reloads immediately, so its text only flashes. The new "failed"-state Reload button is not yet checked in a browser.
+- ~~If the first board load fails, the header (and "Poll now") is hidden.~~ Fixed by the dashboard redesign: the title bar (with "Poll now") and the page heading are always shown.
+- After a "rejected" reconnect the page reloads immediately, so its text only flashes. (The "failed"-state Reload button was checked in a browser on 2026-10-24: it reloads into the restarted host, still signed in.)
 - No `#blazor-error-ui` element, so a dead circuit shows nothing.
 - A missing ticket briefly shows the generic not-found page before the per-ticket message.
 - The detail page's "before" snapshot comes from the last loaded model, so the "…but a follow-up step failed" wording can be wrong if the ticket moved elsewhere before the click (Board has the same limit).
@@ -32,7 +32,7 @@ Review findings judged minor or deferred, and **not** fixed in plan 2. Items fix
 
 - `BoardQuery`: the Done column rebuilds a `(ProjectId, Key)` dictionary per call (carry `UpdatedAt` with the card); `FindIndex` is recomputed inline.
 - `TicketLinks.Issue` drops a path on the Jira site if it has no trailing slash.
-- `TicketCard.Meta()` is enumerated twice per render.
+- ~~`TicketCard.Meta()` is enumerated twice per render.~~ Fixed by the dashboard redesign (the card no longer has `Meta()`).
 - `Orchestrator`: setting and clearing a problem are written differently; `ProblemsChanged` is raised inside the tick lock, so a future subscriber that throws would abort a tick.
 - `OrchestratorService` swallows exceptions during shutdown without logging.
 - `BoardNotifier`'s timer is never disposed (it is a singleton).

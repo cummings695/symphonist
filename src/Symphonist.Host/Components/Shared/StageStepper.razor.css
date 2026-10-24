@@ -40,8 +40,10 @@
     background: var(--accent);
 }
 
+/* Above the next step's connector, which otherwise paints over this circle's right half. */
 .step-circle {
     position: relative;
+    z-index: 1;
     display: grid;
     place-items: center;
     width: 24px;
