@@ -38,6 +38,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(t => t.UpdatedAt).HasConversion(dto);
             e.Property(t => t.StageStartedAt).HasConversion(dto);
             e.Property(t => t.WaitingSince).HasConversion(dto);
+            e.Property(t => t.ClaudeCommentsHandledAt).HasConversion(dto);
         });
 
         b.Entity<TicketEvent>(e =>

@@ -11,4 +11,18 @@ public static class TrackerComments
     public static string Sign(string markdown) => markdown + "\n\n" + Footer;
 
     public static bool IsSymphonist(string body) => body.TrimEnd().EndsWith(Footer, StringComparison.Ordinal);
+
+    public const string ClaudeMarker = "@claude";
+
+    /// <summary>
+    /// The request text of a developer "@claude" comment (marker removed, trimmed); null when the body does not start
+    /// with the marker.
+    /// </summary>
+    public static string? ClaudeRequest(string body)
+    {
+        var text = body.Trim();
+        if (!text.StartsWith(ClaudeMarker, StringComparison.OrdinalIgnoreCase)) return null;
+        var rest = text[ClaudeMarker.Length..];
+        return rest.Length == 0 || char.IsWhiteSpace(rest[0]) ? rest.Trim() : null;
+    }
 }

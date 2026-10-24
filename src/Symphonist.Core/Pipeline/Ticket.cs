@@ -32,6 +32,9 @@ public sealed class Ticket
     public DateTimeOffset? StageStartedAt { get; set; }
     public DateTimeOffset? WaitingSince { get; set; }
 
+    /// <summary>The Created time of the newest developer "@claude" comment acted on; older ones are never acted on again.</summary>
+    public DateTimeOffset? ClaudeCommentsHandledAt { get; set; }
+
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();
 }

@@ -51,6 +51,23 @@ public sealed class SqliteTicketStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Claude_handled_time_round_trips()
+    {
+        var t = NewTicket("A", "triage", StageStatus.Pending);
+        t.ClaudeCommentsHandledAt = new DateTimeOffset(2026, 10, 21, 14, 30, 15, 123, TimeSpan.FromHours(2));
+        await _store.SaveAsync(t, default);
+
+        var found = await _store.FindAsync("orders", "A", default);
+
+        Assert.Equal(t.ClaudeCommentsHandledAt, found!.ClaudeCommentsHandledAt);
+        Assert.Equal(t.ClaudeCommentsHandledAt.Value.Offset, found.ClaudeCommentsHandledAt!.Value.Offset);
+
+        t.ClaudeCommentsHandledAt = null;
+        await _store.SaveAsync(t, default);
+        Assert.Null((await _store.FindAsync("orders", "A", default))!.ClaudeCommentsHandledAt);
+    }
+
+    [Fact]
     public async Task Save_twice_updates_not_duplicates()
     {
         var t = NewTicket("A", "plan", StageStatus.Pending);

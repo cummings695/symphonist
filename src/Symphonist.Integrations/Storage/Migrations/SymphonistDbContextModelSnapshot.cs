@@ -32,6 +32,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<string>("Branch")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("ClaudeCommentsHandledAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 

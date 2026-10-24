@@ -17,4 +17,17 @@ public class TrackerCommentsTests
         Assert.False(TrackerComments.IsSymphonist("please use X"));
         Assert.False(TrackerComments.IsSymphonist("— posted by Symphonist, quoted, then my reply"));
     }
+
+    [Theory]
+    [InlineData("@claude please use v2", "please use v2")]
+    [InlineData("  @Claude\nAnswers: yes", "Answers: yes")]
+    [InlineData("@claude", "")]
+    public void ClaudeRequest_strips_marker(string body, string expected) =>
+        Assert.Equal(expected, TrackerComments.ClaudeRequest(body));
+
+    [Theory]
+    [InlineData("hey @claude")]
+    [InlineData("@claudette")]
+    [InlineData("note to Sam")]
+    public void ClaudeRequest_ignores_other_comments(string body) => Assert.Null(TrackerComments.ClaudeRequest(body));
 }

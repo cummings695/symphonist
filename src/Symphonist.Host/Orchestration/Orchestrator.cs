@@ -223,7 +223,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 await AddEventAsync(t, $"picked up at {t.StageId}", ct);
                 continue;
             }
-            if (Same(t.LastSourceStatus, s.Status)) continue;
+            if (Same(t.LastSourceStatus, s.Status))
+            {
+                await HandleClaudeCommentsAsync(p, io, t, s, now, ct); // only acts at a gate or block, never on Done
+                continue;
+            }
 
             if (t.Status == StageStatus.Done)
             {
@@ -245,6 +249,34 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await store.SaveAsync(t, ct);
             await ApplyAsync(io, t, outcome, ct);
         }
+    }
+
+    /// <summary>
+    /// Developer "@claude" comments made since the stage started rerun it, with the comments as feedback, once it waits
+    /// at its gate or is blocked; comments made while it is pending or running wait for that.
+    /// </summary>
+    private async Task HandleClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket s,
+        DateTimeOffset now, CancellationToken ct)
+    {
+        if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Blocked)) return;
+        var since = t.ClaudeCommentsHandledAt is { } handled && (t.StageStartedAt is not { } started || handled > started)
+            ? handled
+            : t.StageStartedAt; // the later of the two: entering a stage leaves earlier comments behind
+        var comments = s.Comments
+            .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
+            .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body)))
+            .Where(c => c.Request is not null)
+            .OrderBy(c => c.Created)
+            .ToList();
+        if (comments.Count == 0) return;
+
+        var requests = comments.Select(c => c.Request!).Where(r => r.Length > 0).ToList();
+        var feedback = requests.Count > 0 ? string.Join("\n\n", requests) : "(no details given)";
+        var outcome = PipelineEngine.SendBack(p, t, feedback, t.StageId, now);
+        t.ClaudeCommentsHandledAt = comments[^1].Created;
+        await store.SaveAsync(t, ct);
+        await ApplyAsync(io, t, outcome, ct);
+        await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct);
     }
 
     private async Task AdvanceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source, CancellationToken ct)

@@ -137,6 +137,13 @@ The pipeline in the project file maps stages to Jira statuses, so you can drive 
   Symphonist first picks it up is never treated as an approval.
 - Reopening a card after its ticket is `Done` is noted in the event log; Symphonist does not reopen done tickets.
 
+### Answering Symphonist from Jira
+
+Start a Jira comment with `@claude` while a ticket waits at a gate (or is blocked), and that stage reruns with the
+comment (minus the marker) as feedback, for example to answer triage's questions. Several such comments made before the
+rerun go together into one rerun. A comment made while the stage runs applies when it reaches the gate. Other
+comments are ignored, and a card move made in the same poll takes priority.
+
 ### Sandbox
 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network

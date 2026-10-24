@@ -419,6 +419,164 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Null(t.Feedback);
     }
 
+    private void Comments(string key, params SourceComment[] comments)
+    {
+        var index = tracker.Tickets.FindIndex(t => t.Key == key);
+        tracker.Tickets[index] = tracker.Tickets[index] with { Comments = comments };
+    }
+
+    [Fact] public async Task Claude_comment_at_gate_reruns_stage_with_feedback()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: A, B"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Running, "answers: A, B"), (t.StageId, t.Status, t.Feedback));
+        Assert.Equal(Now.AddMinutes(5), t.ClaudeCommentsHandledAt);
+        Assert.Contains("sent back to triage", store.EventMessages("ORD-1"));
+        Assert.Contains("@claude comment: rerunning triage", store.EventMessages("ORD-1"));
+        Assert.Contains("answers: A, B", Assert.Single(agent.Prompts)); // the rerun starts in the same tick
+    }
+
+    [Fact] public async Task Several_claude_comments_make_one_rerun()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1",
+            new SourceComment("Me", true, Now.AddMinutes(6), "@claude second"),
+            new SourceComment("Me", true, Now.AddMinutes(5), "@claude first"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Contains("first\n\nsecond", Assert.Single(agent.Prompts)); // the rerun uses up the feedback
+
+        await TickIdle(o); // the same comments again
+        Assert.Single(agent.Requests);
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "@claude comment: rerunning triage");
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+    }
+
+    [Fact] public async Task Claude_comment_during_run_applies_at_the_gate()
+    {
+        Source("ORD-1", "Planned");
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => agent.Requests.Count == 1
+            ? release.Task
+            : Task.FromResult(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")));
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(1), "@claude also cover refunds"));
+        await o.TickAsync(CancellationToken.None);
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, null), (t.Status, t.Feedback));
+
+        release.SetResult(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")));
+        await o.WhenIdleAsync();
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        await TickIdle(o);
+
+        t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Contains("also cover refunds", agent.Prompts[1]);
+        Assert.Contains("@claude comment: rerunning plan", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Claude_comment_from_earlier_stage_is_ignored()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(-5), "@claude answers: A, B"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Null(t.Feedback);
+        Assert.Empty(store.EventMessages("ORD-1"));
+        Assert.Empty(agent.Requests);
+    }
+
+    [Fact] public async Task Claude_comment_on_blocked_ticket_reruns()
+    {
+        await Seed("ORD-1", "triage", StageStatus.Blocked, "Backlog", t => (t.Attempts, t.BlockedReason) = (3, "boom"));
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude try the v2 API"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Running, 0), (t.StageId, t.Status, t.Attempts));
+        Assert.Equal("try the v2 API", t.Feedback);
+        Assert.Null(t.BlockedReason);
+        Assert.Contains("@claude comment: rerunning triage", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Claude_comment_without_details_reruns_with_placeholder_feedback()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal("(no details given)", store.Single("ORD-1").Feedback);
+    }
+
+    [Fact] public async Task Plain_and_symphonist_comments_do_not_trigger()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1",
+            new SourceComment("Me", true, Now.AddMinutes(5), "thanks!"),
+            new SourceComment("Me", true, Now.AddMinutes(6), TrackerComments.Sign("@claude questions for you")),
+            new SourceComment("Ann", false, Now.AddMinutes(7), "@claude use v3"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Null(t.Feedback);
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Status_move_wins_over_claude_comment_in_same_tick()
+    {
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: A, B"));
+        tracker.Move("ORD-1", "Planned");
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None); // the comment predates plan, so it never reruns plan either
+
+        var t = store.Single("ORD-1");
+        Assert.Equal("plan", t.StageId);
+        Assert.Contains("advanced to plan", store.EventMessages("ORD-1"));
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("@claude", StringComparison.Ordinal));
+    }
+
     [Fact] public async Task Running_agent_ticket_without_a_run_is_retried()
     {
         await Seed("ORD-1", "plan", StageStatus.Running, "Planned");
