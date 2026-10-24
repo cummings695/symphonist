@@ -193,8 +193,17 @@ else
 
     private async Task TogglePause(BoardProject p)
     {
-        Registry.SetPaused(p.Id, !p.Paused);
-        commandMessage = p.Paused ? $"{p.Name} resumed" : $"{p.Name} paused";
+        try
+        {
+            Registry.SetPaused(p.Id, !p.Paused);
+            commandMessage = p.Paused ? $"{p.Name} resumed" : $"{p.Name} paused";
+        }
+        catch (Exception e)
+        {
+            // E.g. paused.json cannot be written: report it rather than kill the circuit.
+            Log.LogError(e, "{Action} {Project} from the dashboard failed", p.Paused ? "Resuming" : "Pausing", p.Id);
+            commandMessage = $"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}";
+        }
         await ReloadAsync();
     }
 

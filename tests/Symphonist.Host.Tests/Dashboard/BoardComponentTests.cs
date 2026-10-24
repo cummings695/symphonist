@@ -256,6 +256,18 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public void Pause_that_cannot_be_saved_shows_the_error()
+    {
+        Directory.CreateDirectory(SymphonistPaths.Resolve("paused.json")); // a directory in its place: the write fails
+        var cut = RenderBoard();
+
+        cut.Find("[data-project='orders']").QuerySelectorAll("button").Single(b => b.TextContent.Trim() == "Pause").Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("Could not pause Project orders:", StatusLine(cut)));
+        Assert.NotEmpty(cut.FindAll("[data-board-loaded]"));
+    }
+
+    [Fact]
     public void Host_mode_project_is_marked()
     {
         var cut = RenderBoard();
