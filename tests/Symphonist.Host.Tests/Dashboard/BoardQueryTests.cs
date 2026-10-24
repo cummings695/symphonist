@@ -4,6 +4,7 @@ using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
@@ -270,6 +271,81 @@ public sealed class BoardQueryTests : IDisposable
 
         Assert.False(detail.CanApprove || detail.CanSendBack || detail.CanUnblock);
         Assert.Empty(detail.SendBackTargets);
+    }
+
+    private static GateVerdict Verdict(RiskLevel risk) => new(risk, "summary", ["why"], ["c"], []);
+
+    [Fact]
+    public async Task Card_carries_risk_and_reviewing()
+    {
+        home.WriteProject("auto.yaml", TestHome.ReviewedProjectYaml("auto", "active"));
+        registry.Reload();
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, with: t => t.Risk = RiskLevel.High);
+        await Seed("AUTO-1", "implement", StageStatus.AwaitingApproval, "auto", t => t.ReviewDue = true);
+        await Seed("AUTO-2", "implement", StageStatus.AwaitingApproval, "auto"); // review finished: waits on you
+
+        var board = await query.LoadBoardAsync(null, default);
+        var cards = board.Columns.SelectMany(c => c.Cards).ToDictionary(c => c.Key);
+
+        Assert.Equal(RiskLevel.High, cards["ORD-1"].Risk);
+        Assert.Null(cards["AUTO-2"].Risk);
+        Assert.True(cards["AUTO-1"].Reviewing);
+        Assert.False(cards["AUTO-1"].WaitingOnYou);
+        Assert.True(cards["ORD-1"].WaitingOnYou);
+        Assert.False(cards["ORD-1"].Reviewing);
+        Assert.True(cards["AUTO-2"].WaitingOnYou);
+        Assert.Equal(2, board.Counts.WaitingOnYou);
+        Assert.Equal(1, (await query.LoadBoardAsync("auto", default)).Counts.WaitingOnYou); // AUTO-1 is with the reviewer
+    }
+
+    [Fact]
+    public async Task Review_owed_on_a_human_gate_is_not_reviewing()
+    {
+        home.WriteProject("auto.yaml", TestHome.ReviewedProjectYaml("auto", "shadow"));
+        registry.Reload();
+        await Seed("AUTO-1", "implement", StageStatus.AwaitingApproval, "auto", t => t.ReviewDue = true);
+
+        var card = (await query.LoadBoardAsync(null, default)).Columns.SelectMany(c => c.Cards).Single();
+
+        Assert.False(card.Reviewing); // shadow mode: the card waits on the developer from the start
+        Assert.True(card.WaitingOnYou);
+    }
+
+    [Fact]
+    public async Task Project_carries_review_mode_and_agreement()
+    {
+        home.WriteProject("auto.yaml", TestHome.ReviewedProjectYaml("auto", "shadow"));
+        registry.Reload();
+        var t = await Seed("AUTO-1", "implement", StageStatus.AwaitingApproval, "auto");
+        foreach (var (round, decision) in new[] { (1, GateDecision.Approved), (2, GateDecision.SentBack) })
+        {
+            var since = Now.AddHours(round);
+            await store.AddGateReviewAsync(new GateReview(t.Id, "auto", "implement", since, since, ReviewMode.Shadow,
+                GatePolicy.AutoWhenLowRisk, Verdict(RiskLevel.Low)), default);
+            await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "auto", "implement", since, decision, false, since), default);
+        }
+
+        var projects = (await query.LoadBoardAsync(null, default)).Projects;
+
+        var auto = projects.Single(p => p.Id == "auto");
+        Assert.Equal(ReviewMode.Shadow, auto.Review);
+        var agreement = Assert.Single(auto.Agreement!);
+        Assert.Equal(("implement", 2, 1, 1), (agreement.StageId, agreement.Decided, agreement.Agreed, agreement.FalseLows));
+        Assert.Equal(ReviewMode.Off, projects.Single(p => p.Id == "orders").Review);
+        Assert.Empty(projects.Single(p => p.Id == "orders").Agreement!);
+    }
+
+    [Fact]
+    public async Task Detail_carries_gate_reviews_newest_first()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        foreach (var hours in new[] { 1, 3, 2 })
+            await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Now.AddHours(hours), Now.AddHours(hours),
+                ReviewMode.Shadow, GatePolicy.Human, Verdict(RiskLevel.High)), default);
+
+        var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+
+        Assert.Equal([Now.AddHours(3), Now.AddHours(2), Now.AddHours(1)], detail.Reviews.Select(r => r.At));
     }
 
     [Fact]

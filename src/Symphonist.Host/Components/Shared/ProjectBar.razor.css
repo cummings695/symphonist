@@ -46,3 +46,13 @@
     border-radius: 0 var(--radius) var(--radius) 0;
     overflow-wrap: anywhere;
 }
+
+.project-agreement {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.1rem 1rem;
+    margin: 0.3rem 0 0.1rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}

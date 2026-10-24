@@ -49,5 +49,10 @@ public sealed class TestHome : IDisposable
           - { id: done,      kind: done,      onEnterStatus: Done }
         """;
 
+    /// <summary>The same project with an auto gate at implement and the reviewer in <paramref name="mode"/> (off, shadow, active).</summary>
+    public static string ReviewedProjectYaml(string id, string mode) =>
+        ProjectYaml(id).Replace("{ id: implement, kind: implement, gate: human,", "{ id: implement, kind: implement, gate: auto,")
+        + $"\nreview:\n  mode: {mode}\n";
+
     public const string HostAgent = "type: claude-code\n  isolation: host\n  allowedTools: [Read]";
 }

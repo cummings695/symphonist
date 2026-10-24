@@ -17,6 +17,15 @@
     padding-left: calc(0.6rem - 3px);
 }
 
+/* With the reviewer, not yet with the developer: quiet, dashed, no highlight. */
+.card-reviewing {
+    border-style: dashed;
+}
+
+.card-reviewing .status-label {
+    font-weight: 600;
+}
+
 .card-blocked {
     background: var(--danger-tint);
     border-left: 4px solid var(--danger);
@@ -29,6 +38,7 @@
 
 .card-top {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem;
     min-width: 0;

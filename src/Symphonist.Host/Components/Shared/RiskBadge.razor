@@ -1,0 +1,9 @@
+@using Symphonist.Core.Risk
+@if (Risk is { } risk)
+{
+    <span class="badge badge-risk-@(risk == RiskLevel.High ? "high" : "low")">@(risk == RiskLevel.High ? "High risk" : "Low risk")</span>
+}
+
+@code {
+    [Parameter] public RiskLevel? Risk { get; set; }
+}

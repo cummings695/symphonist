@@ -6,8 +6,10 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.JSInterop;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Components.Pages;
 using Symphonist.Host.Dashboard;
@@ -203,6 +205,71 @@ public sealed class TicketDetailComponentTests : IDisposable
 
         cut.WaitForAssertion(() => Assert.Contains("ORD-1: advanced to implement", StatusLine(cut)));
         Assert.Contains("tracker sync skipped: secret not set", store.EventMessages("ORD-1"));
+    }
+
+    [Fact]
+    public async Task Approve_with_a_newer_round_waiting_changes_nothing()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        var again = store.Single("ORD-1");
+        again.WaitingSince = Now.AddMinutes(30);
+        await store.SaveAsync(again, default);
+
+        Button(cut, "Approve").Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: implement is waiting on a newer round", StatusLine(cut)));
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+    }
+
+    [Fact]
+    public async Task Detail_shows_gate_reasoning_as_text()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, x => x.Risk = RiskLevel.High);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "plan", Now.AddHours(-2), Now.AddHours(-2), ReviewMode.Shadow,
+            GatePolicy.Human, new GateVerdict(RiskLevel.Low, "plan is small", ["tiny"], ["read the plan"], [])), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now.AddHours(-2), GateDecision.Approved, false, Now.AddHours(-1)), default);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Now, Now, ReviewMode.Active,
+            GatePolicy.AutoWhenLowRisk, new GateVerdict(RiskLevel.High, "<i>sum</i>", ["<b>x</b>", "second"], ["checked <u>a</u>", "checked b"], ["pricing"], "boom <s>")), default);
+
+        var cut = Loaded(Render());
+
+        var reviews = cut.FindAll("[data-gate-review]");
+        Assert.Equal(2, reviews.Count);
+        Assert.Contains("implement", reviews[0].TextContent); // newest first
+        Assert.Equal("High risk", reviews[0].QuerySelector(".badge-risk-high")!.TextContent.Trim());
+        Assert.Contains("undecided", reviews[0].TextContent);
+        Assert.Contains("active", reviews[0].TextContent);
+        Assert.Contains("<i>sum</i>", reviews[0].TextContent);
+        Assert.Equal(["<b>x</b>", "second"], reviews[0].QuerySelectorAll("[data-reasons] li").Select(e => e.TextContent));
+        Assert.Equal(["checked <u>a</u>", "checked b"], reviews[0].QuerySelectorAll("[data-checked] li").Select(e => e.TextContent));
+        Assert.Equal(["pricing"], reviews[0].QuerySelectorAll("[data-areas] li").Select(e => e.TextContent));
+        Assert.Contains("boom <s>", reviews[0].QuerySelector("[data-review-error]")!.TextContent);
+        Assert.Contains("you approved", reviews[1].TextContent);
+        Assert.Equal("Low risk", reviews[1].QuerySelector(".badge-risk-low")!.TextContent.Trim());
+        Assert.Contains("read the plan", reviews[1].TextContent);
+        Assert.Empty(cut.FindAll("[data-gate-review] b, [data-gate-review] i, [data-gate-review] u, [data-gate-review] s"));
+        Assert.Contains("&lt;b&gt;x&lt;/b&gt;", cut.Markup);
+    }
+
+    [Fact]
+    public async Task Detail_labels_every_outcome_and_the_empty_state()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending);
+        Assert.Contains("No gate reviews yet.", Loaded(Render()).Markup);
+
+        var t = await Seed("ORD-2", "implement", StageStatus.Pending);
+        var verdict = new GateVerdict(RiskLevel.Low, "s", [], ["c"], []);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Now, Now, ReviewMode.Active, GatePolicy.AutoWhenLowRisk, verdict), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "implement", Now, GateDecision.Approved, true, Now), default);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "implement", Now.AddHours(1), Now.AddHours(1), ReviewMode.Shadow, GatePolicy.Human, verdict), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "implement", Now.AddHours(1), GateDecision.SentBack, false, Now.AddHours(1)), default);
+
+        var cut = Loaded(Render("ORD-2"));
+
+        Assert.Contains("you sent back", cut.FindAll("[data-gate-review]")[0].TextContent);
+        Assert.Contains("auto-approved", cut.FindAll("[data-gate-review]")[1].TextContent);
+        Assert.DoesNotContain("No gate reviews yet.", cut.Markup);
     }
 
     [Fact]

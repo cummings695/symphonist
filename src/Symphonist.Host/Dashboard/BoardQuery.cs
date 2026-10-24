@@ -19,13 +19,14 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var filter = configured.FirstOrDefault(p => p.Id == projectFilter);
         var tickets = await store.ListAsync(filter?.Id, ct);
         var costs = await store.AgentCostsAsync(ct);
+        var agreements = (await store.ReviewAgreementAsync(filter?.Id, ct)).ToLookup(a => a.ProjectId);
 
         var byId = configured.ToDictionary(p => p.Id);
         var cards = tickets.Select(t => (Ticket: t, Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), costs))).ToList();
 
         var boardProjects = configured.OrderBy(p => p.Id, StringComparer.Ordinal)
             .Select(p => new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
-                orchestrator.ProblemOf(p.Id), SourceName(p)))
+                orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList()))
             .ToList();
 
         var columns = new List<BoardColumn>();
@@ -46,7 +47,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         if (unknown.Count > 0) columns.Add(Column(UnknownColumnId, "Unknown stage", unknown, false, tickets));
 
         var counts = new BoardCounts(
-            cards.Count(c => c.Card.Status == StageStatus.AwaitingApproval),
+            cards.Count(c => c.Card.WaitingOnYou),
             cards.Count(c => c.Card.Status == StageStatus.Running),
             cards.Count(c => c.Card.Status == StageStatus.Blocked));
         return new BoardModel(boardProjects, filter?.Id, columns, counts);
@@ -56,6 +57,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
     public async Task<TicketDetailModel?> LoadTicketAsync(string projectId, string key, CancellationToken ct)
     {
         if (await store.FindAsync(projectId, key, ct) is not { } t) return null;
+        var reviews = (await store.GateReviewsAsync(t.Id, ct)).OrderByDescending(r => r.At).ToList();
         var runs = (await store.AgentRunsAsync(t.Id, ct)).OrderByDescending(r => r.StartedAt).ToList();
         var events = (await store.EventsAsync(t.Id, ct)).OrderByDescending(e => e.At).ThenByDescending(e => e.Id).ToList();
         var project = projects.Projects.FirstOrDefault(p => p.Id == t.ProjectId);
@@ -73,7 +75,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var sendBack = known && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
         return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
-            known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked);
+            known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews);
     }
 
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
@@ -107,10 +109,11 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
     };
 
     private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs) =>
-        new(t.ProjectId, t.Key, t.Title, t.StageId, t.Status, t.Status == StageStatus.AwaitingApproval, t.BlockedReason,
+        new(t.ProjectId, t.Key, t.Title, t.StageId, t.Status, t.BlockedReason,
             t.Attempts, p?.MaxAttemptsPerStage, Since(t), costs.TryGetValue(t.Id, out var cost) ? cost : null,
             TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p),
-            p?.Pipeline.Any(s => s.Id == t.StageId) == true);
+            p?.Pipeline.Any(s => s.Id == t.StageId) == true, t.Risk,
+            p?.Pipeline.Any(s => s.Id == t.StageId) == true && PipelineEngine.WaitsOnReviewer(p, t));
 
     private static DateTimeOffset? Since(Ticket t) => t.Status switch
     {

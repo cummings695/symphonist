@@ -1,10 +1,12 @@
 @using System.Globalization
+@using Symphonist.Core.Risk
 
-<article class="card card-@Card.Status.ToString().ToLowerInvariant()" data-key="@Card.Key" data-project-card="@Card.Project">
+<article class="card card-@(Card.Reviewing ? "reviewing" : Card.Status.ToString().ToLowerInvariant())" data-key="@Card.Key" data-project-card="@Card.Project">
     <div class="card-top">
         <a class="card-key" href="@DetailUrl">@Card.Key</a>
         <span class="badge">@Card.Source</span>
         <span class="status-label"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
+        <RiskBadge Risk="Card.Risk" />
     </div>
     <p class="card-title">@Card.Title</p>
     @if (ProjectName is not null)
@@ -56,7 +58,10 @@
     private string DetailUrl => $"/tickets/{Uri.EscapeDataString(Card.Project)}/{Uri.EscapeDataString(Card.Key)}"
         + (From is { Length: > 0 } from ? $"?from={Uri.EscapeDataString(from)}" : "");
 
-    private string StatusText => StatusLabel(Card.Status);
+    private string StatusText => StatusLabel(Card);
+
+    /// <summary>The card's status; "Reviewing" while an active auto gate is still with the reviewer.</summary>
+    public static string StatusLabel(BoardCard card) => card.Reviewing ? "Reviewing" : StatusLabel(card.Status);
 
     public static string StatusLabel(StageStatus status) => status switch
     {
@@ -79,7 +84,7 @@
     private string? TimeVerb => Card.Status switch
     {
         StageStatus.Running => "running",
-        StageStatus.AwaitingApproval => "waiting",
+        StageStatus.AwaitingApproval => Card.Reviewing ? "reviewing" : "waiting",
         StageStatus.Blocked => "blocked",
         _ => null,
     };

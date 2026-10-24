@@ -1,6 +1,8 @@
 @page "/tickets/{Project}/{Key}"
 @using System.Globalization
 @using Microsoft.AspNetCore.Http
+@using Symphonist.Core.Risk
+@using Symphonist.Core.Storage
 @implements IAsyncDisposable
 @inject BoardQuery Query
 @inject BoardNotifier Notifier
@@ -37,7 +39,8 @@ else
             <h1><span class="ticket-key">@card.Key</span> <span class="ticket-title">@card.Title</span></h1>
             <p class="ticket-facts">
                 <span class="badge">@card.Source</span>
-                <span class="ticket-status ticket-@card.Status.ToString().ToLowerInvariant()" data-status>@TicketCard.StatusLabel(card.Status)</span>
+                <span class="ticket-status ticket-@card.Status.ToString().ToLowerInvariant()" data-status>@TicketCard.StatusLabel(card)</span>
+                <RiskBadge Risk="card.Risk" />
                 <span>stage <strong>@card.StageId</strong></span>
                 <span>@(card.MaxAttempts is { } max ? $"attempt {card.Attempts}/{max}" : $"attempt {card.Attempts}")</span>
                 @if (card.CostUsd is { } cost)
@@ -122,6 +125,39 @@ else
                 }
             </section>
         }
+
+        <section aria-labelledby="reviews-heading">
+            <h2 id="reviews-heading">Gate reviews</h2>
+            @if (model.Reviews.Count == 0)
+            {
+                <p class="empty">No gate reviews yet.</p>
+            }
+            else
+            {
+                <ol class="reviews">
+                    @foreach (var review in model.Reviews)
+                    {
+                        <li class="review" data-gate-review>
+                            <p class="review-head">
+                                <strong>@review.StageId</strong>
+                                <time datetime="@review.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(review.At)</time>
+                                <span class="badge">@review.Mode.ToString().ToLowerInvariant()</span>
+                                <RiskBadge Risk="review.Verdict.Risk" />
+                                <span class="review-outcome">@Outcome(review)</span>
+                            </p>
+                            <p class="review-summary">@review.Verdict.Summary</p>
+                            @if (review.Verdict.Error is { Length: > 0 } error)
+                            {
+                                <p class="review-error" data-review-error><strong>Error:</strong> @error</p>
+                            }
+                            <ReviewList Title="Reasons" Items="review.Verdict.Reasons" Marker="data-reasons" />
+                            <ReviewList Title="Checked" Items="review.Verdict.Checked" Marker="data-checked" />
+                            <ReviewList Title="Risk areas touched" Items="review.Verdict.AreasTouched" Marker="data-areas" />
+                        </li>
+                    }
+                </ol>
+            }
+        </section>
 
         <section aria-labelledby="runs-heading">
             <h2 id="runs-heading">Agent runs</h2>
@@ -255,8 +291,9 @@ else
 
     private Task ApproveAsync()
     {
-        var stage = model?.Card.StageId; // the gate shown on the page, not one the ticket reached meanwhile
-        return RunAsync("approve", "approved", ct => Orchestrator.ApproveAsync(Project, Key, ct, stage));
+        var stage = model?.Card.StageId; // the gate and round shown on the page, not ones the ticket reached meanwhile
+        var round = model?.Card.Since;
+        return RunAsync("approve", "approved", ct => Orchestrator.ApproveAsync(Project, Key, ct, stage, round));
     }
 
     private Task UnblockAsync() =>
@@ -337,6 +374,15 @@ else
 
     private static string LocalTime(DateTimeOffset at) =>
         at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+    private static string Outcome(GateReview review) =>
+        review.AutoDecided ? "auto-approved"
+        : review.Decision switch
+        {
+            GateDecision.Approved => "you approved",
+            GateDecision.SentBack => "you sent back",
+            _ => "undecided",
+        };
 
     private static string Duration(TimeSpan span) =>
         span.TotalMinutes < 1 ? $"{(int)span.TotalSeconds}s" : $"{(int)span.TotalMinutes}m {span.Seconds:00}s";

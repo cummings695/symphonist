@@ -1,0 +1,23 @@
+@if (Items.Count > 0)
+{
+    <div class="review-list" @attributes="Attributes">
+        <h3>@Title</h3>
+        <ul>
+            @foreach (var item in Items)
+            {
+                <li>@item</li>
+            }
+        </ul>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = "";
+
+    [Parameter, EditorRequired] public IReadOnlyList<string> Items { get; set; } = [];
+
+    /// <summary>A data attribute name the page and tests find the list by.</summary>
+    [Parameter] public string? Marker { get; set; }
+
+    private Dictionary<string, object>? Attributes => Marker is null ? null : new() { [Marker] = true };
+}

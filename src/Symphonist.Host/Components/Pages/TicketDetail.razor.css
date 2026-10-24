@@ -156,6 +156,50 @@ h2 {
     overflow-wrap: anywhere;
 }
 
+.reviews {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.86rem;
+}
+
+.review {
+    max-width: 60rem;
+    margin-bottom: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.review-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.2rem 0.6rem;
+    margin: 0;
+}
+
+.review-head time,
+.review-outcome {
+    color: var(--muted);
+}
+
+.review-outcome {
+    font-weight: 600;
+}
+
+.review-summary,
+.review-error {
+    margin: 0.3rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.review-error {
+    color: var(--danger);
+}
+
 .events {
     margin: 0;
     padding: 0;

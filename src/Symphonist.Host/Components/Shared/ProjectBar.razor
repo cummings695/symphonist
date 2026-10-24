@@ -1,3 +1,4 @@
+@using Symphonist.Core.Risk
 <div class="project @(Project.Paused ? "project-paused" : null)" data-project="@Project.Id">
     <div class="project-row">
         <span class="project-name">@Project.Name</span>
@@ -6,6 +7,7 @@
         {
             <span class="badge badge-caution" title="The agent runs directly on this machine, not in a container">host mode</span>
         }
+        <span class="badge" title="The risk reviewer's mode for this project">Reviewer: @Project.Review.ToString().ToLowerInvariant()</span>
         @if (Project.Paused)
         {
             <span class="badge badge-paused">Paused</span>
@@ -16,6 +18,15 @@
             <button type="button" class="button button-quiet" aria-label="@($"Pause {Project.Name}")" @onclick="OnTogglePause">Pause</button>
         }
     </div>
+    @if (Agreement().Any())
+    {
+        <p class="project-agreement" aria-label="Reviewer agreement with your decisions">
+            @foreach (var a in Agreement())
+            {
+                <span data-agreement="@a.StageId">@Describe(a)</span>
+            }
+        </p>
+    }
     @if (Project.Problem is { Length: > 0 } problem)
     {
         <p class="project-problem"><strong>Problem:</strong> @problem</p>
@@ -26,4 +37,12 @@
     [Parameter, EditorRequired] public BoardProject Project { get; set; } = default!;
 
     [Parameter] public EventCallback OnTogglePause { get; set; }
+
+    private IEnumerable<StageAgreement> Agreement() =>
+        (Project.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);
+
+    private static string Describe(StageAgreement a) =>
+        $"{a.StageId}: agrees {a.Agreed}/{a.Decided}"
+        + (a.FalseLows > 0 ? $" · {a.FalseLows} low-risk call(s) sent back" : "")
+        + (a.AutoApproved > 0 ? $" · {a.AutoApproved} auto-approved" : "");
 }

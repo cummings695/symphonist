@@ -142,6 +142,36 @@ select {
     white-space: nowrap;
 }
 
+/* Risk is always spelled out ("Low risk" / "High risk"); the colour only reinforces the words. */
+.badge-risk-low {
+    border-color: var(--ok);
+    color: var(--ok);
+}
+
+.badge-risk-high {
+    border-color: var(--danger);
+    background: var(--danger-tint);
+    color: var(--danger);
+    font-weight: 600;
+}
+
+/* Reviewer reasoning lists (the ticket page) */
+.review-list h3 {
+    margin: 0.4rem 0 0.1rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.review-list ul {
+    margin: 0;
+    padding-left: 1.2rem;
+}
+
+.review-list li {
+    overflow-wrap: anywhere;
+}
+
 /* Board (global because the page's <h1> must stay attribute-free) */
 
 .board-header {

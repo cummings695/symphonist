@@ -7,8 +7,10 @@ using Microsoft.Extensions.Time.Testing;
 using Microsoft.JSInterop;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Components.Pages;
 using Symphonist.Host.Dashboard;
@@ -56,13 +58,17 @@ public sealed class BoardComponentTests : IDisposable
         home.Dispose();
     }
 
-    private async Task Seed(string key, string stage, StageStatus status, string project = "orders", string? title = null)
+    private async Task<Ticket> Seed(string key, string stage, StageStatus status, string project = "orders", string? title = null,
+        Action<Ticket>? with = null)
     {
-        await store.SaveAsync(new Ticket
+        var t = new Ticket
         {
             Id = Guid.NewGuid(), ProjectId = project, Key = key, Title = title ?? $"Title {key}", StageId = stage,
             Status = status, Attempts = 1, CreatedAt = Now, UpdatedAt = Now, StageStartedAt = Now, WaitingSince = Now,
-        }, default);
+        };
+        with?.Invoke(t);
+        await store.SaveAsync(t, default);
+        return t;
     }
 
     private async Task SeedDefault()
@@ -201,6 +207,95 @@ public sealed class BoardComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.Contains("ORD-5: advanced to implement", StatusLine(cut)));
         Assert.Equal("implement", store.Single("ORD-5").StageId);
         Assert.Contains("tracker sync skipped: secret 'jira-acme' not set", store.EventMessages("ORD-5"));
+    }
+
+    [Fact]
+    public async Task Approve_with_a_newer_round_waiting_changes_nothing()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+        var again = store.Single("ORD-1"); // sent back and waiting again at the same gate: a newer round
+        again.WaitingSince = Now.AddMinutes(30);
+        await store.SaveAsync(again, default);
+
+        Card(cut, "ORD-1").QuerySelector("button")!.Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: implement is waiting on a newer round", StatusLine(cut)));
+        Assert.Equal((StageStatus.AwaitingApproval, Now.AddMinutes(30)),
+            (store.Single("ORD-1").Status, store.Single("ORD-1").WaitingSince));
+    }
+
+    [Fact]
+    public async Task Approve_sends_the_round_it_showed()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+
+        Card(cut, "ORD-1").QuerySelector("button")!.Click(); // still the round the card showed
+
+        cut.WaitForAssertion(() => Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status));
+    }
+
+    [Fact]
+    public async Task Risk_badge_is_labelled()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, with: t => t.Risk = RiskLevel.High);
+        await Seed("ORD-2", "plan", StageStatus.AwaitingApproval, with: t => t.Risk = RiskLevel.Low);
+        await Seed("ORD-3", "plan", StageStatus.Pending);
+
+        var cut = RenderBoard();
+
+        Assert.Equal("High risk", Card(cut, "ORD-1").QuerySelector(".badge-risk-high")!.TextContent.Trim());
+        Assert.Equal("Low risk", Card(cut, "ORD-2").QuerySelector(".badge-risk-low")!.TextContent.Trim());
+        Assert.Empty(Card(cut, "ORD-3").QuerySelectorAll("[class*=badge-risk]"));
+    }
+
+    [Fact]
+    public async Task Reviewing_card_has_no_approve_button()
+    {
+        home.WriteProject("auto.yaml", TestHome.ReviewedProjectYaml("auto", "active"));
+        registry.Reload();
+        await Seed("AUTO-1", "implement", StageStatus.AwaitingApproval, "auto", with: t => t.ReviewDue = true);
+
+        var cut = RenderBoard();
+
+        var card = Card(cut, "AUTO-1");
+        Assert.Contains("Reviewing", card.QuerySelector(".status-label")!.TextContent);
+        Assert.DoesNotContain("Waiting on you", card.TextContent);
+        Assert.Empty(card.QuerySelectorAll("button"));
+        Assert.DoesNotContain("card-awaitingapproval", card.ClassList);
+        Assert.Contains("0 waiting on you", cut.Find(".counts").TextContent);
+    }
+
+    [Fact]
+    public async Task Project_bar_shows_agreement_numbers()
+    {
+        home.WriteProject("auto.yaml", TestHome.ReviewedProjectYaml("auto", "shadow"));
+        registry.Reload();
+        var t = await Seed("AUTO-1", "implement", StageStatus.AwaitingApproval, "auto");
+        var verdict = new GateVerdict(RiskLevel.Low, "s", [], ["c"], []);
+        foreach (var (hours, decision) in new[] { (1, GateDecision.Approved), (2, GateDecision.SentBack) })
+        {
+            var since = Now.AddHours(hours);
+            await store.AddGateReviewAsync(new GateReview(t.Id, "auto", "implement", since, since, ReviewMode.Shadow,
+                GatePolicy.AutoWhenLowRisk, verdict), default);
+            await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "auto", "implement", since, decision, false, since), default);
+        }
+        var autoAt = Now.AddHours(3);
+        await store.AddGateReviewAsync(new GateReview(t.Id, "auto", "implement", autoAt, autoAt, ReviewMode.Active,
+            GatePolicy.AutoWhenLowRisk, verdict), default);
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "auto", "implement", autoAt, GateDecision.Approved, true, autoAt), default);
+
+        var cut = RenderBoard();
+
+        var text = cut.Find("[data-project='auto']").TextContent;
+        Assert.Contains("Reviewer: shadow", text);
+        Assert.Contains("implement: agrees 1/2", text);
+        Assert.Contains("1 low-risk call(s) sent back", text);
+        Assert.Contains("1 auto-approved", text);
+        var orders = cut.Find("[data-project='orders']").TextContent;
+        Assert.Contains("Reviewer: off", orders);
+        Assert.DoesNotContain("agrees", orders);
     }
 
     [Fact]
