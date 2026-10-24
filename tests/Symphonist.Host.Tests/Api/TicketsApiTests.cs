@@ -268,9 +268,17 @@ public sealed class TicketsApiTests : IDisposable
     [Fact]
     public async Task Poll_requests_are_coalesced()
     {
+        // Hold the first tick until every request was answered, so no tick can finish between requests.
+        using var allAccepted = new ManualResetEventSlim();
+        tracker.OnQuery = () =>
+        {
+            allAccepted.Wait(TimeSpan.FromSeconds(10));
+            return [];
+        };
         var http = Authorized();
         var responses = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => http.PostAsync("/api/poll", null)));
         Assert.All(responses, r => Assert.Equal(HttpStatusCode.Accepted, r.StatusCode));
+        allAccepted.Set();
 
         await factory.Services.GetRequiredService<Orchestrator>().WhenIdleAsync();
 
