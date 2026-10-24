@@ -90,7 +90,39 @@ public static class ProjectConfigLoader
             d.MaxAttemptsPerStage ?? 3,
             pipeline,
             prompts,
-            dir);
+            dir)
+        {
+            RiskAreas = MapRiskAreas(d.RiskAreas),
+            Review = MapReview(d.Review, agent, isolation, dir),
+        };
+    }
+
+    private static List<RiskArea> MapRiskAreas(List<RiskAreaDto?>? areas)
+    {
+        var result = new List<RiskArea>();
+        var seen = new HashSet<string>();
+        for (var i = 0; areas is not null && i < areas.Count; i++)
+        {
+            var a = areas[i] ?? throw new ProjectConfigException($"riskAreas[{i}] is empty");
+            var name = Required(a.Name, "riskAreas[].name");
+            if (!seen.Add(name)) throw new ProjectConfigException($"duplicate risk area '{name}'");
+            result.Add(new RiskArea(name, Required(a.Description, "riskAreas[].description"),
+                Items(a.Paths, $"riskAreas '{name}' paths")));
+        }
+        return result;
+    }
+
+    private static ReviewConfig MapReview(ReviewDto? r, AgentDto agent, Isolation isolation, string dir)
+    {
+        var mode = ParseEnum<ReviewMode>(r?.Mode ?? "off", "review.mode");
+        var ra = r?.Agent;
+        Supported("review.agent.type", ra?.Type ?? agent.Type!, "claude-code");
+        var tools = ra?.AllowedTools is null ? ReviewConfig.ReadOnlyTools : Items(ra.AllowedTools, "review.agent.allowedTools");
+        if (tools.Count == 0) tools = ReviewConfig.ReadOnlyTools;
+        var settings = new AgentSettings(ra?.Type ?? agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
+            tools, ra?.TimeoutMinutes ?? 20, ra?.Model ?? agent.Model, agent.Image);
+        var prompt = r?.Prompt is null ? null : Path.GetFullPath(Required(r.Prompt, "review.prompt"), dir);
+        return new ReviewConfig(mode, settings, prompt);
     }
 
     private static List<StageDefinition> MapPipeline(List<StageDto?>? stages)
@@ -106,10 +138,11 @@ public static class ProjectConfigLoader
             var s = stages[i] ?? throw new ProjectConfigException($"pipeline[{i}] is empty");
             var stageId = Required(s.Id, "pipeline[].id");
             if (!seen.Add(stageId)) throw new ProjectConfigException($"duplicate stage id '{stageId}'");
+            var kind = ParseEnum<StageKind>(Required(s.Kind, $"pipeline stage '{stageId}' kind"), "stage kind");
             result.Add(new StageDefinition(
                 stageId,
-                ParseEnum<StageKind>(Required(s.Kind, $"pipeline stage '{stageId}' kind"), "stage kind"),
-                ParseEnum<GatePolicy>(s.Gate ?? "none", "gate"),
+                kind,
+                ParseGate(s.Gate, stageId, kind),
                 Items(s.EntryStatuses, $"pipeline stage '{stageId}' entryStatuses"),
                 s.OnEnterStatus, s.OnGateStatus, s.ApprovedWhenStatus));
         }
@@ -117,6 +150,17 @@ public static class ProjectConfigLoader
         if (result[^1].Kind != StageKind.Done)
             throw new ProjectConfigException("last stage must be kind 'done'");
         return result;
+    }
+
+    private static GatePolicy ParseGate(string? value, string stageId, StageKind kind)
+    {
+        var gate = string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase)
+            ? GatePolicy.AutoWhenLowRisk
+            : ParseEnum<GatePolicy>(value ?? "none", "gate");
+        if (gate == GatePolicy.AutoWhenLowRisk && !ProjectConfig.IsReviewable(kind))
+            throw new ProjectConfigException(
+                $"stage '{stageId}': gate 'auto' is only supported for triage, plan, implement and release");
+        return gate;
     }
 
     /// <summary>The list, or empty when absent; a null/blank item (YAML <c>~</c>) is rejected.</summary>
@@ -151,6 +195,22 @@ public static class ProjectConfigLoader
         public int? MaxAttemptsPerStage { get; set; }
         public List<StageDto?>? Pipeline { get; set; }
         public Dictionary<string, string?>? Prompts { get; set; }
+        public List<RiskAreaDto?>? RiskAreas { get; set; }
+        public ReviewDto? Review { get; set; }
+    }
+
+    private sealed class RiskAreaDto
+    {
+        public string? Name { get; set; }
+        public string? Description { get; set; }
+        public List<string>? Paths { get; set; }
+    }
+
+    private sealed class ReviewDto
+    {
+        public string? Mode { get; set; }
+        public string? Prompt { get; set; }
+        public AgentDto? Agent { get; set; }
     }
 
     private sealed class TrackerDto

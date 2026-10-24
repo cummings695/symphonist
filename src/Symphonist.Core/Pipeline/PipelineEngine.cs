@@ -47,7 +47,7 @@ public static class PipelineEngine
             return Deferred(pending, SendBackTo(t, target, latestFeedback, now));
 
         TransitionOutcome outcome;
-        if (stage.Gate == GatePolicy.Human)
+        if (stage.Gate != GatePolicy.None)
         {
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = now;

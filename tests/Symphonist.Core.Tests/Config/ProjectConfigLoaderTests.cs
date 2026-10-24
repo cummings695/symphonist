@@ -85,4 +85,112 @@ public class ProjectConfigLoaderTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    private static ProjectConfig LoadYaml(string yaml)
+    {
+        var dir = Directory.CreateTempSubdirectory("symphonist-cfg").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "p.yaml");
+            File.WriteAllText(path, yaml);
+            return ProjectConfigLoader.Load(path);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    private static string FixtureYaml() => File.ReadAllText(Fixture("orders.yaml")).Replace("\r\n", "\n");
+
+    [Fact]
+    public void Risk_areas_and_review_are_parsed()
+    {
+        var yaml = FixtureYaml()
+            .Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+                "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  image: acme/agent\n")
+            + "riskAreas:\n"
+            + "  - name: pricing\n"
+            + "    description: Anything that changes order prices.\n"
+            + "    paths: [\"src/Pricing/**\"]\n"
+            + "review:\n"
+            + "  mode: active\n"
+            + "  prompt: prompts/review.md\n"
+            + "  agent: { type: claude-code, model: opus }\n";
+        var p = LoadYaml(yaml);
+
+        var area = Assert.Single(p.RiskAreas);
+        Assert.Equal("pricing", area.Name);
+        Assert.Equal("Anything that changes order prices.", area.Description);
+        Assert.Equal(["src/Pricing/**"], area.Paths);
+        Assert.Equal(ReviewMode.Active, p.Review.Mode);
+        Assert.Equal("opus", p.Review.Agent.Model);
+        Assert.Equal(20, p.Review.Agent.TimeoutMinutes);
+        Assert.Equal(p.Agent.Isolation, p.Review.Agent.Isolation);
+        Assert.Equal("acme/agent", p.Review.Agent.Image);
+        Assert.Equal(p.Agent.AllowedDomains, p.Review.Agent.AllowedDomains);
+        Assert.Equal(Path.Combine(p.ConfigDirectory, "prompts", "review.md"), p.Review.PromptPath);
+    }
+
+    [Fact]
+    public void Review_defaults_to_off_with_read_only_tools()
+    {
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        Assert.Empty(p.RiskAreas);
+        Assert.Equal(ReviewMode.Off, p.Review.Mode);
+        Assert.Equal(ReviewConfig.ReadOnlyTools, p.Review.Agent.AllowedTools);
+        Assert.Null(p.Review.PromptPath);
+        Assert.Equal(20, p.Review.Agent.TimeoutMinutes);
+    }
+
+    [Theory]
+    [InlineData("auto")]
+    [InlineData("autoWhenLowRisk")]
+    public void Auto_gate_is_parsed(string gate)
+    {
+        var p = LoadYaml(FixtureYaml().Replace("kind: implement, gate: human", $"kind: implement, gate: {gate}"));
+        Assert.Equal(GatePolicy.AutoWhenLowRisk, p.Stage("implement").Gate);
+    }
+
+    [Fact]
+    public void Auto_gate_on_build_is_rejected()
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml().Replace("{ id: build,     kind: build }", "{ id: build,     kind: build, gate: auto }")));
+        Assert.Contains("stage 'build': gate 'auto' is only supported for triage, plan, implement and release", ex.Message);
+    }
+
+    [Fact]
+    public void Unsupported_review_agent_is_rejected()
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + "review:\n  mode: shadow\n  agent: { type: codex }\n"));
+        Assert.Contains("unsupported review.agent.type 'codex'", ex.Message);
+    }
+
+    [Fact]
+    public void Duplicate_or_incomplete_risk_area_is_rejected()
+    {
+        var dup = Assert.Throws<ProjectConfigException>(() => LoadYaml(FixtureYaml() +
+            "riskAreas:\n  - { name: pricing, description: a }\n  - { name: pricing, description: b }\n"));
+        Assert.Contains("duplicate risk area 'pricing'", dup.Message);
+
+        var noDescription = Assert.Throws<ProjectConfigException>(() => LoadYaml(FixtureYaml() +
+            "riskAreas:\n  - { name: pricing }\n"));
+        Assert.Contains("missing required 'riskAreas[].description'", noDescription.Message);
+
+        var blankPath = Assert.Throws<ProjectConfigException>(() => LoadYaml(FixtureYaml() +
+            "riskAreas:\n  - { name: pricing, description: a, paths: [\"\"] }\n"));
+        Assert.Contains("riskAreas 'pricing' paths contains an empty item", blankPath.Message);
+    }
+
+    [Fact]
+    public void Reviews_only_gated_reviewable_stages()
+    {
+        var shadow = LoadYaml(FixtureYaml() + "review:\n  mode: shadow\n");
+        Assert.True(shadow.Reviews(shadow.Stage("triage")));
+        Assert.False(shadow.Reviews(shadow.Stage("build")));
+        Assert.True(shadow.Reviews(shadow.Stage("release")));
+        Assert.False(shadow.Reviews(shadow.Stage("deploy")));
+
+        var off = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        Assert.All(off.Pipeline, s => Assert.False(off.Reviews(s)));
+    }
 }

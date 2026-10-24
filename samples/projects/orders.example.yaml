@@ -48,6 +48,8 @@ agent:
 #   kind:                triage | plan | implement | build | uat | release | deploy | done
 #   gate:                human = wait for approval (symphonist approve, or move the card to approvedWhenStatus);
 #                        none (default) = continue automatically
+#                        auto = approve automatically when the reviewer judges low risk (triage, plan, implement,
+#                               release only; needs review.mode: active, otherwise it waits for you like human)
 #   entryStatuses:       tracker statuses that mean "start at this stage" when a ticket is first picked up
 #   onEnterStatus:       move the card to this status when the stage starts
 #   onGateStatus:        move the card to this status when the stage is waiting for your approval
@@ -62,6 +64,23 @@ pipeline:
   - { id: release,   kind: release,   gate: human }
   - { id: deploy,    kind: deploy }
   - { id: done,      kind: done,      onEnterStatus: Done }
+
+# Areas the risk reviewer must treat as high risk. A change that touches one of the paths can never be auto-approved.
+riskAreas:
+  - name: pricing
+    description: Anything that changes how order prices, discounts or tax are computed.
+    paths: ["src/Pricing/**", "src/Orders/Discounts/**"]
+
+# Risk reviewer (a read-only agent that judges each gate). mode:
+#   off     = no reviewer runs (default); gate: auto behaves like human
+#   shadow  = the reviewer judges every gated stage of kind triage/plan/implement/release, but nothing is
+#             auto-approved. Set this to start collecting verdicts
+#   active  = like shadow, and gate: auto stages are approved automatically when the verdict is low risk
+# gate: auto only takes effect with mode: active.
+review:
+  mode: off
+  # prompt: prompts/review.md   # optional prompt override, relative to this file
+  # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # inherits the rest from agent
 
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
 # prompts:
