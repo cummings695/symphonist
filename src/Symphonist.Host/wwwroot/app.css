@@ -267,6 +267,45 @@ select {
     text-align: center;
 }
 
+/* Phone width: stages stack top to bottom instead of scrolling sideways. */
+@media (max-width: 40rem) {
+    .board-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .board-actions select {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .columns {
+        flex-direction: column;
+        align-items: stretch;
+        overflow-x: visible;
+        scroll-snap-type: none;
+    }
+
+    .column {
+        flex: none;
+        max-width: none;
+        min-width: 0;
+    }
+
+    /* An empty stage shrinks to its header line. */
+    .column:has(.column-empty) {
+        padding-block: 0.4rem;
+    }
+
+    .column:has(.column-empty) .column-header {
+        margin-bottom: 0;
+    }
+
+    .column-empty {
+        display: none;
+    }
+}
+
 /* Reconnect modal */
 
 #components-reconnect-modal {
