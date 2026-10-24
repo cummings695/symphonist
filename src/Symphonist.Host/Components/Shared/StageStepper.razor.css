@@ -1,0 +1,114 @@
+.stepper {
+    display: flex;
+    margin: 1rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.step {
+    --step-colour: var(--muted);
+    position: relative;
+    flex: 1 1 0;
+    min-width: 4.5rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0 0.25rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+    text-align: center;
+}
+
+/* The connector from the previous step's circle to this one; teal up to the ticket's stage. */
+.step::before {
+    content: "";
+    position: absolute;
+    top: 11px;
+    left: -50%;
+    right: 50%;
+    height: 3px;
+    background: var(--track);
+}
+
+.step:first-child::before {
+    display: none;
+}
+
+.step-done::before,
+.step-current::before {
+    background: var(--accent);
+}
+
+.step-circle {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: var(--surface);
+    font-size: 0.7rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.step-name {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+.step-gate {
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 400;
+}
+
+.step-done .step-circle {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--surface);
+}
+
+/* The ticket's stage: a ring in the colour of its state (ochre waiting on you, red blocked, blue running). */
+.step-current {
+    --step-colour: var(--fg);
+    color: var(--step-colour);
+    font-weight: 650;
+}
+
+.step-current .step-circle {
+    border-color: var(--step-colour);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--step-colour) 20%, transparent);
+}
+
+.step-waiting {
+    --step-colour: var(--waiting);
+}
+
+.step-waiting .step-circle {
+    border-color: var(--waiting-rail);
+    background: var(--waiting-tint);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--waiting-rail) 25%, transparent);
+}
+
+.step-blocked {
+    --step-colour: var(--danger);
+}
+
+.step-blocked .step-circle {
+    background: var(--danger-tint);
+}
+
+.step-running {
+    --step-colour: var(--running);
+}
+
+/* Phone width: the steps keep their size and the row scrolls sideways instead of squashing the names. */
+@media (max-width: 40rem) {
+    .stepper {
+        overflow-x: auto;
+        padding: 5px 0 0.25rem; /* room for the current step's ring, which the scroll box would clip */
+    }
+}

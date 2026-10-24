@@ -91,7 +91,7 @@
     };
 
     private string? ElapsedText() =>
-        Card.Since is { } since && TimeVerb is { } verb ? $"{verb} {Elapsed(Now - since)}" : null;
+        Card.Since is { } since && TimeVerb(Card) is { } verb ? $"{verb} {Elapsed(Now - since)}" : null;
 
     /// <summary>The footer line; the elapsed text moves here when there is no progress row to carry it.</summary>
     private IEnumerable<string> FooterItems(string? elapsed, bool progress)
@@ -102,10 +102,11 @@
         if (Card.CostUsd is { } cost) yield return "$" + cost.ToString("0.00", CultureInfo.InvariantCulture);
     }
 
-    private string? TimeVerb => Card.Status switch
+    /// <summary>What the elapsed time measures ("running", "waiting", …); null when the status has no clock.</summary>
+    public static string? TimeVerb(BoardCard card) => card.Status switch
     {
         StageStatus.Running => "running",
-        StageStatus.AwaitingApproval => Card.Reviewing ? "reviewing" : "waiting",
+        StageStatus.AwaitingApproval => card.Reviewing ? "reviewing" : "waiting",
         StageStatus.Blocked => "blocked",
         _ => null,
     };
