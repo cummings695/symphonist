@@ -159,6 +159,10 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
     [GeneratedRegex("^(new file mode|deleted file mode|old mode|new mode|index [0-9a-f]+[.][.][0-9a-f]+) 160000$")]
     private static partial Regex GitlinkHeader();
 
+    /// <summary>A symlink on the new side (added, retargeted, or a file turned into one), or one changed to another type.</summary>
+    [GeneratedRegex("^((new file mode|new mode|index [0-9a-f]+[.][.][0-9a-f]+) 120000|old mode 120000)$")]
+    private static partial Regex SymlinkHeader();
+
     [GeneratedRegex("^Binary files (.+) and (.+) differ$")]
     private static partial Regex BinaryLine();
 
@@ -222,6 +226,16 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
                            || l.StartsWith("Submodule ", StringComparison.Ordinal)
                            || GitlinkHeader().IsMatch(l)))
             verdict = verdict.WithForcedHigh("changes a submodule pointer");
+        // A symlink can point a guarded name (.claude, CLAUDE.md) at an unguarded file, or anything at anything.
+        string? current = null;
+        var symlinks = new List<string?>();
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("diff --git ", StringComparison.Ordinal)) current = HeaderPath(line);
+            else if (SymlinkHeader().IsMatch(line) && !symlinks.Contains(current)) symlinks.Add(current);
+        }
+        foreach (var path in symlinks)
+            verdict = verdict.WithForcedHigh(path is null ? "symlink added or changed" : $"symlink added or changed: {path}");
 
         if (truncated) verdict = verdict.WithForcedHigh("diff too large to review fully");
         return verdict;
@@ -244,7 +258,22 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
                || name.Equals("CLAUDE.local.md", StringComparison.OrdinalIgnoreCase)
                || name.Equals("AGENTS.md", StringComparison.OrdinalIgnoreCase)
                || name.Equals(".mcp.json", StringComparison.OrdinalIgnoreCase)
-               || parts[..^1].Any(dir => dir.Equals(".claude", StringComparison.OrdinalIgnoreCase));
+               || parts.Any(part => part.Equals(".claude", StringComparison.OrdinalIgnoreCase)); // .claude itself may be a symlink
+    }
+
+    /// <summary>
+    /// The path of a <c>diff --git a/P b/P</c> header (both sides are the same with renames off); null when the two
+    /// sides cannot be told apart.
+    /// </summary>
+    private static string? HeaderPath(string line)
+    {
+        var sides = line["diff --git ".Length..];
+        if (sides.Length % 2 == 0) return null;
+        var mid = sides.Length / 2;
+        var (a, b) = (sides[..mid], sides[(mid + 1)..]);
+        if (sides[mid] != ' ' || Unquote(a) != Unquote(b)) return null;
+        var path = Unquote(a);
+        return path.Length == 0 ? null : path;
     }
 
     /// <summary>Drops the C-quotes and the a/ or b/ prefix of a patch path (enough to read its extension).</summary>

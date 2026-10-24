@@ -174,7 +174,7 @@ review:
   was checked, and why it passed. If the comment can't be posted the gate is not approved and waits for you.
 - Anything else waits on you: a `high` verdict, a reviewer that failed or timed out, or one that was unsure. The
   reviewer must return `high` when unsure. A change to agent configuration (`CLAUDE.md`, `AGENTS.md`, `.mcp.json`,
-  anything under `.claude/`) is always `high`.
+  anything under `.claude/`) is always `high`, and so is a change that adds or changes a symlink.
 - An auto-approval covers only the reviewed commit. If the branch moved after the review, or the pull request would
   merge anything else (for example a fork's pull request with the same branch names), the merge is held and the gate is
   reviewed again. After two holds at a stage it waits for you instead.

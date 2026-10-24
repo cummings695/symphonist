@@ -598,6 +598,49 @@ public sealed class GateReviewerTests : IDisposable
     }
 
     [Theory]
+    [InlineData("new file mode 120000")]
+    [InlineData("new mode 120000")]
+    [InlineData("old mode 120000")]
+    [InlineData("index 1234567..89abcde 120000")]
+    public async Task Symlink_added_or_changed_forces_high(string line)
+    {
+        git.ChangedFiles = ["docs/link"];
+        git.Diff = "diff --git a/docs/link b/docs/link\n" + line + "\n";
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        var verdict = await Review(At("implement"));
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("symlink added or changed: docs/link", verdict.Reasons);
+    }
+
+    [Fact]
+    public async Task Symlink_with_a_path_that_cannot_be_attributed_still_forces_high()
+    {
+        git.ChangedFiles = ["docs/link"];
+        git.Diff = "new file mode 120000\n";
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        var verdict = await Review(At("implement"));
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("symlink added or changed", verdict.Reasons);
+    }
+
+    [Theory]
+    [InlineData("+new file mode 120000")] // a content line, not git's header
+    [InlineData("new file mode 100644")]
+    [InlineData("index 1234567..89abcde 100755")]
+    public async Task Ordinary_mode_headers_stay_low(string line)
+    {
+        git.ChangedFiles = ["docs/notes.md"];
+        git.Diff = "diff --git a/docs/notes.md b/docs/notes.md\n" + line + "\n";
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        Assert.Equal(RiskLevel.Low, (await Review(At("implement"))).Risk);
+    }
+
+    [Theory]
     [InlineData("Binary files a/docs/logo.png and b/docs/logo.png differ")]
     [InlineData("Binary files /dev/null and b/fonts/Inter.WOFF2 differ")]
     [InlineData("+Binary files a/x.cs and b/x.cs differ")] // a content line, not git's marker
@@ -637,6 +680,8 @@ public sealed class GateReviewerTests : IDisposable
     [InlineData("tools/.claude/settings.local.json")]
     [InlineData(".mcp.json")]
     [InlineData("services/api/.mcp.json")]
+    [InlineData(".claude")] // committed as a symlink to an unguarded directory
+    [InlineData("sub/.Claude")]
     public async Task Agent_configuration_files_force_high(string file)
     {
         // They steer later agent runs (and the developer's own Claude Code) in this repository.
@@ -653,6 +698,9 @@ public sealed class GateReviewerTests : IDisposable
     [InlineData("docs/claude.md.txt")]
     [InlineData("src/Claude/Client.cs")]
     [InlineData("my.claude/notes.md")]
+    [InlineData("my.claude")]
+    [InlineData(".claudex")]
+    [InlineData("tools/.claudex/settings.json")]
     public async Task Look_alike_files_are_not_agent_configuration(string file)
     {
         git.ChangedFiles = [file];

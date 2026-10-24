@@ -7,8 +7,6 @@ Review findings not fixed in plan 3. The first section matters only once a proje
 
 ## Fix before enabling `mode: active`
 
-- **`.claude` committed as a symlink bypasses the agent-config guard.** `GateReviewer.IsAgentConfiguration` matches `.claude` only as a parent directory. A PR that adds a symlink named `.claude` pointing at `tools/cfg/`, plus `tools/cfg/settings.json`, is not flagged. Fix: also match when the last path segment is `.claude` (case-insensitive), and force high on any added/changed symlink (mode `120000`).
-- **A committed `CLAUDE.md` symlink to an unguarded file** lets later edits to the target steer agent runs. Needs symlink-target awareness.
 - **Check-then-merge gap.** Bitbucket's merge call takes no expected source commit, so a push in the moment between the last PR read and the merge call could be merged.
 
 ## Security, broader than the reviewer

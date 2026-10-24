@@ -221,6 +221,70 @@ public sealed class GateReviewerGitTests : IDisposable
         Assert.Contains("Subproject commit 1234567890abcdef1234567890abcdef12345678", Assert.Single(agent.Requests).Prompt);
     }
 
+    /// <summary>Stages a symlink without OS symlink rights: a 120000 index entry whose blob is the target path.</summary>
+    private static void StageSymlink(string ws, string path, string target)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("git", ["hash-object", "-w", "--stdin"])
+        {
+            WorkingDirectory = ws, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        using var p = System.Diagnostics.Process.Start(psi)!;
+        p.StandardInput.Write(target);
+        p.StandardInput.Close();
+        var blob = p.StandardOutput.ReadToEnd().Trim();
+        p.WaitForExit();
+        Assert.Equal(0, p.ExitCode);
+        Run(ws, "update-index", "--add", "--cacheinfo", $"120000,{blob},{path}");
+    }
+
+    [Fact]
+    public async Task Claude_directory_committed_as_a_symlink_is_high()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        Write(ws, "tools/cfg/settings.json", "{\"hooks\":{}}");
+        Run(ws, "add", "tools/cfg/settings.json");
+        StageSymlink(ws, ".claude", "tools/cfg");
+        Run(ws, "commit", "-m", "settings via symlink");
+        Run(ws, "push", "-u", "origin", "symphonist/ORD-1");
+
+        var verdict = (await ReviewAsync()).Verdict;
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("changes agent configuration: .claude", verdict.Reasons);
+        Assert.Contains("symlink added or changed: .claude", verdict.Reasons);
+    }
+
+    [Fact]
+    public async Task Symlink_anywhere_is_high()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        StageSymlink(ws, "docs/link", "README.md");
+        Run(ws, "commit", "-m", "add link");
+        Run(ws, "push", "-u", "origin", "symphonist/ORD-1");
+
+        var verdict = (await ReviewAsync()).Verdict;
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("symlink added or changed: docs/link", verdict.Reasons);
+    }
+
+    [Fact]
+    public async Task Symlink_whose_target_changes_is_high()
+    {
+        StageSymlink(dev, "docs/link", "README.md");
+        Run(dev, "commit", "-m", "link on main");
+        Run(dev, "push", "origin", "main");
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        StageSymlink(ws, "docs/link", "src/Unguarded.md");
+        Run(ws, "commit", "-m", "retarget link");
+        Run(ws, "push", "-u", "origin", "symphonist/ORD-1");
+
+        var verdict = (await ReviewAsync()).Verdict;
+
+        Assert.Equal(RiskLevel.High, verdict.Risk);
+        Assert.Contains("symlink added or changed: docs/link", verdict.Reasons);
+    }
+
     [Fact]
     public async Task A_tag_named_like_the_remote_branch_does_not_move_the_base()
     {
