@@ -66,4 +66,20 @@ public class GateVerdictParserTests
         Assert.Equal(RiskLevel.High, v.Risk);
         Assert.Equal(["r", "x"], v.Reasons);
     }
+
+    [Theory]
+    [InlineData("""{"risk":"low","summary":"s","reasons":[],"checked":["c"],"risk_areas_touched":"pricing"}""", "malformed field 'risk_areas_touched'")]
+    [InlineData("""{"risk":"low","summary":"s","reasons":[],"checked":["c"],"risk_areas_touched":[{"name":"pricing"}]}""", "malformed field 'risk_areas_touched'")]
+    [InlineData("""{"risk":"low","summary":"s","reasons":[],"checked":["c"],"risk_areas_touched":[1]}""", "malformed field 'risk_areas_touched'")]
+    [InlineData("""{"risk":"low","summary":"s","reasons":[],"checked":"c"}""", "malformed field 'checked'")]
+    [InlineData("""{"risk":"low","summary":"s","reasons":"r","checked":["c"]}""", "malformed field 'reasons'")]
+    [InlineData("""{"risk":"low","reasons":[],"checked":["c"]}""", "'summary'")]
+    [InlineData("""{"risk":"low","summary":" ","reasons":[],"checked":["c"]}""", "'summary'")]
+    [InlineData("""{"risk":"low","summary":"s","checked":["c"]}""", "missing field 'reasons'")]
+    public void Malformed_or_missing_fields_make_low_high(string json, string reason)
+    {
+        var v = Parse(json);
+        Assert.Equal(RiskLevel.High, v.Risk);
+        Assert.Contains(v.Reasons, x => x.Contains(reason));
+    }
 }

@@ -25,4 +25,13 @@ public class RiskAreaMatcherTests
     [Fact]
     public void Backslash_paths_are_normalised() =>
         Assert.Single(RiskAreaMatcher.Touched([Pricing], ["src\\Pricing\\Calc.cs"]));
+
+    [Theory]
+    [InlineData("src/Pricing/Calc.cs", true)]
+    [InlineData("src/Pricing", true)]
+    [InlineData("/src/Pricing/Calc.cs", true)]
+    [InlineData(" src/Pricing/Calc.cs ", true)]
+    [InlineData("src/PricingTools/x.cs", false)]
+    public void Directory_pattern_without_glob_covers_its_contents(string file, bool touched) =>
+        Assert.Equal(touched, RiskAreaMatcher.Touched([new RiskArea("pricing", "", ["src/Pricing"])], [file]).Count == 1);
 }

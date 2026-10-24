@@ -25,15 +25,18 @@ public static class GateVerdictParser
         if (structured is not { ValueKind: JsonValueKind.Object } root)
             return GateVerdict.Failed("reviewer returned no structured output");
 
-        var summary = Str(root, "summary");
-        var reasons = List(root, "reasons");
-        var checkedItems = List(root, "checked");
-        var areas = List(root, "risk_areas_touched");
-        var risk = Str(root, "risk");
+        var problems = new List<string>();
+        var summary = Str(root, "summary", problems);
+        var reasons = List(root, "reasons", required: true, problems);
+        var checkedItems = List(root, "checked", required: false, problems);
+        var areas = List(root, "risk_areas_touched", required: false, problems);
+        var risk = root.TryGetProperty("risk", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : "";
 
         var verdict = new GateVerdict(RiskLevel.Low, summary, reasons, checkedItems, areas);
         if (risk == "high") return verdict with { Risk = RiskLevel.High };
         if (risk != "low") return verdict.WithForcedHigh($"unrecognised risk '{risk}'");
+        if (problems.Count > 0)
+            return verdict with { Risk = RiskLevel.High, Reasons = [.. reasons, .. problems] };
         if (checkedItems.Count == 0)
             return verdict.WithForcedHigh("reviewer reported low risk without saying what it checked");
         if (areas.Count > 0)
@@ -41,14 +44,28 @@ public static class GateVerdictParser
         return verdict;
     }
 
-    private static string Str(JsonElement root, string name) =>
-        root.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
-
-    private static IReadOnlyList<string> List(JsonElement root, string name)
+    private static string Str(JsonElement root, string name, List<string> problems)
     {
-        if (!root.TryGetProperty(name, out var p) || p.ValueKind != JsonValueKind.Array) return [];
+        if (root.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(p.GetString()))
+            return p.GetString()!;
+        problems.Add($"missing or malformed field '{name}'");
+        return "";
+    }
+
+    private static IReadOnlyList<string> List(JsonElement root, string name, bool required, List<string> problems)
+    {
+        if (!root.TryGetProperty(name, out var p))
+        {
+            if (required) problems.Add($"missing field '{name}'");
+            return [];
+        }
+        if (p.ValueKind != JsonValueKind.Array || p.EnumerateArray().Any(e => e.ValueKind != JsonValueKind.String))
+        {
+            problems.Add($"malformed field '{name}'");
+            return [];
+        }
         return p.EnumerateArray()
-            .Where(e => e.ValueKind == JsonValueKind.String)
             .Select(e => e.GetString() ?? "")
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .ToList();
