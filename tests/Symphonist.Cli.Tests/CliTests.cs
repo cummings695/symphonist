@@ -228,6 +228,14 @@ public sealed class CliTests
     }
 
     [Fact]
+    public void Browser_launcher_opens_only_http_links()
+    {
+        Assert.False(BrowserLauncher.TryOpen(new Uri("file:///etc/passwd")));
+        Assert.False(BrowserLauncher.TryOpen(new Uri("javascript:alert(1)")));
+        Assert.False(BrowserLauncher.TryOpen(new Uri("/login?code=abc", UriKind.Relative)));
+    }
+
+    [Fact]
     public async Task Dashboard_host_down_exits_2()
     {
         var r = await RunDashboardAsync(new ThrowingHandler(), _ => true, "dashboard");

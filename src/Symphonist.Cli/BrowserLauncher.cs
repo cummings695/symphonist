@@ -11,22 +11,15 @@ public static class BrowserLauncher
         if (!url.IsAbsoluteUri || url.Scheme is not ("http" or "https")) return false;
         try
         {
-            ProcessStartInfo start;
             if (OperatingSystem.IsWindows())
             {
-                start = new ProcessStartInfo(url.AbsoluteUri) { UseShellExecute = true };
-            }
-            else
-            {
-                start = new ProcessStartInfo(OperatingSystem.IsMacOS() ? "open" : "xdg-open")
-                {
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                };
-                start.ArgumentList.Add(url.AbsoluteUri);
+                // ShellExecute usually hands the URL to a running browser and returns no process: no exception is success.
+                using var _ = Process.Start(new ProcessStartInfo(url.AbsoluteUri) { UseShellExecute = true });
+                return true;
             }
 
+            var start = new ProcessStartInfo(OperatingSystem.IsMacOS() ? "open" : "xdg-open") { UseShellExecute = false };
+            start.ArgumentList.Add(url.AbsoluteUri);
             using var process = Process.Start(start);
             return process is not null;
         }
