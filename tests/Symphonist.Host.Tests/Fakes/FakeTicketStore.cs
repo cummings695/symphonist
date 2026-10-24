@@ -31,6 +31,9 @@ public sealed class FakeTicketStore : ITicketStore
     /// <summary>When set, the next FindAsync throws (and clears the flag).</summary>
     public bool FailNextFind { get; set; }
 
+    /// <summary>When set, SaveAsync waits for it before saving, ignoring cancellation (a write already under way).</summary>
+    public TaskCompletionSource? HoldSaves { get; set; }
+
     public Ticket Single(string key)
     {
         lock (sync) return Tickets.Single(t => t.Key == key);
@@ -72,8 +75,9 @@ public sealed class FakeTicketStore : ITicketStore
         }
     }
 
-    public Task SaveAsync(Ticket ticket, CancellationToken ct)
+    public async Task SaveAsync(Ticket ticket, CancellationToken ct)
     {
+        if (HoldSaves is { } hold) await hold.Task;
         lock (sync)
         {
             if (Tickets.Any(t => t.Id != ticket.Id && t.ProjectId == ticket.ProjectId && t.Key == ticket.Key))
@@ -82,7 +86,6 @@ public sealed class FakeTicketStore : ITicketStore
             if (index >= 0) Tickets[index] = Copy(ticket);
             else Tickets.Add(Copy(ticket));
         }
-        return Task.CompletedTask;
     }
 
     public Task AddEventAsync(Guid ticketId, string stageId, string message, DateTimeOffset at, CancellationToken ct)

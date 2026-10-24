@@ -19,7 +19,8 @@
 }
 <div class="page-head">
     <h1 class="page-title">@heading</h1>
-    @if (filtered is not null)
+    @* Only the project the heading names: during a switch the last board is still the previous project's. *@
+    @if (filtered is not null && filtered.Id == Project)
     {
         <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
     }
@@ -141,6 +142,7 @@ else
     {
         if (model is not null && loadedFilter == Project) return;
         loadedFilter = Project;
+        Chrome.SetPage(null, Project); // the frame shows the board now; the load corrects an unknown id to All projects
         await ReloadAsync();
     }
 
@@ -227,7 +229,7 @@ else
         try
         {
             var board = await Query.LoadBoardAsync(Project, disposed.Token);
-            if (version != loadVersion) return; // a newer load started meanwhile
+            if (disposed.IsCancellationRequested || version != loadVersion) return; // gone, or a newer load started meanwhile
             model = board;
             boardError = null;
             Chrome.SetPage(null, board.ProjectFilter);
@@ -239,7 +241,7 @@ else
         }
         catch (Exception e)
         {
-            if (version == loadVersion)
+            if (!disposed.IsCancellationRequested && version == loadVersion)
             {
                 boardError = $"Could not refresh the board: {e.Message}";
                 Chrome.SetError(StatusSource.Board, boardError);
@@ -272,6 +274,7 @@ else
         try
         {
             var outcome = await Orchestrator.ApproveAsync(card.Project, card.Key, disposed.Token, card.StageId, card.Since);
+            if (disposed.IsCancellationRequested) return; // the next page owns the frame now
             Chrome.ShowMessage($"{card.Key}: {outcome.Message}");
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)
@@ -280,6 +283,7 @@ else
         }
         catch (KeyNotFoundException e)
         {
+            if (disposed.IsCancellationRequested) return;
             Chrome.ShowMessage(e.Message); // e.g. the ticket or its project was removed meanwhile
         }
         catch (Exception e)
@@ -292,6 +296,7 @@ else
             approving.Remove(id);
         }
         await ReloadAsync();
+        if (disposed.IsCancellationRequested) return;
 
         // The orchestrator stores the approval before recording and syncing it, so a failure (e.g. of the store) may
         // come after the ticket has already moved on: word the message from the ticket's state as reloaded.

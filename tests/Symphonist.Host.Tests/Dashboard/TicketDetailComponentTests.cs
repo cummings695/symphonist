@@ -487,4 +487,53 @@ public sealed class TicketDetailComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.Contains("Could not refresh the ticket: database is locked", StatusLine(cut)));
         Assert.Contains("Title ORD-1", cut.Markup);
     }
+
+    /// <summary>Waits for <paramref name="done"/>, then lets every continuation queued on the renderer run.</summary>
+    private async Task SettleAfter(Func<bool> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!done() && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.True(done());
+        for (var i = 0; i < 10; i++)
+        {
+            await Task.Delay(10);
+            await ctx.Renderer.Dispatcher.InvokeAsync(() => { });
+        }
+    }
+
+    [Fact]
+    public async Task Command_finishing_after_the_page_is_gone_leaves_the_frame_alone()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.HoldSaves = hold;
+        Button(cut, "Approve").Click(); // in flight: the approval's save waits
+
+        await ctx.DisposeComponentsAsync(); // navigated away: the next page has its own message, errors and label
+        Chrome.ClearForNavigation();
+        Chrome.SetPage(null, null);
+        store.HoldSaves = null;
+        hold.SetResult();
+
+        await SettleAfter(() => store.Single("ORD-1").Status == StageStatus.Approved);
+        Assert.Null(Chrome.Message);
+        Assert.Null(Chrome.PageLabel);
+    }
+
+    [Fact]
+    public void Not_found_page_uses_the_frame()
+    {
+        Chrome.SetPage("ORD-1", "orders");
+        Chrome.ShowMessage("ORD-1: approved");
+
+        var cut = ctx.Render<NotFound>();
+
+        Assert.Equal("Not found", Chrome.PageLabel);
+        Assert.Null(Chrome.CurrentProject);
+        Assert.Null(Chrome.Message);
+        Assert.Equal("Not found", Assert.Single(cut.FindAll("h1")).TextContent.Trim());
+        Assert.Equal("/", cut.Find("a").GetAttribute("href"));
+        Assert.Empty(cut.FindAll(".back"));
+    }
 }

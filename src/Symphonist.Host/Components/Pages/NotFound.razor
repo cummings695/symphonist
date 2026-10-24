@@ -1,10 +1,15 @@
 @page "/not-found"
+@inject DashboardChrome Chrome
 
-<PageTitle>Not found · Symphonist</PageTitle>
+<div class="page-head">
+    <h1 class="page-title">Not found</h1>
+</div>
+<p>There is nothing at this address. <a href="/">Go to the board</a></p>
 
-<p class="back"><a href="/">← Back to the board</a></p>
-
-<section class="not-found">
-    <h1>Not found</h1>
-    <p>There is nothing at this address.</p>
-</section>
+@code {
+    protected override void OnInitialized()
+    {
+        Chrome.ClearForNavigation(); // the previous page's message and errors
+        Chrome.SetPage("Not found", null); // the layout's tab title shows it; no project is highlighted
+    }
+}

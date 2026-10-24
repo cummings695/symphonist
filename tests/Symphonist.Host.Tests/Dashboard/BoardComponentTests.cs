@@ -600,4 +600,66 @@ public sealed class BoardComponentTests : IDisposable
         Toggle(cut, "Plan").Click(); // nothing to store into: still folds
         Assert.Contains("collapsed", Column(cut, "Plan").ClassList);
     }
+
+    /// <summary>Waits for <paramref name="done"/>, then lets every continuation queued on the renderer run.</summary>
+    private async Task SettleAfter(Func<bool> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!done() && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.True(done());
+        for (var i = 0; i < 10; i++)
+        {
+            await Task.Delay(10);
+            await ctx.Renderer.Dispatcher.InvokeAsync(() => { });
+        }
+    }
+
+    [Fact]
+    public async Task Approve_finishing_after_the_board_is_gone_leaves_the_frame_alone()
+    {
+        await Seed("ORD-5", "implement", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+        var chrome = ctx.Services.GetRequiredService<DashboardChrome>();
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.HoldSaves = hold;
+        Card(cut, "ORD-5").QuerySelector("button")!.Click(); // in flight: the approval's save waits
+
+        await ctx.DisposeComponentsAsync(); // navigated away: the next page has its own message and errors
+        chrome.ClearForNavigation();
+        store.HoldSaves = null;
+        hold.SetResult();
+
+        await SettleAfter(() => store.Single("ORD-5").Status == StageStatus.Approved);
+        Assert.Null(chrome.Message);
+    }
+
+    [Fact]
+    public void Arriving_from_a_ticket_marks_the_board_before_it_loads()
+    {
+        var chrome = ctx.Services.GetRequiredService<DashboardChrome>();
+        chrome.SetPage("ORD-1", "orders"); // the ticket page's label and highlight
+        store.FailNextList = true;
+        ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/?project=billing");
+
+        var cut = ctx.Render<Board>();
+
+        cut.WaitForAssertion(() => Assert.Contains("Could not refresh the board", StatusLine()));
+        Assert.Null(chrome.PageLabel);
+        Assert.Equal("billing", chrome.CurrentProject);
+    }
+
+    [Fact]
+    public void Switching_projects_keeps_the_old_project_bar_off_the_new_heading()
+    {
+        var cut = RenderBoard("/?project=orders");
+        Assert.NotNull(cut.Find("[data-project='orders']"));
+        store.FailNextList = true; // the switch's load fails: the orders board stays
+
+        ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/?project=billing");
+
+        cut.WaitForAssertion(() => Assert.Contains("Could not refresh the board", StatusLine()));
+        Assert.Equal("Project billing", cut.Find("h1").TextContent.Trim());
+        Assert.Empty(cut.FindAll("[data-project]"));
+        Assert.Equal("billing", ctx.Services.GetRequiredService<DashboardChrome>().CurrentProject);
+    }
 }

@@ -309,7 +309,7 @@
         try
         {
             var loaded = await Query.LoadTicketAsync(Project, Key, disposed.Token);
-            if (version != loadVersion) return; // a newer load started meanwhile
+            if (disposed.IsCancellationRequested || version != loadVersion) return; // gone, or a newer load started meanwhile
             model = loaded;
             notFound = loaded is null;
             ticketError = null;
@@ -323,7 +323,7 @@
         }
         catch (Exception e)
         {
-            if (version != loadVersion) return;
+            if (disposed.IsCancellationRequested || version != loadVersion) return;
             ticketError = $"Could not refresh the ticket: {e.Message}";
             Chrome.SetError(StatusSource.Ticket, ticketError);
         }
@@ -360,6 +360,7 @@
         try
         {
             var outcome = await command(disposed.Token);
+            if (disposed.IsCancellationRequested) return false; // the next page owns the frame now
             Chrome.ShowMessage($"{Key}: {outcome.Message}");
             applied = outcome.Changed;
         }
@@ -369,6 +370,7 @@
         }
         catch (KeyNotFoundException e)
         {
+            if (disposed.IsCancellationRequested) return false;
             Chrome.ShowMessage(e.Message); // e.g. the ticket, its project or the target stage was removed meanwhile
         }
         catch (Exception e)
@@ -381,6 +383,7 @@
             busy = false;
         }
         await ReloadAsync();
+        if (disposed.IsCancellationRequested) return false;
 
         // The orchestrator stores the change before recording and syncing it, so a failure (e.g. of the store) may
         // come after the ticket has already moved: word the message from the ticket's state as reloaded.
@@ -400,15 +403,15 @@
         try
         {
             clipboard ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/clipboard.js");
-            Chrome.ShowMessage(await clipboard.InvokeAsync<bool>("copyText", path)
-                ? "Copied the log path"
-                : "Could not copy the log path");
+            var copied = await clipboard.InvokeAsync<bool>("copyText", path);
+            if (disposed.IsCancellationRequested) return; // the next page owns the frame now
+            Chrome.ShowMessage(copied ? "Copied the log path" : "Could not copy the log path");
         }
         catch (Exception e)
         {
             // Copying is a convenience: nothing here may reach the circuit (timeouts, disposed module, disconnects).
             Log.LogWarning(e, "Copying a log path from the dashboard failed");
-            Chrome.ShowMessage("Could not copy the log path");
+            if (!disposed.IsCancellationRequested) Chrome.ShowMessage("Could not copy the log path");
         }
     }
 
