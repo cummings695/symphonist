@@ -225,6 +225,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             }
             if (Same(t.LastSourceStatus, s.Status))
             {
+                await RetryTrackerMoveAsync(io, t, ct); // first: a @claude send-back's own move replaces the retry
                 await HandleClaudeCommentsAsync(p, io, t, s, now, ct); // only acts at a gate or block, never on Done
                 continue;
             }
@@ -238,6 +239,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 continue;
             }
 
+            t.TrackerRetryStatus = null; // the developer moved the card; never move it back to the old target
             var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t), now);
             await store.SaveAsync(t, ct); // LastSourceStatus changes even when the outcome doesn't
             await ApplyAsync(io, t, outcome, ct);
@@ -249,6 +251,31 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await store.SaveAsync(t, ct);
             await ApplyAsync(io, t, outcome, ct);
         }
+    }
+
+    /// <summary>
+    /// Retries a tracker move that was skipped or threw, while the card is still where Symphonist last saw it. A failure
+    /// is recorded once, not on every tick of an outage.
+    /// </summary>
+    private async Task RetryTrackerMoveAsync(ProjectIntegrations io, Ticket t, CancellationToken ct)
+    {
+        if (t.TrackerRetryStatus is not { } target || t.Status == StageStatus.Done) return;
+        bool moved;
+        try
+        {
+            moved = await io.Tracker.TransitionAsync(t.Key, target, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Retried transition of {Key} to {Status} failed", t.Key, target);
+            await AddEventOnceAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
+            return;
+        }
+
+        if (moved) t.LastSourceStatus = target;
+        t.TrackerRetryStatus = null;
+        await store.SaveAsync(t, ct);
+        await AddEventAsync(t, moved ? $"tracker moved to '{target}' on retry" : $"no transition to '{target}' in tracker", ct);
     }
 
     /// <summary>
@@ -418,15 +445,22 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Records the outcome and mirrors its status to the tracker. Integrations that cannot be created (missing secret)
-    /// and a missing or failing transition never throw; they are recorded as events.
+    /// and a missing or failing transition never throw; they are recorded as events, and a skipped or failed move is
+    /// kept in <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry.
     /// </summary>
     private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, TransitionOutcome outcome, CancellationToken ct)
     {
         if (!outcome.Changed) return;
         await AddEventAsync(t, outcome.Message, ct);
 
+        if (outcome.SourceStatusToSet is not { } target) return;
+        if (t.TrackerRetryStatus is not null)
+        {
+            t.TrackerRetryStatus = null; // this move replaces the one still waiting to be retried
+            await store.SaveAsync(t, ct);
+        }
         // Skip when the card is already there (e.g. the developer's move is what approved the stage).
-        if (outcome.SourceStatusToSet is not { } target || Same(target, t.LastSourceStatus)) return;
+        if (Same(target, t.LastSourceStatus)) return;
         ITracker tracker;
         try
         {
@@ -436,6 +470,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             log.LogWarning("Tracker sync of {Key} skipped: {Error}", t.Key, e.Message);
             await AddEventAsync(t, $"tracker sync skipped: {e.Message}", ct);
+            await SaveRetryAsync(t, target, ct);
             return;
         }
         try
@@ -454,7 +489,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             log.LogWarning(e, "Transition of {Key} to {Status} failed", t.Key, target);
             await AddEventAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
+            await SaveRetryAsync(t, target, ct);
         }
+    }
+
+    private Task SaveRetryAsync(Ticket t, string target, CancellationToken ct)
+    {
+        t.TrackerRetryStatus = target;
+        return store.SaveAsync(t, ct);
     }
 
     private Task AddEventAsync(Ticket t, string message, CancellationToken ct) =>

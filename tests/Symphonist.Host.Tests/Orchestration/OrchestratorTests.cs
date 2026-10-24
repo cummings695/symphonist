@@ -184,6 +184,97 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Contains("tracker transition to 'In Review' failed: 503", store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Failed_move_is_retried_after_secret_is_fixed()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create();
+        factory!.Error = new InvalidOperationException("secret 'jira-acme' not set");
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        Assert.Equal("In Progress", store.Single("ORD-1").TrackerRetryStatus);
+
+        factory.Error = null; // the developer fixed the secret
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal([("ORD-1", "In Progress")], tracker.Transitions);
+        Assert.Equal("In Progress", t.LastSourceStatus);
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Contains("tracker moved to 'In Progress' on retry", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Thrown_move_is_retried_once_per_tick_without_event_flood()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.OnTransition = (_, _) => tracker.Transitions.Count <= 4 ? throw new HttpRequestException("503") : true;
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None); // attempt 1
+        for (var i = 0; i < 3; i++) await o.TickAsync(CancellationToken.None); // attempts 2-4
+
+        Assert.Equal(4, tracker.Transitions.Count);
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "tracker transition to 'In Progress' failed: 503");
+        Assert.Equal("In Progress", store.Single("ORD-1").TrackerRetryStatus);
+
+        await o.TickAsync(CancellationToken.None); // attempt 5 succeeds
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(5, tracker.Transitions.Count);
+        Assert.Equal("In Progress", t.LastSourceStatus);
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal("tracker moved to 'In Progress' on retry", store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Fact] public async Task Developer_move_cancels_retry()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.TransitionError = new HttpRequestException("503");
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        Assert.Equal("In Progress", store.Single("ORD-1").TrackerRetryStatus);
+
+        tracker.TransitionError = null;
+        tracker.Move("ORD-1", "Backlog"); // the developer moved the card meanwhile
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal("Backlog", t.LastSourceStatus);
+        Assert.DoesNotContain(("ORD-1", "In Progress"), tracker.Transitions);
+    }
+
+    [Fact] public async Task No_transition_is_not_retried()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.OnTransition = (_, _) => false;
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        Assert.Null(store.Single("ORD-1").TrackerRetryStatus);
+        await o.TickAsync(CancellationToken.None);
+        Assert.Single(tracker.Transitions);
+
+        // A retried move that finds no transition is cleared, not retried again.
+        await Seed("ORD-2", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.TransitionError = new HttpRequestException("503");
+        await o.ApproveAsync("orders", "ORD-2", CancellationToken.None);
+        Assert.Equal("In Progress", store.Single("ORD-2").TrackerRetryStatus);
+
+        tracker.TransitionError = null;
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Null(store.Single("ORD-2").TrackerRetryStatus);
+        Assert.Single(tracker.Transitions, x => x.Key == "ORD-2");
+        Assert.Equal("no transition to 'In Progress' in tracker", store.EventMessages("ORD-2")[^1]);
+    }
+
     [Fact] public async Task Ticket_leaving_query_is_blocked_but_failed_query_blocks_nothing()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");

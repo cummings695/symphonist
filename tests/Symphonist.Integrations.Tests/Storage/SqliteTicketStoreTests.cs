@@ -68,6 +68,20 @@ public sealed class SqliteTicketStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Tracker_retry_status_round_trips()
+    {
+        var t = NewTicket("A", "plan", StageStatus.Pending);
+        t.TrackerRetryStatus = "In Progress";
+        await _store.SaveAsync(t, default);
+
+        Assert.Equal("In Progress", (await _store.FindAsync("orders", "A", default))!.TrackerRetryStatus);
+
+        t.TrackerRetryStatus = null;
+        await _store.SaveAsync(t, default);
+        Assert.Null((await _store.FindAsync("orders", "A", default))!.TrackerRetryStatus);
+    }
+
+    [Fact]
     public async Task Save_twice_updates_not_duplicates()
     {
         var t = NewTicket("A", "plan", StageStatus.Pending);

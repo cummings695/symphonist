@@ -35,6 +35,12 @@ public sealed class Ticket
     /// <summary>The Created time of the newest developer "@claude" comment acted on; older ones are never acted on again.</summary>
     public DateTimeOffset? ClaudeCommentsHandledAt { get; set; }
 
+    /// <summary>
+    /// The target of a tracker move that was skipped (integration error) or threw; retried each tick until it goes
+    /// through, the developer moves the card, or Symphonist makes another move.
+    /// </summary>
+    public string? TrackerRetryStatus { get; set; }
+
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();
 }
