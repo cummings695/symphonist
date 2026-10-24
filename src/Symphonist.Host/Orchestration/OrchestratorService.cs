@@ -51,9 +51,9 @@ public sealed class OrchestratorService(Orchestrator o, OrchestratorOptions opti
             }
             while (await timer.WaitForNextTickAsync(stoppingToken));
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (Exception) when (stoppingToken.IsCancellationRequested)
         {
-            // Host shutdown.
+            // Host shutdown; also a tick that failed for another reason (e.g. an aborted request) once it began.
         }
     }
 }

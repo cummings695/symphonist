@@ -707,6 +707,32 @@ public sealed class OrchestratorTests : IDisposable
         Assert.True(service.ExecuteTask!.IsCompletedSuccessfully);
     }
 
+    [Fact] public async Task Service_stops_cleanly_when_a_tick_fails_after_shutdown_began()
+    {
+        var queries = 0;
+        var querying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        tracker.OnQuery = () =>
+        {
+            if (Interlocked.Increment(ref queries) < 2) return [];
+            querying.TrySetResult();
+            release.Wait(TimeSpan.FromSeconds(10)); // the second tick's query is in progress when shutdown begins
+            throw new HttpRequestException("connection reset by shutdown");
+        };
+        var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
+        var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
+            new StageExecutor(git, agent, store, time), time, options, NullLogger<Orchestrator>.Instance);
+        using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
+
+        await service.StartAsync(CancellationToken.None);
+        await querying.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var stopping = service.StopAsync(CancellationToken.None); // cancels the stopping token before awaiting
+        release.Set();
+        await stopping;
+
+        Assert.True(service.ExecuteTask!.IsCompletedSuccessfully, service.ExecuteTask.Exception?.ToString());
+    }
+
     [Fact] public async Task Service_stop_cancels_in_flight_runs_and_waits_for_their_cleanup()
     {
         Source("ORD-1", "Planned");
