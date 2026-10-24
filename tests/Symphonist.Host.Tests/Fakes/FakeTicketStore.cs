@@ -22,6 +22,9 @@ public sealed class FakeTicketStore : ITicketStore
     /// <summary>When set, the next ListAsync throws (and clears the flag).</summary>
     public bool FailNextList { get; set; }
 
+    /// <summary>When set, the next AddEventAsync throws (and clears the flag).</summary>
+    public bool FailNextAddEvent { get; set; }
+
     /// <summary>When set, the next FindAsync throws (and clears the flag).</summary>
     public bool FailNextFind { get; set; }
 
@@ -81,7 +84,15 @@ public sealed class FakeTicketStore : ITicketStore
 
     public Task AddEventAsync(Guid ticketId, string stageId, string message, DateTimeOffset at, CancellationToken ct)
     {
-        lock (sync) Events.Add(new TicketEvent { TicketId = ticketId, StageId = stageId, Message = message, At = at });
+        lock (sync)
+        {
+            if (FailNextAddEvent)
+            {
+                FailNextAddEvent = false;
+                throw new InvalidOperationException("database is locked");
+            }
+            Events.Add(new TicketEvent { TicketId = ticketId, StageId = stageId, Message = message, At = at });
+        }
         return Task.CompletedTask;
     }
 

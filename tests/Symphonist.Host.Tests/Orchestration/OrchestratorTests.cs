@@ -300,6 +300,23 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
     }
 
+    [Fact] public async Task Approve_with_missing_secret_takes_effect_records_skipped_sync_and_ticks()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create(tickAfterCommands: true);
+        factory!.Error = new InvalidOperationException("secret 'jira-acme' not set");
+
+        var outcome = await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(outcome.Changed);
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Equal(["advanced to implement", "tracker sync skipped: secret 'jira-acme' not set"],
+            store.EventMessages("ORD-1"));
+        Assert.Empty(tracker.Transitions);
+        Assert.Equal("secret 'jira-acme' not set", o.ProblemOf("orders")); // the requested tick ran
+    }
+
     [Fact] public async Task Unchanged_command_does_not_tick()
     {
         await Seed("ORD-1", "plan", StageStatus.Pending, "Planned");

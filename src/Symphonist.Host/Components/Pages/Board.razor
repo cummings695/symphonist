@@ -227,12 +227,12 @@ else
         }
         await ReloadAsync();
 
-        // The orchestrator stores the approval before syncing it to the tracker, so a failure may come after the
-        // ticket has already moved on: word the message from the ticket's state as reloaded.
+        // The orchestrator stores the approval before recording and syncing it, so a failure (e.g. of the store) may
+        // come after the ticket has already moved on: word the message from the ticket's state as reloaded.
         if (failure is not null)
             commandMessage = StillWaiting(card)
                 ? $"{card.Key}: approve failed: {failure.Message}"
-                : $"{card.Key}: approved, but syncing to the tracker failed: {failure.Message}";
+                : $"{card.Key}: approved, but a follow-up step failed: {failure.Message}";
     }
 
     /// <summary>True when the reloaded board still shows the card awaiting approval (or could not be reloaded).</summary>

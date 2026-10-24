@@ -118,7 +118,7 @@ public sealed class TicketDetailComponentTests : IDisposable
     }
 
     [Fact]
-    public async Task Send_back_stored_but_tracker_sync_failed_says_so()
+    public async Task Send_back_with_missing_secret_shows_the_outcome()
     {
         await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
         var cut = Loaded(Render());
@@ -127,8 +127,23 @@ public sealed class TicketDetailComponentTests : IDisposable
         cut.Find("textarea").Input("redo");
         Button(cut, "Send back").Click();
 
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: sent back to implement", StatusLine(cut)));
+        Assert.Contains("tracker sync skipped: secret not set", store.EventMessages("ORD-1"));
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+    }
+
+    [Fact]
+    public async Task Send_back_stored_but_a_follow_up_step_failed_says_so()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        store.FailNextAddEvent = true;
+
+        cut.Find("textarea").Input("redo");
+        Button(cut, "Send back").Click();
+
         cut.WaitForAssertion(() =>
-            Assert.Contains("ORD-1: sent back, but syncing to the tracker failed: secret not set", StatusLine(cut)));
+            Assert.Contains("ORD-1: sent back, but a follow-up step failed: database is locked", StatusLine(cut)));
     }
 
     [Fact]
@@ -148,16 +163,29 @@ public sealed class TicketDetailComponentTests : IDisposable
     }
 
     [Fact]
-    public async Task Approve_stored_but_tracker_sync_failed_says_so()
+    public async Task Approve_stored_but_a_follow_up_step_failed_says_so()
     {
         await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
         var cut = Loaded(Render());
-        integrations.Error = new InvalidOperationException("boom");
+        store.FailNextAddEvent = true;
 
         Button(cut, "Approve").Click();
 
         cut.WaitForAssertion(() =>
-            Assert.Contains("ORD-1: approved, but syncing to the tracker failed: boom", StatusLine(cut)));
+            Assert.Contains("ORD-1: approved, but a follow-up step failed: database is locked", StatusLine(cut)));
+    }
+
+    [Fact]
+    public async Task Approve_with_missing_secret_shows_the_outcome()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        var cut = Loaded(Render());
+        integrations.Error = new InvalidOperationException("secret not set");
+
+        Button(cut, "Approve").Click();
+
+        cut.WaitForAssertion(() => Assert.Contains("ORD-1: advanced to implement", StatusLine(cut)));
+        Assert.Contains("tracker sync skipped: secret not set", store.EventMessages("ORD-1"));
     }
 
     [Fact]

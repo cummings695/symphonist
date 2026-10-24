@@ -196,6 +196,19 @@ public sealed class TicketsApiTests : IDisposable
     }
 
     [Fact]
+    public async Task Approve_with_missing_secret_still_returns_the_outcome()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);
+        integrations.Error = new InvalidOperationException("secret 'jira-acme' not set");
+
+        var outcome = await Json(await Authorized().PostAsync("/api/tickets/orders/ORD-1/approve", null));
+
+        Assert.True(outcome.GetProperty("changed").GetBoolean());
+        Assert.Equal("implement", store.Single("ORD-1").StageId);
+        Assert.Contains("tracker sync skipped: secret 'jira-acme' not set", store.EventMessages("ORD-1"));
+    }
+
+    [Fact]
     public async Task Send_back_passes_feedback()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval);

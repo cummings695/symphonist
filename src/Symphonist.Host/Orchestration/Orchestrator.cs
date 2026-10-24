@@ -138,7 +138,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (outcome.Changed)
             {
                 await store.SaveAsync(t, ct);
-                await ApplyAsync(IntegrationsFor(p), t, outcome, ct);
+                // Resolved inside ApplyAsync: a missing secret must not undo (or hide) a command that took effect.
+                await ApplyAsync(() => IntegrationsFor(p), t, outcome, ct);
             }
         }
         finally
@@ -375,17 +376,34 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await ApplyAsync(io, t, outcome, ct);
     }
 
-    /// <summary>Records the outcome and mirrors its status to the tracker. A missing or failing transition never throws.</summary>
-    private async Task ApplyAsync(ProjectIntegrations io, Ticket t, TransitionOutcome outcome, CancellationToken ct)
+    private Task ApplyAsync(ProjectIntegrations io, Ticket t, TransitionOutcome outcome, CancellationToken ct) =>
+        ApplyAsync(() => io, t, outcome, ct);
+
+    /// <summary>
+    /// Records the outcome and mirrors its status to the tracker. Integrations that cannot be created (missing secret)
+    /// and a missing or failing transition never throw; they are recorded as events.
+    /// </summary>
+    private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, TransitionOutcome outcome, CancellationToken ct)
     {
         if (!outcome.Changed) return;
         await AddEventAsync(t, outcome.Message, ct);
 
         // Skip when the card is already there (e.g. the developer's move is what approved the stage).
         if (outcome.SourceStatusToSet is not { } target || Same(target, t.LastSourceStatus)) return;
+        ITracker tracker;
         try
         {
-            if (await io.Tracker.TransitionAsync(t.Key, target, ct))
+            tracker = io().Tracker;
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning("Tracker sync of {Key} skipped: {Error}", t.Key, e.Message);
+            await AddEventAsync(t, $"tracker sync skipped: {e.Message}", ct);
+            return;
+        }
+        try
+        {
+            if (await tracker.TransitionAsync(t.Key, target, ct))
             {
                 t.LastSourceStatus = target; // our own move, not a developer action to react to next tick
                 await store.SaveAsync(t, ct);

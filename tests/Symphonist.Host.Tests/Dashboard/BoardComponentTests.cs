@@ -143,17 +143,31 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
-    public async Task Approve_stored_but_tracker_sync_failed_says_so()
+    public async Task Approve_stored_but_a_follow_up_step_failed_says_so()
     {
         await Seed("ORD-5", "implement", StageStatus.AwaitingApproval);
+        var cut = RenderBoard();
+        store.FailNextAddEvent = true; // the approval is saved, recording its event fails
+
+        Card(cut, "ORD-5").QuerySelector("button")!.Click();
+
+        cut.WaitForAssertion(() =>
+            Assert.Contains("ORD-5: approved, but a follow-up step failed: database is locked", StatusLine(cut)));
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-5").Status);
+    }
+
+    [Fact]
+    public async Task Approve_with_missing_secret_shows_the_outcome()
+    {
+        await Seed("ORD-5", "plan", StageStatus.AwaitingApproval);
         var cut = RenderBoard();
         integrations.Error = new InvalidOperationException("secret 'jira-acme' not set");
 
         Card(cut, "ORD-5").QuerySelector("button")!.Click();
 
-        cut.WaitForAssertion(() =>
-            Assert.Contains("ORD-5: approved, but syncing to the tracker failed: secret 'jira-acme' not set", StatusLine(cut)));
-        Assert.Equal(StageStatus.Approved, store.Single("ORD-5").Status);
+        cut.WaitForAssertion(() => Assert.Contains("ORD-5: advanced to implement", StatusLine(cut)));
+        Assert.Equal("implement", store.Single("ORD-5").StageId);
+        Assert.Contains("tracker sync skipped: secret 'jira-acme' not set", store.EventMessages("ORD-5"));
     }
 
     [Fact]

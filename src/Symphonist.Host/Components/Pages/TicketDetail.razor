@@ -302,13 +302,13 @@ else
         }
         await ReloadAsync();
 
-        // The orchestrator stores the change before syncing it to the tracker, so a failure may come after the
-        // ticket has already moved: word the message from the ticket's state as reloaded.
+        // The orchestrator stores the change before recording and syncing it, so a failure (e.g. of the store) may
+        // come after the ticket has already moved: word the message from the ticket's state as reloaded.
         if (failure is not null)
         {
             var moved = refreshError is null && model is { } now && (now.Card.StageId, now.Card.Status) != before;
             commandMessage = moved
-                ? $"{Key}: {pastTense}, but syncing to the tracker failed: {failure.Message}"
+                ? $"{Key}: {pastTense}, but a follow-up step failed: {failure.Message}"
                 : $"{Key}: {verb} failed: {failure.Message}";
             applied = moved;
         }
