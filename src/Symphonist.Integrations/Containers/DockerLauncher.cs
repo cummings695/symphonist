@@ -93,13 +93,17 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
             "run", "--rm", "-i", "--pull=never",
             NameOption, $"symphonist-{Guid.NewGuid():N}", "--label", AgentLabel,
             "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
-            "-v", $"{request.WorkingDirectory}:/workspace",
-            // Read-only .git: the host later runs git in this workspace, so the agent must not be able to plant
-            // hooks or config that would execute there.
-            "-v", $"{Path.Combine(request.WorkingDirectory, ".git")}:/workspace/.git:ro",
-            "-w", "/workspace",
-            "-e", TokenVar, "-e", DomainsVar,
         };
+        if (request.ReadOnlyWorkspace)
+            args.AddRange(["-v", $"{request.WorkingDirectory}:/workspace:ro"]); // covers .git too
+        else
+            args.AddRange([
+                "-v", $"{request.WorkingDirectory}:/workspace",
+                // Read-only .git: the host later runs git in this workspace, so the agent must not be able to plant
+                // hooks or config that would execute there.
+                "-v", $"{Path.Combine(request.WorkingDirectory, ".git")}:/workspace/.git:ro",
+            ]);
+        args.AddRange(["-w", "/workspace", "-e", TokenVar, "-e", DomainsVar]);
         var env = new Dictionary<string, string?>
         {
             // A null value removes the variable from the docker CLI's environment, so `-e NAME` passes nothing.

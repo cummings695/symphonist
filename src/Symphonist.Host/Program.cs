@@ -68,6 +68,10 @@ builder.Services.AddSingleton(sp => new DockerLauncher(sp.GetRequiredService<IPr
 builder.Services.AddSingleton(sp => new IsolationLauncher(new HostLauncher(), sp.GetRequiredService<DockerLauncher>()));
 builder.Services.AddSingleton<IAgentRunner>(sp =>
     new ClaudeCodeRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<IsolationLauncher>()));
+builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictionary<string, IAgentRunner>
+{
+    ["claude-code"] = sp.GetRequiredService<IAgentRunner>(),
+}));
 builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();

@@ -14,7 +14,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
     public async Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
     {
         var settings = request.Settings;
-        var args = new List<string> { "-p", "--output-format", "json", "--json-schema", StageOutputSchema.Json };
+        var args = new List<string> { "-p", "--output-format", "json", "--json-schema", request.OutputSchema };
         // Bypass permission prompts only when the launcher actually sandboxes the run; config alone is not enough.
         if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation(request))
             args.Add(HostLauncher.PermissionBypassFlag);
@@ -40,13 +40,15 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         if (result.TimedOut) await launcher.CleanupAsync(spec, request, CancellationToken.None);
 
         var rawLog = result.StandardOutput + "\n--- stderr ---\n" + result.StandardError;
-        return Parse(result, settings, sw.Elapsed, rawLog);
+        return Parse(result, request, sw.Elapsed, rawLog);
     }
 
-    private static AgentRunResult Parse(ProcessResult result, AgentSettings settings, TimeSpan duration, string rawLog)
+    private static AgentRunResult Parse(ProcessResult result, AgentRunRequest request, TimeSpan duration, string rawLog)
     {
+        var settings = request.Settings;
+        JsonElement? structured = null;
         AgentRunResult Fail(string error, StageOutput? output = null, decimal? cost = null) =>
-            new(false, output, cost, duration, error, rawLog);
+            new(false, output, cost, duration, error, rawLog, structured);
 
         if (result.TimedOut) return Fail($"timed out after {settings.TimeoutMinutes} minutes");
 
@@ -68,25 +70,32 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         var isError = root.TryGetProperty("is_error", out var ie) && ie.ValueKind == JsonValueKind.True;
         var resultText = root.TryGetProperty("result", out var rt) && rt.ValueKind == JsonValueKind.String
             ? rt.GetString() : null;
-        var output = ReadOutput(root);
+        // Agent output comes only from schema-validated structured_output, never from free text.
+        if (root.TryGetProperty("structured_output", out var so) && so.ValueKind == JsonValueKind.Object)
+            structured = so.Clone();
+        var isStage = request.OutputSchema == StageOutputSchema.Json;
+        var output = isStage ? ReadOutput(structured) : null;
 
         if (result.ExitCode != 0 || isError)
             return Fail(FirstNonEmpty(Tail(result.StandardError), resultText,
                 result.ExitCode != 0 ? $"agent exited with code {result.ExitCode}" : "agent reported an error")!,
                 output, cost);
+        if (!isStage)
+            return structured is null
+                ? Fail("missing structured output", null, cost)
+                : new AgentRunResult(true, null, cost, duration, null, rawLog, structured);
         if (output is null) return Fail("missing structured output", null, cost);
         if (output.Status != "completed")
             return Fail(FirstNonEmpty(output.Summary, $"stage status '{output.Status}'")!, output, cost);
-        return new AgentRunResult(true, output, cost, duration, null, rawLog);
+        return new AgentRunResult(true, output, cost, duration, null, rawLog, structured);
     }
 
     /// <summary>Stage output comes only from schema-validated <c>structured_output</c>, never from free text.</summary>
-    private static StageOutput? ReadOutput(JsonElement root)
+    private static StageOutput? ReadOutput(JsonElement? structured)
     {
         try
         {
-            if (root.TryGetProperty("structured_output", out var so) && so.ValueKind == JsonValueKind.Object)
-                return Validate(so.Deserialize<StageOutput>(Options));
+            if (structured is { } so) return Validate(so.Deserialize<StageOutput>(Options));
         }
         catch (JsonException) { }
         return null;

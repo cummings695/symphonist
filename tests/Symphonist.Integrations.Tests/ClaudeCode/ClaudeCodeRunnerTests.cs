@@ -1,5 +1,6 @@
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
+using Symphonist.Core.Risk;
 using Symphonist.Integrations.ClaudeCode;
 using Symphonist.Integrations.Containers;
 using Symphonist.Integrations.Processes;
@@ -183,6 +184,61 @@ public class ClaudeCodeRunnerTests
         Assert.Equal("ok", r.Output!.Summary);
         Assert.NotNull(r.CostUsd);
         Assert.Null(r.Error);
+    }
+
+    [Fact]
+    public async Task Custom_schema_is_passed_and_structured_output_returned()
+    {
+        fake.Returns(0, """{"is_error":false,"total_cost_usd":0.5,"structured_output":{"risk":"low","summary":"fine","reasons":[],"checked":["diff"]}}""");
+        var r = await runner.RunAsync(Request() with { OutputSchema = GateReviewSchema.Json }, default);
+        Assert.Equal(GateReviewSchema.Json, ArgAfter(fake.Last, "--json-schema"));
+        Assert.True(r.Succeeded);
+        Assert.Null(r.Output);
+        Assert.Null(r.Error);
+        Assert.Equal("low", r.Structured!.Value.GetProperty("risk").GetString());
+        Assert.Equal(0.5m, r.CostUsd);
+    }
+
+    [Fact]
+    public async Task Custom_schema_without_structured_output_fails()
+    {
+        fake.Returns(0, """{"is_error":false,"result":"{\"risk\":\"low\"}"}""");
+        var r = await runner.RunAsync(Request() with { OutputSchema = GateReviewSchema.Json }, default);
+        Assert.False(r.Succeeded);
+        Assert.Null(r.Structured);
+        Assert.Equal("missing structured output", r.Error);
+    }
+
+    [Theory]
+    [InlineData("exit-1")]
+    [InlineData("is-error")]
+    [InlineData("timeout")]
+    [InlineData("not-json")]
+    public async Task Custom_schema_bad_runs_fail(string variant)
+    {
+        const string structured = """{"is_error":false,"structured_output":{"risk":"low","summary":"s","reasons":[],"checked":["x"]}}""";
+        switch (variant)
+        {
+            case "exit-1": fake.Returns(1, structured, "boom"); break;
+            case "is-error": fake.Returns(0, """{"is_error":true,"result":"API Error","structured_output":{"risk":"low"}}"""); break;
+            case "timeout": fake.Returns(-1, "", "", timedOut: true); break;
+            case "not-json": fake.Returns(0, "garbage"); break;
+        }
+        var r = await runner.RunAsync(Request() with { OutputSchema = GateReviewSchema.Json }, default);
+        Assert.False(r.Succeeded);
+        Assert.Null(r.Output);
+        Assert.False(string.IsNullOrWhiteSpace(r.Error));
+    }
+
+    [Fact]
+    public async Task Stage_schema_behaviour_unchanged()
+    {
+        fake.Returns(0, Fixture("claude-success.json"));
+        var r = await runner.RunAsync(Request(), default);
+        Assert.Equal(StageOutputSchema.Json, ArgAfter(fake.Last, "--json-schema"));
+        Assert.True(r.Succeeded);
+        Assert.Equal("ok", r.Output!.Summary);
+        Assert.Equal("completed", r.Structured!.Value.GetProperty("status").GetString());
     }
 
     [Fact]

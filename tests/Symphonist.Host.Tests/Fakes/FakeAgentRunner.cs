@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Host.Tests.Fakes;
 
@@ -28,6 +30,21 @@ public sealed class FakeAgentRunner : IAgentRunner
 
     public static AgentRunResult Fail(string error) =>
         new(false, null, null, TimeSpan.FromSeconds(1), error, """{"raw":false}""");
+
+    /// <summary>A successful review run whose structured output is a gate verdict.</summary>
+    public static AgentRunResult Review(string risk, string summary = "reviewed", string[]? reasons = null,
+        string[]? checkedItems = null, string[]? areas = null)
+    {
+        var verdict = new Dictionary<string, object>
+        {
+            ["risk"] = risk, ["summary"] = summary, ["reasons"] = reasons ?? [], ["checked"] = checkedItems ?? ["diff"],
+        };
+        if (areas is not null) verdict["risk_areas_touched"] = areas;
+        return new(true, null, 0.1m, TimeSpan.FromSeconds(2), null, """{"raw":"review"}""",
+            JsonSerializer.SerializeToElement(verdict));
+    }
+
+    public static bool IsReview(AgentRunRequest r) => r.OutputSchema == GateReviewSchema.Json;
 
     public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
     {

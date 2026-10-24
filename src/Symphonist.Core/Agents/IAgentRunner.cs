@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Symphonist.Core.Config;
 
 namespace Symphonist.Core.Agents;
@@ -13,12 +14,31 @@ public static class StageOutputSchema
         """;
 }
 
-public sealed record AgentRunRequest(string WorkingDirectory, string Prompt, AgentSettings Settings);
+/// <param name="OutputSchema">JSON schema the agent's structured output must match.</param>
+/// <param name="ReadOnlyWorkspace">The agent must not be able to modify the workspace (e.g. a reviewer).</param>
+public sealed record AgentRunRequest(string WorkingDirectory, string Prompt, AgentSettings Settings,
+    string OutputSchema = StageOutputSchema.Json, bool ReadOnlyWorkspace = false);
 
+/// <param name="Output">The parsed stage output; set only for runs with <see cref="StageOutputSchema"/>.</param>
+/// <param name="Structured">The agent's schema-validated structured output, whatever the schema.</param>
 public sealed record AgentRunResult(bool Succeeded, StageOutput? Output, decimal? CostUsd, TimeSpan Duration,
-    string? Error, string RawLog);
+    string? Error, string RawLog, JsonElement? Structured = null);
 
 public interface IAgentRunner
 {
     Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct);
+}
+
+/// <summary>Resolves the runner for a configured agent type (e.g. "claude-code").</summary>
+public interface IAgentRunners
+{
+    IAgentRunner For(string agentType);
+}
+
+public sealed class AgentRunners(IReadOnlyDictionary<string, IAgentRunner> runners) : IAgentRunners
+{
+    public IAgentRunner For(string agentType) =>
+        runners.TryGetValue(agentType, out var runner)
+            ? runner
+            : throw new NotSupportedException($"no agent runner for '{agentType}'");
 }

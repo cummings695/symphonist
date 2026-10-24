@@ -66,6 +66,27 @@ public class DockerLauncherTests
         Assert.Equal(["claude", "-p"], spec.Arguments.TakeLast(2));
     }
 
+    private static List<string> Mounts(ProcessSpec spec) =>
+        spec.Arguments.Select((a, i) => (a, i)).Where(x => x.a == "-v").Select(x => spec.Arguments[x.i + 1]).ToList();
+
+    [Fact]
+    public void Read_only_request_mounts_workspace_read_only()
+    {
+        var spec = launcher.Wrap(new("claude", ["-p"]), Request("/work/t1") with { ReadOnlyWorkspace = true });
+        Assert.Equal(["/work/t1:/workspace:ro"], Mounts(spec));
+        Assert.DoesNotContain(spec.Arguments, a => a.Contains("/workspace/.git"));
+        Assert.Equal("/workspace", spec.Arguments[spec.Arguments.ToList().IndexOf("-w") + 1]);
+        Assert.Contains("SYMPHONIST_ALLOWED_DOMAINS", spec.Arguments);
+        Assert.Equal(["claude", "-p"], spec.Arguments.TakeLast(2));
+    }
+
+    [Fact]
+    public void Default_request_keeps_writable_workspace_and_read_only_git()
+    {
+        var spec = launcher.Wrap(new("claude", ["-p"]), Request("/work/t1"));
+        Assert.Equal(["/work/t1:/workspace", Path.Combine("/work/t1", ".git") + ":/workspace/.git:ro"], Mounts(spec));
+    }
+
     [Fact]
     public void Wrap_produces_the_exact_docker_run_command()
     {
