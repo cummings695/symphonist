@@ -553,13 +553,16 @@ public sealed class StageExecutorTests : IDisposable
     [Fact] public async Task Before_merge_is_asked_only_when_a_merge_would_be_requested()
     {
         var asked = 0;
-        Task<string?> Hold(CancellationToken _) { asked++; return Task.FromResult<string?>("main moved"); }
+        PullRequestInfo? seen = null;
+        Task<string?> Hold(PullRequestInfo pr, CancellationToken _) { asked++; seen = pr; return Task.FromResult<string?>("main moved"); }
         var t = At("implement");
         t.PullRequestId = 3;
-        scm.PullRequests[3] = FakeSourceControl.Pr(3);
+        scm.AddOpen(3, "symphonist/ORD-1");
+        scm.BranchHeads["symphonist/ORD-1"] = "head001";
 
         var held = await executor.PostApprovalAsync(project, io, t, CancellationToken.None, Hold);
         Assert.Equal((ExecutionStatus.InProgress, "main moved", 1), (held.Status, held.Event, asked));
+        Assert.Equal((3L, "head001"), (seen!.Id, seen.SourceCommit)); // the pull request as read right before the merge
         Assert.Empty(scm.MergeCalls);
 
         scm.PullRequests[3] = FakeSourceControl.Pr(3, PullRequestState.Merged, "byhand");

@@ -1433,6 +1433,7 @@ public sealed class OrchestratorTests : IDisposable
         AnswerReviews(Low);
         git.ChangedFiles = ["src/Export/Csv.cs"];
         if (currentHead is not null) scm.BranchHeads["symphonist/ORD-1"] = currentHead;
+        scm.AddOpen(7, "symphonist/ORD-1");
         await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7);
         var o = Create();
 
@@ -1447,7 +1448,6 @@ public sealed class OrchestratorTests : IDisposable
         if (approved)
         {
             Assert.Equal(("symphonist/ORD-1", "head000", null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
-            scm.PullRequests[7] = FakeSourceControl.Pr(7);
             await TickIdle(o); // the head is unchanged: merges as before
             Assert.Equal([7L], scm.MergeCalls);
             Assert.Equal("build", store.Single("ORD-1").StageId);
@@ -1477,7 +1477,7 @@ public sealed class OrchestratorTests : IDisposable
         git.ChangedFiles = ["src/Export/Csv.cs"];
         scm.BranchHeads["symphonist/ORD-1"] = "head000";
         await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7);
-        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        scm.AddOpen(7, "symphonist/ORD-1");
         var o = Create();
         await TickIdle(o);
         var approved = store.Single("ORD-1");
@@ -1494,6 +1494,67 @@ public sealed class OrchestratorTests : IDisposable
         Assert.NotEqual(approved.WaitingSince, t.WaitingSince); // a new round
         Assert.Null(t.ApprovedHead);
         Assert.Equal(message, store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Theory]
+    [InlineData("head000", "mallory/orders", "merge held: pull request 7 is not from acme/orders (source: mallory/orders)")]
+    [InlineData("head000", null, "merge held: pull request 7 is not from acme/orders (source: unknown)")]
+    [InlineData("evil000", FakeSourceControl.Repository, "merge held: pull request 7 would merge evil000, not the reviewed head000")]
+    [InlineData(null, FakeSourceControl.Repository, "merge held: pull request 7 would merge an unknown commit, not the reviewed head000")]
+    public async Task Auto_approved_merge_waits_again_when_the_pull_request_would_not_merge_the_reviewed_commit(
+        string? sourceCommit, string? repository, string message)
+    {
+        // E.g. a fork's pull request with the same branch names: our branch is unchanged, but it is not what would merge.
+        await AutoApproveAndMoveHeads("implement", move: false);
+        scm.SourceBranches.Remove(7);
+        scm.PullRequests[7] = FakeSourceControl.Pr(7, sourceCommit: sourceCommit, repository: repository);
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(("implement", StageStatus.AwaitingApproval, true, null), (t.StageId, t.Status, t.ReviewDue, t.ApprovedHead));
+        Assert.Equal(message, store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Theory]
+    [InlineData("head000", "mallory/orders", "pull request 7 is not from acme/orders (source: mallory/orders)")]
+    [InlineData("evil000", FakeSourceControl.Repository, "pull request 7 would merge evil000, not the reviewed head000")]
+    public async Task Low_verdict_is_high_when_the_pull_request_would_not_merge_the_reviewed_commit(string sourceCommit,
+        string repository, string reason)
+    {
+        Configure("active", ("implement", "auto"));
+        AnswerReviews(Low);
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.PullRequests[7] = FakeSourceControl.Pr(7, sourceCommit: sourceCommit, repository: repository);
+        await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7);
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High), (t.Status, t.Risk));
+        Assert.Equal(reason, Assert.Single(store.GateReviews).Verdict.Reasons[0]);
+        Assert.Empty(AutoApprovalComments);
+        Assert.Empty(store.GateDecisions);
+    }
+
+    [Fact] public async Task Low_verdict_is_high_when_the_pull_request_cannot_be_read()
+    {
+        Configure("active", ("implement", "auto"));
+        AnswerReviews(Low);
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7); // PR 7 unknown to the host
+        var o = Create();
+
+        await TickIdle(o);
+
+        Assert.Equal(RiskLevel.High, store.Single("ORD-1").Risk);
+        Assert.StartsWith("could not confirm what pull request 7 would merge", Assert.Single(store.GateReviews).Verdict.Reasons[0]);
+        Assert.Empty(AutoApprovalComments);
     }
 
     [Theory]
@@ -1623,7 +1684,7 @@ public sealed class OrchestratorTests : IDisposable
             t.MergeCommit = "build-1";
             if (stageId == "release") t.ReleasePullRequestId = pr.Id;
         });
-        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        scm.AddOpen(7, "symphonist/ORD-1");
         var o = Create();
         await TickIdle(o);
         var approved = store.Single("ORD-1");

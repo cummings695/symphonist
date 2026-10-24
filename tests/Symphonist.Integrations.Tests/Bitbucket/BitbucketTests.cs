@@ -122,8 +122,29 @@ public class BitbucketTests
         var pr = await Scm(stub).FindOpenPullRequestAsync("symphonist/ORD-1", "main", CancellationToken.None);
 
         Assert.Equal(42, pr!.Id);
-        Assert.Contains("q=source.branch.name%3D%22symphonist%2FORD-1%22", stub.Requests[0].PathAndQuery);
+        Assert.Equal(("acme/orders", "a1b2c3d4e5f6"), (pr.SourceRepository, pr.SourceCommit));
+        Assert.Contains("q=source.repository.full_name%3D%22acme%2Forders%22", stub.Requests[0].PathAndQuery);
+        Assert.Contains("source.branch.name%3D%22symphonist%2FORD-1%22", stub.Requests[0].PathAndQuery);
         Assert.Contains("destination.branch.name%3D%22main%22", stub.Requests[0].PathAndQuery);
+    }
+
+    [Fact]
+    public async Task Find_open_pr_ignores_a_fork_with_the_same_branch_names()
+    {
+        // Also when the host's query does not filter them out: a fork's PR, and one whose source repository is unknown.
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/pullrequests?state=OPEN", HttpStatusCode.OK,
+            Fixture("bb-pr-list-fork.json"));
+
+        Assert.Null(await Scm(stub).FindOpenPullRequestAsync("symphonist/ORD-1", "main", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Find_open_pr_matches_the_repository_ignoring_case()
+    {
+        var json = Fixture("bb-pr-list.json").Replace("\"full_name\": \"acme/orders\"", "\"full_name\": \"ACME/Orders\"");
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/pullrequests?state=OPEN", HttpStatusCode.OK, json);
+
+        Assert.Equal(42, (await Scm(stub).FindOpenPullRequestAsync("symphonist/ORD-1", "main", CancellationToken.None))!.Id);
     }
 
     [Fact]
@@ -144,6 +165,20 @@ public class BitbucketTests
 
         Assert.Equal(PullRequestState.Merged, pr.State);
         Assert.Equal("9c8b7a6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b", pr.MergeCommitHash);
+        Assert.Equal(("acme/orders", "a1b2c3d4e5f6"), (pr.SourceRepository, pr.SourceCommit));
+    }
+
+    [Fact]
+    public async Task Get_pr_without_source_repository_or_commit_maps_them_as_unknown()
+    {
+        var json = "{\"id\":42,\"state\":\"OPEN\",\"source\":{\"branch\":{\"name\":\"x\"},\"repository\":null},"
+                   + "\"links\":{\"html\":{\"href\":\"https://bitbucket.org/acme/orders/pull-requests/42\"}}}";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/pullrequests/42", HttpStatusCode.OK, json);
+
+        var pr = await Scm(stub).GetPullRequestAsync(42, CancellationToken.None);
+
+        Assert.Equal((null, null), (pr.SourceRepository, pr.SourceCommit));
+        Assert.False(pr.WouldMerge("acme/orders", "a1b2c3d4e5f6"));
     }
 
     [Theory]

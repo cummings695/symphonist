@@ -49,11 +49,11 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     }
 
     /// <param name="beforeMerge">
-    /// Asked only right before a merge is requested (the pull request is open); a non-null reason means no merge, and
-    /// the result is InProgress with the reason as its event. A merged or declined pull request never asks it.
+    /// Asked only right before a merge is requested, with the open pull request as just read; a non-null reason means
+    /// no merge, and the result is InProgress with the reason as its event. A merged or declined pull request never asks it.
     /// </param>
     public async Task<ExecutionResult> PostApprovalAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct,
-        Func<CancellationToken, Task<string?>>? beforeMerge = null)
+        Func<PullRequestInfo, CancellationToken, Task<string?>>? beforeMerge = null)
     {
         try
         {
@@ -204,7 +204,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         ?? await sc.OpenPullRequestAsync(sourceBranch, destination, title, description, ct);
 
     private static async Task<ExecutionResult> MergeAsync(ISourceControl sc, long? id, Action<string> setMergeCommit,
-        Func<CancellationToken, Task<string?>>? beforeMerge, CancellationToken ct)
+        Func<PullRequestInfo, CancellationToken, Task<string?>>? beforeMerge, CancellationToken ct)
     {
         if (id is not { } prId) return Failed("no pull request");
 
@@ -217,7 +217,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
                 return Failed($"pull request {prId} was declined");
         }
 
-        if (beforeMerge is not null && await beforeMerge(ct) is { } held)
+        if (beforeMerge is not null && await beforeMerge(pr, ct) is { } held)
             return new ExecutionResult(ExecutionStatus.InProgress, Event: held);
         var merge = await sc.MergePullRequestAsync(prId, ct);
         if (!merge.Merged)

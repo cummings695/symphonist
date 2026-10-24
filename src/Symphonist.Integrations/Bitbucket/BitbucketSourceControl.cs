@@ -35,12 +35,16 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
     public async Task<PullRequestInfo?> FindOpenPullRequestAsync(
         string sourceBranch, string destinationBranch, CancellationToken ct)
     {
-        var q = $"source.branch.name=\"{sourceBranch}\" AND destination.branch.name=\"{destinationBranch}\"";
+        // A fork's pull request can use the same branch names: only one from this repository is ours (checked here too,
+        // not just trusted to the query).
+        var q = $"source.repository.full_name=\"{config.FullName}\" AND source.branch.name=\"{sourceBranch}\" "
+                + $"AND destination.branch.name=\"{destinationBranch}\"";
         using var doc = await _api.SendAsync(HttpMethod.Get,
             $"{_api.RepoPath}/pullrequests?state=OPEN&q={Uri.EscapeDataString(q)}", null, ct);
         if (doc.RootElement.TryGetProperty("values", out var values) && values.ValueKind == JsonValueKind.Array)
-            foreach (var pr in values.EnumerateArray())
-                return Map(pr);
+            foreach (var pr in values.EnumerateArray().Select(Map))
+                if (string.Equals(pr.SourceRepository, config.FullName, StringComparison.OrdinalIgnoreCase))
+                    return pr;
         return null;
     }
 
@@ -144,6 +148,14 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
             _ => PullRequestState.Declined, // DECLINED, SUPERSEDED
         };
         var url = pr.GetProperty("links").GetProperty("html").GetProperty("href").GetString()!;
-        return new PullRequestInfo(pr.GetProperty("id").GetInt64(), new Uri(url), state, MergeHash(pr));
+        return new PullRequestInfo(pr.GetProperty("id").GetInt64(), new Uri(url), state, MergeHash(pr),
+            SourceString(pr, "repository", "full_name"), SourceString(pr, "commit", "hash"));
     }
+
+    /// <summary><c>source.{object}.{property}</c> when it is a string; null when missing or malformed.</summary>
+    private static string? SourceString(JsonElement pr, string obj, string property) =>
+        pr.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object
+        && source.TryGetProperty(obj, out var o) && o.ValueKind == JsonValueKind.Object
+        && o.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() : null;
 }

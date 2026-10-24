@@ -9,8 +9,12 @@
       "title": "ORD-1: Add login throttling",
       "state": "OPEN",
       "merge_commit": null,
-      "source": { "branch": { "name": "symphonist/ORD-1" } },
-      "destination": { "branch": { "name": "main" } },
+      "source": {
+        "branch": { "name": "symphonist/ORD-1" },
+        "commit": { "hash": "a1b2c3d4e5f6" },
+        "repository": { "full_name": "acme/orders" }
+      },
+      "destination": { "branch": { "name": "main" }, "repository": { "full_name": "acme/orders" } },
       "links": { "html": { "href": "https://bitbucket.org/acme/orders/pull-requests/42" } }
     }
   ]

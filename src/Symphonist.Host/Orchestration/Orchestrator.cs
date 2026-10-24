@@ -407,13 +407,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 // Checked only when a merge is about to be requested: a pull request already merged (by the host, by
                 // hand, or before a crash) has moved the branches itself and completes normally.
                 string? holdReason = null;
-                var result = await executor.PostApprovalAsync(p, io, t, ct, async c =>
+                var result = await executor.PostApprovalAsync(p, io, t, ct, async (pr, c) =>
                 {
                     // An accepted merge still under way on the host: don't ask again yet (nor merge unchecked later).
                     if (t.MergeAcceptedAt is { } accepted && time.GetUtcNow() - accepted < MergeAcceptedWait)
                         return "waiting for the host to finish merging";
                     t.MergeAcceptedAt = null;
-                    return holdReason = await MergeHeldAsync(p, io, t, c);
+                    return holdReason = await MergeHeldAsync(p, io, t, pr, c);
                 });
                 var now = time.GetUtcNow();
                 if (holdReason is not null)
@@ -610,7 +610,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// <summary>
     /// Why the reviewed commits cannot be confirmed as the current heads, or null when they are (or the gate reviews no
     /// commit). An implement or release verdict covers only the reviewed commit of the branch that would be merged (the
-    /// ticket branch, or main), and a release also its production base; any doubt makes the verdict high.
+    /// ticket branch, or main), and a release also its production base; the stage's pull request, when there is one,
+    /// must merge exactly that commit from this repository. Any doubt makes the verdict high.
     /// </summary>
     private async Task<string?> UnconfirmedHeadAsync(ProjectConfig p, ProjectIntegrations io, Ticket t,
         StageDefinition stage, GateReviewOutcome result, CancellationToken ct)
@@ -619,6 +620,20 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (result is not { ReviewedBranch: { } branch, ReviewedHead: { } head })
             return "could not confirm the reviewed commit";
         if (await MovedAsync(io, t, branch, head, ct) is { } moved) return moved;
+        if ((stage.Kind == StageKind.Release ? t.ReleasePullRequestId : t.PullRequestId) is { } prId)
+        {
+            PullRequestInfo pr;
+            try
+            {
+                pr = await io.SourceControl.GetPullRequestAsync(prId, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Pull request {Id} for {Key} could not be checked", prId, t.Key);
+                return $"could not confirm what pull request {prId} would merge: {e.Message}";
+            }
+            if (PullRequestDoubt(p, pr, head) is { } doubt) return doubt;
+        }
         if (stage.Kind != StageKind.Release) return null;
         if (result.ReviewedBase is not { } baseHead)
             return $"could not confirm the reviewed commit of {p.Repo.ProductionBranch}";
@@ -661,10 +676,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// For an auto-approved round, why the merge must not go ahead: the reviewed branch (or a release's production base)
-    /// is no longer at the reviewed commit, or cannot be checked. Null for human approvals, which pin no commit.
+    /// For an auto-approved round, why the merge must not go ahead: the pull request (as just read) would not merge the
+    /// reviewed commit from this repository, or the reviewed branch (or a release's production base) is no longer at the
+    /// reviewed commit, or cannot be checked. Null for human approvals, which pin no commit.
     /// </summary>
-    private async Task<string?> MergeHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct)
+    private async Task<string?> MergeHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, PullRequestInfo pr,
+        CancellationToken ct)
     {
         if (t.ApprovedHead is null && t.ApprovedBaseHead is null) return null;
         if (t is not { ApprovedBranch: { } branch, ApprovedHead: { } head }) return "the auto-approved commit is not recorded";
@@ -689,7 +706,17 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (!string.Equals(current, expected, StringComparison.OrdinalIgnoreCase))
                 return $"{name} moved since auto-approval ({expected} → {current})";
         }
-        return null;
+        // The host merges the pull request's source, not our branch: e.g. a fork's PR with the same branch names.
+        return PullRequestDoubt(p, pr, head);
+    }
+
+    /// <summary>Null when <paramref name="pr"/> would merge <paramref name="head"/> from this repository; otherwise why not.</summary>
+    private static string? PullRequestDoubt(ProjectConfig p, PullRequestInfo pr, string head)
+    {
+        if (pr.WouldMerge(p.Repo.FullName, head)) return null;
+        if (!string.Equals(pr.SourceRepository, p.Repo.FullName, StringComparison.OrdinalIgnoreCase))
+            return $"pull request {pr.Id} is not from {p.Repo.FullName} (source: {pr.SourceRepository ?? "unknown"})";
+        return $"pull request {pr.Id} would merge {pr.SourceCommit ?? "an unknown commit"}, not the reviewed {head}";
     }
 
     private Task ApplyAsync(ProjectIntegrations io, Ticket t, string fromStageId, TransitionOutcome outcome,

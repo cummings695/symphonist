@@ -6,7 +6,7 @@
   "state": "MERGED",
   "merge_commit": { "type": "commit", "hash": "9c8b7a6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b" },
   "close_source_branch": false,
-  "source": { "branch": { "name": "symphonist/ORD-1" }, "commit": { "hash": "a1b2c3d4e5f6" } },
+  "source": { "branch": { "name": "symphonist/ORD-1" }, "commit": { "hash": "a1b2c3d4e5f6" }, "repository": { "full_name": "acme/orders" } },
   "destination": { "branch": { "name": "main" }, "commit": { "hash": "0f9e8d7c6b5a" } },
   "created_on": "2026-10-21T09:12:44.318214+00:00",
   "updated_on": "2026-10-21T09:40:02.771903+00:00",

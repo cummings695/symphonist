@@ -1,0 +1,31 @@
+{
+  "pagelen": 10,
+  "page": 1,
+  "size": 2,
+  "values": [
+    {
+      "type": "pullrequest",
+      "id": 43,
+      "title": "ORD-1: Add login throttling (fork)",
+      "state": "OPEN",
+      "merge_commit": null,
+      "source": {
+        "branch": { "name": "symphonist/ORD-1" },
+        "commit": { "hash": "eeeeeeeeeeee" },
+        "repository": { "full_name": "mallory/orders" }
+      },
+      "destination": { "branch": { "name": "main" }, "repository": { "full_name": "acme/orders" } },
+      "links": { "html": { "href": "https://bitbucket.org/acme/orders/pull-requests/43" } }
+    },
+    {
+      "type": "pullrequest",
+      "id": 44,
+      "title": "ORD-1: no source repository",
+      "state": "OPEN",
+      "merge_commit": null,
+      "source": { "branch": { "name": "symphonist/ORD-1" }, "commit": { "hash": "dddddddddddd" } },
+      "destination": { "branch": { "name": "main" } },
+      "links": { "html": { "href": "https://bitbucket.org/acme/orders/pull-requests/44" } }
+    }
+  ]
+}

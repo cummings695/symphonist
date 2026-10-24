@@ -11,7 +11,11 @@ public sealed record StageDefinition(string Id, StageKind Kind, GatePolicy Gate,
 public sealed record TrackerConfig(string Type, Uri Site, string Email, string TokenSecret, string Jql);
 
 public sealed record RepoConfig(string Type, string Workspace, string Slug, string LocalPath,
-    string MainBranch, string ProductionBranch, string Email, string TokenSecret, string MergeStrategy);
+    string MainBranch, string ProductionBranch, string Email, string TokenSecret, string MergeStrategy)
+{
+    /// <summary>"workspace/slug", as the host names the repository (compared ignoring case).</summary>
+    public string FullName => $"{Workspace}/{Slug}";
+}
 
 public sealed record BuildConfig(string Type, int TimeoutMinutes);
 
