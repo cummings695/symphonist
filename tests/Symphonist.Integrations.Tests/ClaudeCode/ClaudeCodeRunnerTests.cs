@@ -241,6 +241,52 @@ public class ClaudeCodeRunnerTests
         Assert.Equal("completed", r.Structured!.Value.GetProperty("status").GetString());
     }
 
+    private static AgentRunRequest ReadOnly(Isolation isolation, string[]? tools = null) =>
+        Request(isolation, tools) with { OutputSchema = GateReviewSchema.Json, ReadOnlyWorkspace = true };
+
+    [Fact]
+    public async Task Host_read_only_run_with_default_tools_allows_only_reads_and_denies_writes()
+    {
+        await runner.RunAsync(ReadOnly(Isolation.Host, [.. ReviewConfig.ReadOnlyTools]), default);
+        Assert.Equal("Read,Grep,Glob", ArgAfter(fake.Last, "--allowedTools"));
+        Assert.Equal("Write,Edit,NotebookEdit,Bash", ArgAfter(fake.Last, "--disallowedTools"));
+        Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
+    }
+
+    [Theory]
+    [InlineData("Bash(git diff:*)")]
+    [InlineData("Write")]
+    [InlineData("Edit")]
+    [InlineData("read")]
+    public async Task Host_read_only_run_refuses_write_capable_tools_without_starting(string tool)
+    {
+        var r = await runner.RunAsync(ReadOnly(Isolation.Host, ["Read", tool]), default);
+        Assert.False(r.Succeeded);
+        Assert.Equal($"read-only run refuses write-capable tool '{tool}'", r.Error);
+        Assert.Null(r.Output);
+        Assert.Null(r.Structured);
+        Assert.Null(fake.Last);
+    }
+
+    [Fact]
+    public async Task Container_read_only_run_denies_writes()
+    {
+        await runner.RunAsync(ReadOnly(Isolation.Container, ["Write"]), default);
+        Assert.Contains("--dangerously-skip-permissions", fake.Last.Arguments);
+        Assert.Equal("Write,Edit,NotebookEdit,Bash", ArgAfter(fake.Last, "--disallowedTools"));
+    }
+
+    [Fact]
+    public async Task Non_read_only_runs_have_no_deny_list()
+    {
+        await runner.RunAsync(Request(Isolation.Container), default);
+        Assert.Equal(["-p", "--output-format", "json", "--json-schema", StageOutputSchema.Json,
+            "--dangerously-skip-permissions"], fake.Last.Arguments);
+        await runner.RunAsync(Request(Isolation.Host, tools: ["Read", "Write", "Bash(dotnet test:*)"]), default);
+        Assert.Equal(["-p", "--output-format", "json", "--json-schema", StageOutputSchema.Json,
+            "--allowedTools", "Read,Write,Bash(dotnet test:*)"], fake.Last.Arguments);
+    }
+
     [Fact]
     public async Task Does_not_trust_a_json_result_string_when_structured_output_absent()
     {

@@ -9,6 +9,9 @@ namespace Symphonist.Integrations.ClaudeCode;
 /// <summary>Runs Claude Code headlessly (<c>claude -p</c>) and parses its JSON result.</summary>
 public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launcher) : IAgentRunner
 {
+    /// <summary>Denied on every read-only run, whatever the isolation (defense in depth).</summary>
+    public static readonly IReadOnlyList<string> ReadOnlyDeniedTools = ["Write", "Edit", "NotebookEdit", "Bash"];
+
     private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     public async Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
@@ -18,7 +21,16 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         // Bypass permission prompts only when the launcher actually sandboxes the run; config alone is not enough.
         if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation(request))
             args.Add(HostLauncher.PermissionBypassFlag);
-        else { args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools)); }
+        else
+        {
+            // On the host only the allowlist stands between a read-only run and the developer's files: fail closed.
+            if (request.ReadOnlyWorkspace
+                && settings.AllowedTools.FirstOrDefault(t => !ReviewConfig.ReadOnlyTools.Contains(t)) is { } tool)
+                return new AgentRunResult(false, null, null, TimeSpan.Zero,
+                    $"read-only run refuses write-capable tool '{tool}'", "");
+            args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools));
+        }
+        if (request.ReadOnlyWorkspace) { args.Add("--disallowedTools"); args.Add(string.Join(",", ReadOnlyDeniedTools)); }
         if (!string.IsNullOrWhiteSpace(settings.Model)) { args.Add("--model"); args.Add(settings.Model); }
 
         var command = new ProcessSpec("claude", args, request.WorkingDirectory, request.Prompt,

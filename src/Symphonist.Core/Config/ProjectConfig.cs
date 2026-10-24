@@ -23,8 +23,11 @@ public sealed record RiskArea(string Name, string Description, IReadOnlyList<str
 /// <param name="PromptPath">Absolute path of a review prompt override, or null for the embedded default.</param>
 public sealed record ReviewConfig(ReviewMode Mode, AgentSettings Agent, string? PromptPath)
 {
-    public static readonly IReadOnlyList<string> ReadOnlyTools =
-        ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)"];
+    /// <summary>
+    /// The reviewer's host-mode tools, and the only ones a read-only run accepts. No Bash: even git diff/log/show can
+    /// write files (<c>--output</c>), and the reviewer reads untrusted PR content.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ReadOnlyTools = ["Read", "Grep", "Glob"];
 }
 
 public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker, RepoConfig Repo, BuildConfig Build,

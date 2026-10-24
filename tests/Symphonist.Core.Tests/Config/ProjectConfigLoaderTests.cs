@@ -136,6 +136,7 @@ public class ProjectConfigLoaderTests
         Assert.Empty(p.RiskAreas);
         Assert.Equal(ReviewMode.Off, p.Review.Mode);
         Assert.Equal(ReviewConfig.ReadOnlyTools, p.Review.Agent.AllowedTools);
+        Assert.Equal(["Read", "Grep", "Glob"], p.Review.Agent.AllowedTools);
         Assert.Null(p.Review.PromptPath);
         Assert.Equal(20, p.Review.Agent.TimeoutMinutes);
     }

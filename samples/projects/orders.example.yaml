@@ -81,6 +81,7 @@ review:
   mode: off
   # prompt: prompts/review.md   # optional prompt override, relative to this file
   # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # inherits the rest from agent
+  #   host mode: allowedTools defaults to [Read, Grep, Glob], and a review refuses to run with any other tool
 
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
 # prompts:
