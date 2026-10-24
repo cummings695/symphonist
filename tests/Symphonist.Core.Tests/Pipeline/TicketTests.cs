@@ -1,5 +1,6 @@
 using System.Reflection;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Core.Tests.Pipeline;
 
@@ -33,6 +34,8 @@ public class TicketTests
         if (t == typeof(Guid)) return new Guid(n, 0, 0, new byte[8]);
         if (t == typeof(DateTimeOffset)) return DateTimeOffset.UnixEpoch.AddDays(n);
         if (t == typeof(StageStatus)) return (StageStatus)(n % 5 + 1);
+        if (t == typeof(bool)) return n != 0;
+        if (t == typeof(RiskLevel)) return n == 0 ? RiskLevel.Low : RiskLevel.High;
         throw new NotSupportedException($"add a sample value for {type} (property type new to Ticket)");
     }
 }

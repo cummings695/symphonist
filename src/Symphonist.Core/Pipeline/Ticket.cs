@@ -1,3 +1,5 @@
+using Symphonist.Core.Risk;
+
 namespace Symphonist.Core.Pipeline;
 
 public enum StageStatus { Pending, Running, AwaitingApproval, Approved, Blocked, Done }
@@ -40,6 +42,12 @@ public sealed class Ticket
     /// through, the developer moves the card, or Symphonist makes another move.
     /// </summary>
     public string? TrackerRetryStatus { get; set; }
+
+    /// <summary>A reviewer run is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
+    public bool ReviewDue { get; set; }
+
+    /// <summary>The latest reviewer verdict (the card's badge); null until a review has finished.</summary>
+    public RiskLevel? Risk { get; set; }
 
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();

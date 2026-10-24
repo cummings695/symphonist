@@ -1,4 +1,5 @@
 using Symphonist.Core.Config;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Core.Pipeline;
 
@@ -24,9 +25,9 @@ public static class PipelineEngine
     }
 
     /// <summary>
-    /// The stage's work is done: wait at its human gate or advance. A source move deferred while the stage ran
-    /// (<see cref="Ticket.PendingSourceStatus"/>) is applied now: its gate's approval status approves, an earlier
-    /// stage's status sends back with <paramref name="latestFeedback"/>.
+    /// The stage's work is done: wait at its gate (human or auto; a review may be owed) or advance. A source move
+    /// deferred while the stage ran (<see cref="Ticket.PendingSourceStatus"/>) is applied now: its gate's approval
+    /// status approves, an earlier stage's status sends back with <paramref name="latestFeedback"/>.
     /// </summary>
     public static TransitionOutcome StageSucceeded(ProjectConfig p, Ticket t, DateTimeOffset now, string? latestFeedback = null)
     {
@@ -53,6 +54,7 @@ public static class PipelineEngine
             t.WaitingSince = now;
             t.UpdatedAt = now;
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
+            t.ReviewDue = p.Reviews(stage);
             outcome = new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
         }
         else
@@ -81,14 +83,57 @@ public static class PipelineEngine
     {
         if (t.Status != StageStatus.AwaitingApproval) return NoChange($"{t.StageId} is not awaiting approval");
         var stage = p.Stage(t.StageId);
+        var decision = DecisionOn(t, GateDecision.Approved);
+        t.ReviewDue = false;
         if (HasPostApprovalAction(stage.Kind))
         {
             t.Status = StageStatus.Approved;
             t.Attempts = 0; // the post-approval action (merge) gets its own retry budget
             t.UpdatedAt = now;
-            return new(true, null, $"{stage.Id} approved");
+            return new(true, null, $"{stage.Id} approved", decision);
         }
-        return Advance(p, t, stage, now);
+        return Advance(p, t, stage, now) with { Decision = decision };
+    }
+
+    /// <summary>
+    /// A low verdict would approve this round on its own: the round (<paramref name="waitingSince"/>) is still waiting,
+    /// its review is owed, the gate is auto and review is active.
+    /// </summary>
+    public static bool WouldAutoApprove(ProjectConfig p, Ticket t, GateVerdict v, DateTimeOffset waitingSince) =>
+        t.WaitingSince == waitingSince && WaitsOnReviewer(p, t) && v.Risk == RiskLevel.Low;
+
+    /// <summary>The gate isn't waiting on the developer yet: an active auto gate whose review is still owed.</summary>
+    public static bool WaitsOnReviewer(ProjectConfig p, Ticket t) =>
+        t.Status == StageStatus.AwaitingApproval && t.ReviewDue
+        && p.Stage(t.StageId).Gate == GatePolicy.AutoWhenLowRisk && p.Review.Mode == ReviewMode.Active;
+
+    /// <summary>
+    /// The reviewer judged the round (<paramref name="waitingSince"/>): record the verdict and, for a low verdict at an
+    /// active auto gate, approve when <paramref name="allowAutoApprove"/>. A verdict on a round already decided is not applied.
+    /// </summary>
+    public static TransitionOutcome ReviewCompleted(ProjectConfig p, Ticket t, GateVerdict v, DateTimeOffset waitingSince,
+        bool allowAutoApprove, DateTimeOffset now)
+    {
+        if (t.Status != StageStatus.AwaitingApproval || t.WaitingSince != waitingSince)
+            return NoChange($"review of {t.StageId} finished after the gate was decided; not applied");
+
+        var stageId = t.StageId;
+        var auto = allowAutoApprove && WouldAutoApprove(p, t, v, waitingSince);
+        t.Risk = v.Risk;
+        t.ReviewDue = false;
+        t.UpdatedAt = now;
+        if (auto)
+        {
+            var approved = Approve(p, t, now);
+            return approved with { Message = $"auto-approved {stageId}: low risk", Decision = approved.Decision! with { Auto = true } };
+        }
+
+        var risk = v.Risk == RiskLevel.Low ? "low" : "high";
+        var message =
+            p.Review.Mode == ReviewMode.Shadow ? $"reviewer (shadow): {risk} risk — {v.Summary}"
+            : v.Risk == RiskLevel.High ? $"{t.StageId} needs you: high risk — {v.Reasons.FirstOrDefault() ?? v.Summary}"
+            : $"reviewer: {risk} risk — {v.Summary}";
+        return new(true, null, message);
     }
 
     public static TransitionOutcome PostApprovalCompleted(ProjectConfig p, Ticket t, DateTimeOffset now)
@@ -101,7 +146,9 @@ public static class PipelineEngine
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked))
             return NoChange($"cannot send back from {t.Status}");
-        return SendBackTo(t, p.Stage(toStageId ?? t.StageId), feedback, now);
+        // Only a send-back from the waiting gate decides a round; one from Approved or Blocked does not.
+        var decision = t.Status == StageStatus.AwaitingApproval ? DecisionOn(t, GateDecision.SentBack) : null;
+        return SendBackTo(t, p.Stage(toStageId ?? t.StageId), feedback, now) with { Decision = decision };
     }
 
     public static TransitionOutcome SourceStatusChanged(ProjectConfig p, Ticket t, string newStatus, string? latestFeedback, DateTimeOffset now)
@@ -141,6 +188,8 @@ public static class PipelineEngine
         t.Status = StageStatus.Blocked;
         t.BlockedReason = reason;
         t.PendingSourceStatus = null;
+        t.WaitingSince = null; // the gate round ends: a late review or click of it must not apply
+        t.ReviewDue = false;
         t.UpdatedAt = now;
         return new(true, null, $"blocked: {reason}");
     }
@@ -201,6 +250,7 @@ public static class PipelineEngine
         t.BlockedReason = null;
         t.Feedback = null;
         t.WaitingSince = null;
+        t.ReviewDue = false;
         t.PendingSourceStatus = null;
         t.StageStartedAt = now;
         t.UpdatedAt = now;
@@ -214,6 +264,13 @@ public static class PipelineEngine
     }
 
     private static TransitionOutcome NoChange(string message) => new(false, null, message);
+
+    /// <summary>
+    /// The developer's decision on the waiting round, taken before the transition clears <see cref="Ticket.WaitingSince"/>;
+    /// null when there is no round to identify (no waiting time).
+    /// </summary>
+    private static GateDecisionInfo? DecisionOn(Ticket t, GateDecision decision) =>
+        t.WaitingSince is { } since ? new(t.StageId, since, decision, Auto: false) : null;
 
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 }

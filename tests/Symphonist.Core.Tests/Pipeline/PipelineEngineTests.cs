@@ -1,5 +1,6 @@
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Core.Tests.Pipeline;
 
@@ -302,5 +303,185 @@ public class PipelineEngineTests
         Assert.Equal((StageStatus.Pending, "In Progress"), (t.Status, t.PendingSourceStatus));
         PipelineEngine.StageSucceeded(P, t, Now);
         Assert.Equal("implement", t.StageId);
+    }
+
+    private static readonly DateTimeOffset Gate = DateTimeOffset.Parse("2026-10-21T09:00Z");
+
+    /// <summary><see cref="P"/> with <paramref name="stageId"/>'s gate set and review in <paramref name="mode"/>.</summary>
+    private static ProjectConfig With(string stageId, GatePolicy gate, ReviewMode mode) =>
+        P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Id == stageId ? s with { Gate = gate } : s).ToList(),
+            Review = new ReviewConfig(mode, P.Agent, null),
+        };
+
+    private static Ticket Reviewing(string stageId)
+    {
+        var t = Awaiting(stageId); t.WaitingSince = Gate; t.ReviewDue = true;
+        return t;
+    }
+
+    private static GateVerdict Low => new(RiskLevel.Low, "small change", [], ["tests pass"], []);
+    private static GateVerdict High => new(RiskLevel.High, "risky change", ["touches pricing"], ["diff"], []);
+
+    [Fact] public void Auto_gate_waits_and_owes_a_review()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = At("implement");
+        var o = PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal((StageStatus.AwaitingApproval, true, "In Review"), (t.Status, t.ReviewDue, o.SourceStatusToSet));
+    }
+
+    [Fact] public void Auto_gate_with_review_off_waits_for_approval()
+    {
+        var p = With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Off);
+        var t = At("plan");
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, false), (t.StageId, t.Status, t.ReviewDue));
+        Assert.False(PipelineEngine.WaitsOnReviewer(p, t));
+    }
+
+    [Fact] public void Human_gate_owes_review_only_when_review_is_on()
+    {
+        var shadow = At("implement");
+        PipelineEngine.StageSucceeded(With("implement", GatePolicy.Human, ReviewMode.Shadow), shadow, Now);
+        Assert.True(shadow.ReviewDue);
+
+        var off = At("implement");
+        PipelineEngine.StageSucceeded(With("implement", GatePolicy.Human, ReviewMode.Off), off, Now);
+        Assert.False(off.ReviewDue);
+    }
+
+    [Fact] public void Deferred_approval_owes_no_review()
+    {
+        var t = At("plan", StageStatus.Running); t.LastSourceStatus = "In Progress"; t.PendingSourceStatus = "In Progress";
+        PipelineEngine.StageSucceeded(With("plan", GatePolicy.Human, ReviewMode.Active), t, Now);
+        Assert.Equal(("implement", false), (t.StageId, t.ReviewDue));
+    }
+
+    [Fact] public void Low_verdict_auto_approves_auto_gate_in_active_mode()
+    {
+        var p = With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("plan");
+        Assert.True(PipelineEngine.WouldAutoApprove(p, t, Low, Gate));
+
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+
+        Assert.Equal(("implement", StageStatus.Pending, RiskLevel.Low, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
+        Assert.StartsWith("auto-approved plan", o.Message);
+        Assert.Equal("In Progress", o.SourceStatusToSet);
+        Assert.Equal(new GateDecisionInfo("plan", Gate, GateDecision.Approved, Auto: true), o.Decision);
+    }
+
+    [Fact] public void Low_verdict_in_shadow_mode_only_records()
+    {
+        var p = With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Shadow);
+        var t = Reviewing("plan");
+        Assert.False(PipelineEngine.WouldAutoApprove(p, t, Low, Gate));
+
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+
+        Assert.Equal((StageStatus.AwaitingApproval, false, RiskLevel.Low), (t.Status, t.ReviewDue, t.Risk));
+        Assert.True(o.Changed); Assert.Null(o.Decision);
+        Assert.StartsWith("reviewer (shadow): low risk", o.Message);
+        Assert.Equal("reviewer (shadow): low risk — small change", o.Message);
+    }
+
+    [Fact] public void High_verdict_waits_on_you()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("implement");
+
+        var o = PipelineEngine.ReviewCompleted(p, t, High, Gate, allowAutoApprove: true, Now);
+
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High, false), (t.Status, t.Risk, t.ReviewDue));
+        Assert.Equal("implement needs you: high risk — touches pricing", o.Message);
+        Assert.Null(o.SourceStatusToSet); Assert.Null(o.Decision);
+    }
+
+    [Fact] public void High_verdict_without_reasons_quotes_the_summary()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var o = PipelineEngine.ReviewCompleted(p, Reviewing("implement"), High with { Reasons = [] }, Gate, true, Now);
+        Assert.Equal("implement needs you: high risk — risky change", o.Message);
+    }
+
+    [Fact] public void Human_gate_in_active_mode_records_the_verdict()
+    {
+        var p = With("implement", GatePolicy.Human, ReviewMode.Active);
+        var t = Reviewing("implement");
+        Assert.False(PipelineEngine.WouldAutoApprove(p, t, Low, Gate));
+
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+        Assert.Equal("reviewer: low risk — small change", o.Message);
+    }
+
+    [Fact] public void Auto_approval_not_allowed_keeps_waiting()
+    {
+        var p = With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("plan");
+
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: false, Now);
+
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, RiskLevel.Low, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
+        Assert.True(o.Changed); Assert.Null(o.Decision);
+    }
+
+    [Fact] public void Stale_review_of_earlier_round_is_not_applied()
+    {
+        var p = With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("plan"); t.WaitingSince = Now; t.Risk = RiskLevel.High;
+        Assert.False(PipelineEngine.WouldAutoApprove(p, t, Low, Gate));
+
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+
+        Assert.False(o.Changed);
+        Assert.Equal("review of plan finished after the gate was decided; not applied", o.Message);
+        Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High, true), (t.Status, t.Risk, t.ReviewDue));
+    }
+
+    [Fact] public void Review_after_the_gate_was_decided_is_not_applied()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("implement"); t.Status = StageStatus.Approved;
+        var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+        Assert.False(o.Changed); Assert.Null(t.Risk); Assert.Equal(StageStatus.Approved, t.Status);
+    }
+
+    [Fact] public void Approve_and_send_back_report_gate_decision()
+    {
+        var approved = Reviewing("implement");
+        var a = PipelineEngine.Approve(P, approved, Now);
+        Assert.Equal(new GateDecisionInfo("implement", Gate, GateDecision.Approved, Auto: false), a.Decision);
+        Assert.False(approved.ReviewDue);
+
+        var sent = Reviewing("implement");
+        var s = PipelineEngine.SendBack(P, sent, "fix", null, Now);
+        Assert.Equal(new GateDecisionInfo("implement", Gate, GateDecision.SentBack, Auto: false), s.Decision);
+        Assert.False(sent.ReviewDue);
+
+        Assert.Null(PipelineEngine.SendBack(P, At("implement", StageStatus.Blocked), "fix", null, Now).Decision);
+        Assert.Null(PipelineEngine.SendBack(P, At("implement", StageStatus.Approved), "fix", null, Now).Decision);
+        Assert.Null(PipelineEngine.PostApprovalCompleted(P, approved, Now).Decision);
+    }
+
+    [Fact] public void Block_clears_waiting_since_and_review_due()
+    {
+        var t = Reviewing("implement");
+        PipelineEngine.Block(t, "no longer matches", Now);
+        Assert.Equal((StageStatus.Blocked, (DateTimeOffset?)null, false), (t.Status, t.WaitingSince, t.ReviewDue));
+    }
+
+    [Fact] public void Waits_on_reviewer_only_for_active_auto_gates()
+    {
+        var t = Reviewing("plan");
+        Assert.False(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Shadow), t));
+        Assert.False(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.Human, ReviewMode.Active), t));
+        Assert.True(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active), t));
+
+        t.ReviewDue = false;
+        Assert.False(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active), t));
     }
 }

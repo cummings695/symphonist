@@ -39,6 +39,9 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(t => t.StageStartedAt).HasConversion(dto);
             e.Property(t => t.WaitingSince).HasConversion(dto);
             e.Property(t => t.ClaudeCommentsHandledAt).HasConversion(dto);
+            // Not stored yet: the RiskReviewer migration (plan 3, Task 5) adds these columns and removes the Ignores.
+            e.Ignore(t => t.ReviewDue);
+            e.Ignore(t => t.Risk);
         });
 
         b.Entity<TicketEvent>(e =>
