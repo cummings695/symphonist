@@ -288,11 +288,13 @@ select {
 }
 
 .reconnect-retrying-visible,
+.reconnect-failed-visible,
 .reconnect-rejected-visible {
     display: none;
 }
 
 #components-reconnect-modal[data-state="retrying"] .reconnect-retrying-visible,
+#components-reconnect-modal[data-state="failed"] .reconnect-failed-visible,
 #components-reconnect-modal[data-state="rejected"] .reconnect-rejected-visible {
     display: block;
 }

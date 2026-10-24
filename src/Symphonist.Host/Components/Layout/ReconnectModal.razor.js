@@ -12,8 +12,9 @@ function onStateChanged(event) {
     } else if (state === "hide") {
         modal.close();
     } else if (state === "failed") {
-        // Retries exhausted: keep trying whenever the developer comes back to the tab.
-        modal.dataset.state = "retrying";
+        // Retries exhausted: offer a reload, and keep trying whenever the developer comes back to the tab.
+        modal.dataset.state = "failed";
+        if (!modal.open) modal.showModal();
         document.addEventListener("visibilitychange", retryWhenVisible);
     } else if (state === "rejected") {
         modal.dataset.state = "rejected";
