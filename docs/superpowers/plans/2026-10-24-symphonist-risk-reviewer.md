@@ -79,7 +79,7 @@ Roadmap item 3 is in `docs/superpowers/plans/2026-10-21-symphonist-walking-skele
   - Why: the anti-babysitting goal and the guardrails rule out retry storms.
 - **The reviewer cannot write.**
   - In container mode the workspace is mounted read-only.
-  - In host mode, the reviewer's `allowedTools` default to `Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git show:*)`.
+  - In host mode, the reviewer's `allowedTools` default to exactly `Read, Grep, Glob` (no shell: `git diff --output` can write files). A read-only host run with any other tool is refused, and every read-only run also gets `--disallowedTools Write,Edit,NotebookEdit,Bash`. The review prompt carries the diff.
   - Symphonist never commits after a review.
 - **Reviewer agent.** `review.agent` overrides `type`, `model`, `timeoutMinutes` (default 20) and `allowedTools` (host mode). It inherits isolation, image and `allowedDomains` from `agent`. Only `claude-code` is accepted until plan 6.
 - **Who posts the auto-approval comment, and its text.** Symphonist posts it under the developer's account, signed with the usual footer, before approving. The text is fixed by `AutoApprovalComment.Format` (Task 2). If the comment can't be posted, the gate is **not** auto-approved: the card waits on the developer, with the event `"auto-approval held: could not post comment: {error}; waiting on you"`. Why: the spec says "every auto-approval posts a comment". No comment is posted for shadow or high verdicts; the dashboard shows those.
@@ -172,7 +172,7 @@ public sealed record RiskArea(string Name, string Description, IReadOnlyList<str
 /// <param name="PromptPath">Absolute path of a review prompt override, or null for the embedded default.</param>
 public sealed record ReviewConfig(ReviewMode Mode, AgentSettings Agent, string? PromptPath)
 {
-    public static readonly IReadOnlyList<string> ReadOnlyTools = ["Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)"];
+    public static readonly IReadOnlyList<string> ReadOnlyTools = ["Read", "Grep", "Glob"];
 }
 // ProjectConfig: init properties (existing positional constructor calls keep compiling)
 public IReadOnlyList<RiskArea> RiskAreas { get; init; } = [];
