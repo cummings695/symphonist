@@ -144,6 +144,7 @@ public sealed class BoardQueryTests : IDisposable
         Assert.Equal(Now, card.Since);
         Assert.False(card.WaitingOnYou);
         Assert.NotNull(card.MaxAttempts);
+        Assert.True(card.Known);
         Assert.Null(cards.Single(c => c.Key == "ORD-2").CostUsd);
     }
 
@@ -156,6 +157,7 @@ public sealed class BoardQueryTests : IDisposable
 
         Assert.Equal((BoardQuery.UnknownColumnId, "Unknown stage"), (last.Id, last.Title));
         Assert.Equal(["ORD-1"], Keys(last));
+        Assert.False(last.Cards[0].Known);
     }
 
     [Fact]
@@ -172,6 +174,7 @@ public sealed class BoardQueryTests : IDisposable
         Assert.Null(card.IssueUrl);
         Assert.Null(card.PrUrl);
         Assert.Null(card.MaxAttempts);
+        Assert.False(card.Known);
     }
 
     [Fact]

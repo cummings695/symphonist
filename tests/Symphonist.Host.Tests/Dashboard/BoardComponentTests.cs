@@ -113,6 +113,21 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Waiting_card_in_unknown_stage_has_no_approve()
+    {
+        await Seed("ORD-1", "review", StageStatus.AwaitingApproval);
+        await Seed("GONE-1", "plan", StageStatus.AwaitingApproval, "gone");
+
+        var cut = RenderBoard();
+
+        foreach (var key in new[] { "ORD-1", "GONE-1" })
+        {
+            Assert.Contains("Waiting on you", Card(cut, key).TextContent);
+            Assert.Empty(Card(cut, key).QuerySelectorAll("button"));
+        }
+    }
+
+    [Fact]
     public async Task Approve_calls_orchestrator_and_shows_outcome()
     {
         await Seed("ORD-5", "implement", StageStatus.AwaitingApproval);

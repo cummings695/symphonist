@@ -65,11 +65,10 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             ? new Dictionary<Guid, decimal>()
             : new Dictionary<Guid, decimal> { [t.Id] = costs.Sum(r => r.CostUsd!.Value) });
 
-        // Without its project or stage in the configuration the page is read-only.
-        var stageIndex = project?.Pipeline.ToList().FindIndex(s => s.Id == t.StageId) ?? -1;
-        var known = stageIndex >= 0;
+        // Without its project or stage in the configuration the page is read-only (like the card on the board).
+        var known = card.Known;
         var targets = known
-            ? project!.Pipeline.Take(stageIndex + 1).Reverse().Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
+            ? project!.Pipeline.Take(project.Pipeline.ToList().FindIndex(s => s.Id == t.StageId) + 1).Reverse().Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
             : [];
         var sendBack = known && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
         return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
@@ -110,7 +109,8 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
     private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs) =>
         new(t.ProjectId, t.Key, t.Title, t.StageId, t.Status, t.Status == StageStatus.AwaitingApproval, t.BlockedReason,
             t.Attempts, p?.MaxAttemptsPerStage, Since(t), costs.TryGetValue(t.Id, out var cost) ? cost : null,
-            TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p));
+            TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p),
+            p?.Pipeline.Any(s => s.Id == t.StageId) == true);
 
     private static DateTimeOffset? Since(Ticket t) => t.Status switch
     {
