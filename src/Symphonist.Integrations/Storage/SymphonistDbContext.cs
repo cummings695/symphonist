@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Integrations.Storage;
 
@@ -16,6 +18,38 @@ public sealed class AgentRunEntity
     public string? Error { get; set; }
     public string RawLogPath { get; set; } = "";
     public string? Summary { get; set; }
+    public bool IsReview { get; set; }
+}
+
+public sealed class GateReviewEntity
+{
+    public long Id { get; set; }
+    public Guid TicketId { get; set; }
+    public string ProjectId { get; set; } = "";
+    public string StageId { get; set; } = "";
+    public DateTimeOffset WaitingSince { get; set; }
+    public DateTimeOffset At { get; set; }
+    public ReviewMode Mode { get; set; }
+    public GatePolicy Gate { get; set; }
+    public RiskLevel Risk { get; set; }
+    public string Summary { get; set; } = "";
+    /// <summary>JSON arrays of strings.</summary>
+    public string ReasonsJson { get; set; } = "[]";
+    public string CheckedJson { get; set; } = "[]";
+    public string AreasJson { get; set; } = "[]";
+    public string? Error { get; set; }
+}
+
+public sealed class GateDecisionEntity
+{
+    public long Id { get; set; }
+    public Guid TicketId { get; set; }
+    public string ProjectId { get; set; } = "";
+    public string StageId { get; set; } = "";
+    public DateTimeOffset WaitingSince { get; set; }
+    public GateDecision Decision { get; set; }
+    public bool Auto { get; set; }
+    public DateTimeOffset At { get; set; }
 }
 
 public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> options) : DbContext(options)
@@ -23,6 +57,8 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
     public DbSet<Ticket> Tickets => Set<Ticket>();
     public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
     public DbSet<AgentRunEntity> AgentRuns => Set<AgentRunEntity>();
+    public DbSet<GateReviewEntity> GateReviews => Set<GateReviewEntity>();
+    public DbSet<GateDecisionEntity> GateDecisions => Set<GateDecisionEntity>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -39,9 +75,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(t => t.StageStartedAt).HasConversion(dto);
             e.Property(t => t.WaitingSince).HasConversion(dto);
             e.Property(t => t.ClaudeCommentsHandledAt).HasConversion(dto);
-            // Not stored yet: the RiskReviewer migration (plan 3, Task 5) adds these columns and removes the Ignores.
-            e.Ignore(t => t.ReviewDue);
-            e.Ignore(t => t.Risk);
+            e.Property(t => t.Risk).HasConversion<string>();
         });
 
         b.Entity<TicketEvent>(e =>
@@ -56,6 +90,26 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.TicketId);
             e.Property(x => x.StartedAt).HasConversion(dto);
+        });
+
+        b.Entity<GateReviewEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.TicketId, x.StageId, x.WaitingSince });
+            e.Property(x => x.WaitingSince).HasConversion(dto);
+            e.Property(x => x.At).HasConversion(dto);
+            e.Property(x => x.Mode).HasConversion<string>();
+            e.Property(x => x.Gate).HasConversion<string>();
+            e.Property(x => x.Risk).HasConversion<string>();
+        });
+
+        b.Entity<GateDecisionEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.TicketId, x.StageId, x.WaitingSince });
+            e.Property(x => x.WaitingSince).HasConversion(dto);
+            e.Property(x => x.At).HasConversion(dto);
+            e.Property(x => x.Decision).HasConversion<string>();
         });
     }
 }

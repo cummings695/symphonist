@@ -70,6 +70,12 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<long?>("ReleasePullRequestId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("ReviewDue")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Risk")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("SpecPath")
                         .HasColumnType("TEXT");
 
@@ -147,6 +153,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<string>("Error")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("IsReview")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("RawLogPath")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -172,6 +181,104 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.HasIndex("TicketId");
 
                     b.ToTable("AgentRuns");
+                });
+
+            modelBuilder.Entity("Symphonist.Integrations.Storage.GateDecisionEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("At")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Auto")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Decision")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StageId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("WaitingSince")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "StageId", "WaitingSince");
+
+                    b.ToTable("GateDecisions");
+                });
+
+            modelBuilder.Entity("Symphonist.Integrations.Storage.GateReviewEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AreasJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("At")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CheckedJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Gate")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReasonsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Risk")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StageId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("WaitingSince")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "StageId", "WaitingSince");
+
+                    b.ToTable("GateReviews");
                 });
 #pragma warning restore 612, 618
         }

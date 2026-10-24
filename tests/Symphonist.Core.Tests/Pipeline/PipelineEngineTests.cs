@@ -36,6 +36,14 @@ public class PipelineEngineTests
         Assert.Equal(StageStatus.AwaitingApproval, t.Status); Assert.Equal("In Review", o.SourceStatusToSet); Assert.Equal(Now, t.WaitingSince);
     }
 
+    [Fact] public void Gate_round_key_is_truncated_to_whole_milliseconds()
+    {
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(P, t, Now.AddTicks(1234567 % TimeSpan.TicksPerMillisecond + 5));
+        Assert.Equal(0, t.WaitingSince!.Value.Ticks % TimeSpan.TicksPerMillisecond);
+        Assert.Equal(Now, t.WaitingSince);
+    }
+
     [Fact] public void No_gate_advances_and_sets_enter_status()
     {
         var t = At("deploy"); var o = PipelineEngine.StageSucceeded(P, t, Now);

@@ -1,6 +1,8 @@
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Integrations.Storage;
@@ -71,6 +73,8 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             // Events and runs have no foreign key to the ticket, so remove them explicitly.
             db.TicketEvents.RemoveRange(await db.TicketEvents.Where(e => e.TicketId == ticket.Id).ToListAsync(ct));
             db.AgentRuns.RemoveRange(await db.AgentRuns.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
+            db.GateReviews.RemoveRange(await db.GateReviews.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
+            db.GateDecisions.RemoveRange(await db.GateDecisions.Where(d => d.TicketId == ticket.Id).ToListAsync(ct));
             db.Tickets.Remove(ticket);
             await db.SaveChangesAsync(ct);
             return true;
@@ -95,7 +99,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             {
                 TicketId = run.TicketId, StageId = run.StageId, StartedAt = run.StartedAt, Duration = run.Duration,
                 Succeeded = run.Succeeded, CostUsd = run.CostUsd, Error = run.Error, RawLogPath = run.RawLogPath,
-                Summary = run.Summary,
+                Summary = run.Summary, IsReview = run.IsReview,
             });
             await db.SaveChangesAsync(ct);
         }
@@ -108,8 +112,84 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var runs = await db.AgentRuns.AsNoTracking().Where(r => r.TicketId == ticketId)
             .OrderBy(r => r.StartedAt).ThenBy(r => r.Id).ToListAsync(ct);
         return runs.Select(r => new AgentRunRecord(r.TicketId, r.StageId, r.StartedAt, r.Duration, r.Succeeded,
-            r.CostUsd, r.Error, r.RawLogPath, r.Summary)).ToList();
+            r.CostUsd, r.Error, r.RawLogPath, r.Summary, r.IsReview)).ToList();
     }
+
+    public async Task AddGateReviewAsync(GateReview review, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            var v = review.Verdict;
+            db.GateReviews.Add(new GateReviewEntity
+            {
+                TicketId = review.TicketId, ProjectId = review.ProjectId, StageId = review.StageId,
+                WaitingSince = review.WaitingSince, At = review.At, Mode = review.Mode, Gate = review.Gate,
+                Risk = v.Risk, Summary = v.Summary, ReasonsJson = JsonSerializer.Serialize(v.Reasons),
+                CheckedJson = JsonSerializer.Serialize(v.Checked), AreasJson = JsonSerializer.Serialize(v.AreasTouched),
+                Error = v.Error,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.GateDecisions.Add(new GateDecisionEntity
+            {
+                TicketId = decision.TicketId, ProjectId = decision.ProjectId, StageId = decision.StageId,
+                WaitingSince = decision.WaitingSince, Decision = decision.Decision, Auto = decision.Auto, At = decision.At,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<GateReview>> GateReviewsAsync(Guid ticketId, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var reviews = await db.GateReviews.AsNoTracking().Where(r => r.TicketId == ticketId).ToListAsync(ct);
+        var decisions = (await db.GateDecisions.AsNoTracking().Where(d => d.TicketId == ticketId)
+            .OrderBy(d => d.Id).ToListAsync(ct)).Select(ToRecord).ToList();
+        // Ordered client-side: At is stored as a binary long, which only sorts as the converter's bit layout allows.
+        return reviews.OrderByDescending(r => r.At).ThenByDescending(r => r.Id).Select(r =>
+        {
+            var review = ToReview(r);
+            return GateAgreement.Latest(decisions, review.TicketId, review.StageId, review.WaitingSince) is { } d
+                ? review with { Decision = d.Decision, AutoDecided = d.Auto }
+                : review;
+        }).ToList();
+    }
+
+    public async Task<IReadOnlyList<StageAgreement>> ReviewAgreementAsync(string? projectId, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var reviews = db.GateReviews.AsNoTracking();
+        var decisions = db.GateDecisions.AsNoTracking();
+        if (projectId is not null)
+        {
+            reviews = reviews.Where(r => r.ProjectId == projectId);
+            decisions = decisions.Where(d => d.ProjectId == projectId);
+        }
+        return GateAgreement.Compute(
+            (await reviews.OrderBy(r => r.Id).ToListAsync(ct)).Select(ToReview),
+            (await decisions.OrderBy(d => d.Id).ToListAsync(ct)).Select(ToRecord));
+    }
+
+    private static GateDecisionRecord ToRecord(GateDecisionEntity d) =>
+        new(d.TicketId, d.ProjectId, d.StageId, d.WaitingSince, d.Decision, d.Auto, d.At);
+
+    private static GateReview ToReview(GateReviewEntity r) =>
+        new(r.TicketId, r.ProjectId, r.StageId, r.WaitingSince, r.At, r.Mode, r.Gate,
+            new GateVerdict(r.Risk, r.Summary, Strings(r.ReasonsJson), Strings(r.CheckedJson), Strings(r.AreasJson), r.Error));
+
+    private static List<string> Strings(string json) => JsonSerializer.Deserialize<List<string>>(json) ?? [];
 
     public async Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
     {

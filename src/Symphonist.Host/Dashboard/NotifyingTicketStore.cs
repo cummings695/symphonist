@@ -1,4 +1,5 @@
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Dashboard;
@@ -13,6 +14,10 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
     public Task<IReadOnlyList<TicketEvent>> EventsAsync(Guid ticketId, CancellationToken ct) => inner.EventsAsync(ticketId, ct);
 
     public Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct) => inner.AgentRunsAsync(ticketId, ct);
+
+    public Task<IReadOnlyList<GateReview>> GateReviewsAsync(Guid ticketId, CancellationToken ct) => inner.GateReviewsAsync(ticketId, ct);
+
+    public Task<IReadOnlyList<StageAgreement>> ReviewAgreementAsync(string? projectId, CancellationToken ct) => inner.ReviewAgreementAsync(projectId, ct);
 
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct) => inner.AgentCostsAsync(ct);
 
@@ -31,6 +36,18 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
     public async Task AddAgentRunAsync(AgentRunRecord run, CancellationToken ct)
     {
         await inner.AddAgentRunAsync(run, ct);
+        notifier.Notify();
+    }
+
+    public async Task AddGateReviewAsync(GateReview review, CancellationToken ct)
+    {
+        await inner.AddGateReviewAsync(review, ct);
+        notifier.Notify();
+    }
+
+    public async Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct)
+    {
+        await inner.AddGateDecisionAsync(decision, ct);
         notifier.Notify();
     }
 

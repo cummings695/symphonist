@@ -1,4 +1,5 @@
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Tests.Fakes;
@@ -15,6 +16,8 @@ public sealed class FakeTicketStore : ITicketStore
     public List<Ticket> Tickets { get; } = [];
     public List<TicketEvent> Events { get; } = [];
     public List<AgentRunRecord> AgentRuns { get; } = [];
+    public List<GateReview> GateReviews { get; } = [];
+    public List<GateDecisionRecord> GateDecisions { get; } = [];
 
     /// <summary>Thrown from ResetInterruptedRunsAsync when set.</summary>
     public Exception? ResetError { get; set; }
@@ -114,6 +117,39 @@ public sealed class FakeTicketStore : ITicketStore
                 AgentRuns.Where(r => r.TicketId == ticketId).OrderBy(r => r.StartedAt).ToList());
     }
 
+    public Task AddGateReviewAsync(GateReview review, CancellationToken ct)
+    {
+        lock (sync) GateReviews.Add(review);
+        return Task.CompletedTask;
+    }
+
+    public Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct)
+    {
+        lock (sync) GateDecisions.Add(decision);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<GateReview>> GateReviewsAsync(Guid ticketId, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<GateReview>>(GateReviews.Where(r => r.TicketId == ticketId)
+                .Reverse().OrderByDescending(r => r.At)
+                .Select(r => Join(r, GateDecisions)).ToList());
+    }
+
+    public Task<IReadOnlyList<StageAgreement>> ReviewAgreementAsync(string? projectId, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult(GateAgreement.Compute(
+                GateReviews.Where(r => projectId is null || r.ProjectId == projectId),
+                GateDecisions.Where(d => projectId is null || d.ProjectId == projectId)));
+    }
+
+    private static GateReview Join(GateReview review, IEnumerable<GateDecisionRecord> decisions) =>
+        GateAgreement.Latest(decisions, review.TicketId, review.StageId, review.WaitingSince) is { } d
+            ? review with { Decision = d.Decision, AutoDecided = d.Auto }
+            : review;
+
     public Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct)
     {
         lock (sync)
@@ -123,6 +159,8 @@ public sealed class FakeTicketStore : ITicketStore
             Tickets.Remove(ticket);
             Events.RemoveAll(e => e.TicketId == ticket.Id);
             AgentRuns.RemoveAll(r => r.TicketId == ticket.Id);
+            GateReviews.RemoveAll(r => r.TicketId == ticket.Id);
+            GateDecisions.RemoveAll(d => d.TicketId == ticket.Id);
             return Task.FromResult(true);
         }
     }

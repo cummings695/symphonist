@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Time.Testing;
+using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Tests.Fakes;
@@ -79,5 +81,26 @@ public sealed class NotifyingTicketStoreTests
 
         time.Advance(BoardNotifier.Window);
         Assert.Equal(0, raised);
+    }
+
+    [Fact]
+    public async Task Gate_writes_notify()
+    {
+        var t = NewTicket("ORD-1");
+        var verdict = new GateVerdict(RiskLevel.Low, "s", [], ["c"], []);
+
+        await store.AddGateReviewAsync(new GateReview(t.Id, "orders", "plan", Now, Now, ReviewMode.Shadow, GatePolicy.Human, verdict), default);
+        time.Advance(BoardNotifier.Window);
+        Assert.Equal(1, raised);
+
+        await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now, GateDecision.Approved, false, Now), default);
+        time.Advance(BoardNotifier.Window);
+        Assert.Equal(2, raised);
+
+        var reviews = await store.GateReviewsAsync(t.Id, default);
+        await store.ReviewAgreementAsync(null, default);
+        time.Advance(BoardNotifier.Window);
+        Assert.Equal(2, raised);
+        Assert.Equal(GateDecision.Approved, Assert.Single(reviews).Decision);
     }
 }

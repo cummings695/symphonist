@@ -51,7 +51,7 @@ public static class PipelineEngine
         if (stage.Gate != GatePolicy.None)
         {
             t.Status = StageStatus.AwaitingApproval;
-            t.WaitingSince = now;
+            t.WaitingSince = ToStoredPrecision(now);
             t.UpdatedAt = now;
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             t.ReviewDue = p.Reviews(stage);
@@ -262,6 +262,10 @@ public static class PipelineEngine
             if (p.Pipeline[i].Id == stageId) return i;
         throw new KeyNotFoundException($"Stage '{stageId}' not found in project '{p.Id}'");
     }
+
+    /// <summary>The SQLite converter keeps milliseconds and WaitingSince is the gate-round key, so it must not carry finer ticks.</summary>
+    private static DateTimeOffset ToStoredPrecision(DateTimeOffset t) =>
+        new(t.Ticks - t.Ticks % TimeSpan.TicksPerMillisecond, t.Offset);
 
     private static TransitionOutcome NoChange(string message) => new(false, null, message);
 
