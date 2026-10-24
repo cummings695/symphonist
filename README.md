@@ -161,7 +161,8 @@ review:
 ```
 
 - `riskAreas`: parts of the code that always need you. A `description` tells the reviewer what to look for, and `paths`
-  are globs. If a change touches a matching path the verdict is `high`, whatever the reviewer says.
+  are globs. At implement and release gates, a change that touches a matching path makes the verdict `high`, whatever
+  the reviewer says. Triage and plan gates have no diff, so there only the `description` applies.
 - `review.mode`: `off` (the default) runs no reviewer, and `auto` gates behave like `human`. `shadow` reviews every gate
   and shows the verdict, but approves nothing, so you can see how often you agree first. `active` also lets `auto` gates
   approve themselves.
@@ -172,9 +173,15 @@ review:
 - Before an auto-approval Symphonist comments on the ticket, signed as usual: `Auto-approved {stage}: low risk.`, what
   was checked, and why it passed. If the comment can't be posted the gate is not approved and waits for you.
 - Anything else waits on you: a `high` verdict, a reviewer that failed or timed out, or one that was unsure. The
-  reviewer must return `high` when unsure. If the branch moved after the review, an auto-approved merge is held for you.
+  reviewer must return `high` when unsure. A change to agent configuration (`CLAUDE.md`, `AGENTS.md`, `.mcp.json`,
+  anything under `.claude/`) is always `high`.
+- An auto-approval covers only the reviewed commit. If the branch moved after the review, or the pull request would
+  merge anything else (for example a fork's pull request with the same branch names), the merge is held and the gate is
+  reviewed again. After two holds at a stage it waits for you instead.
 - The reviewer can only read. In container mode the workspace is mounted read-only. In host mode it gets only `Read`,
-  `Grep` and `Glob`, and any other tool in `review.agent.allowedTools` is refused.
+  `Grep` and `Glob`, and any other tool in `review.agent.allowedTools` is refused. In both modes `Write`, `Edit`,
+  `NotebookEdit`, `Bash`, `WebFetch` and `WebSearch` are denied, and the workspace's own Claude Code settings, hooks,
+  `CLAUDE.md` / `AGENTS.md` and MCP servers are not loaded (only your user settings are).
 - Review runs count toward `MaxConcurrentAgentRuns` and toward a ticket's cost.
 - `symphonist show <project> <key>` prints the latest review, `symphonist status` has a `RISK` column, and
   `symphonist projects` and the dashboard show how often you agreed with the reviewer per stage, how many low-risk
