@@ -1,8 +1,12 @@
 using System.Text;
+using Symphonist.Core.Risk;
 
 namespace Symphonist.Cli;
 
-/// <summary>Plain-text, fixed-width rendering of API results.</summary>
+/// <summary>
+/// Plain-text, fixed-width rendering of API results. Text from the API (ticket text, agent output, events) is printed
+/// as single lines without control characters, so it cannot move the cursor or recolour the terminal.
+/// </summary>
 public static class StatusTable
 {
     public static string Render(IEnumerable<TicketDto> tickets, DateTimeOffset now)
@@ -43,23 +47,27 @@ public static class StatusTable
     public static string RenderDetail(TicketDetailDto t, DateTimeOffset now)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"{t.Key}  {t.Title}");
-        sb.AppendLine($"Project:  {t.Project}");
-        sb.AppendLine($"Stage:    {t.Stage}");
-        sb.AppendLine($"Status:   {t.Status}");
+        sb.AppendLine($"{Clean(t.Key)}  {Clean(t.Title)}");
+        sb.AppendLine($"Project:  {Clean(t.Project)}");
+        sb.AppendLine($"Stage:    {Clean(t.Stage)}");
+        sb.AppendLine($"Status:   {Clean(t.Status)}");
         sb.AppendLine($"Attempts: {t.Attempts}");
         if (t.WaitingSince is not null) sb.AppendLine($"Waiting:  {Age(t.WaitingSince, now)}");
-        if (t.BlockedReason is not null) sb.AppendLine($"Blocked:  {t.BlockedReason}");
-        if (t.PrUrl is not null) sb.AppendLine($"PR:       {t.PrUrl}");
+        if (t.BlockedReason is not null) sb.AppendLine($"Blocked:  {Clean(t.BlockedReason)}");
+        if (t.PrUrl is not null) sb.AppendLine($"PR:       {Clean(t.PrUrl.ToString())}");
         if (t.Reviews?.OrderByDescending(r => r.At).FirstOrDefault() is { } r)
         {
-            sb.AppendLine($"Review:   {r.Stage} ({r.Mode.ToLowerInvariant()}) {r.Risk.ToLowerInvariant()} risk: {r.Summary}");
-            foreach (var reason in r.Reasons) sb.AppendLine($"  - {reason}");
+            sb.AppendLine($"Review:   {Clean(r.Stage)} ({Clean(r.Mode).ToLowerInvariant()}) {Clean(r.Risk).ToLowerInvariant()} risk: "
+                          + ReviewerText.Line(r.Summary, ReviewerText.MaxSummaryChars));
+            foreach (var reason in ReviewerText.Items(r.Reasons)) sb.AppendLine($"  - {reason}");
         }
         sb.AppendLine().AppendLine("Events:");
-        foreach (var e in t.Events) sb.AppendLine($"  {e.At.ToLocalTime():yyyy-MM-dd HH:mm}  [{e.Stage}] {e.Message}");
+        foreach (var e in t.Events) sb.AppendLine($"  {e.At.ToLocalTime():yyyy-MM-dd HH:mm}  [{Clean(e.Stage)}] {Clean(e.Message)}");
         return sb.ToString();
     }
+
+    /// <summary>One line without control characters; not shortened (events and errors are shown in full).</summary>
+    private static string Clean(string? text) => ReviewerText.Line(text, int.MaxValue);
 
     /// <summary>Humanized age: "12m", "3h", "2d"; empty when not waiting.</summary>
     public static string Age(DateTimeOffset? since, DateTimeOffset now)
@@ -74,7 +82,7 @@ public static class StatusTable
 
     private static string Table(string[] header, IEnumerable<string[]> rows)
     {
-        var all = rows.Prepend(header).ToList();
+        var all = rows.Select(r => r.Select(Clean).ToArray()).Prepend(header).ToList();
         var widths = header.Select((_, i) => all.Max(r => r[i].Length)).ToArray();
         var sb = new StringBuilder();
         foreach (var row in all)

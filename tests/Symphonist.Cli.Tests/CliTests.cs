@@ -351,6 +351,32 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Show_cleans_and_caps_reviewer_text()
+    {
+        var summary = "rm \\u001b[2J\\nfake line" + new string('s', 600);
+        var reasons = string.Join(",", Enumerable.Range(1, 12).Select(i => $"\"reason {i}\\u202E\\r\\nnext\""));
+        var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/tickets/p/K-1", HttpStatusCode.OK,
+            "{\"key\":\"K-1\",\"project\":\"p\",\"title\":\"Fix\\u0007 it\",\"stage\":\"implement\",\"status\":\"AwaitingApproval\"," +
+            "\"blockedReason\":null,\"attempts\":1,\"waitingSince\":null,\"prUrl\":null," +
+            "\"events\":[{\"at\":\"2026-10-21T10:00:00+00:00\",\"stage\":\"implement\",\"message\":\"reviewer: low \\u001b[31m\\nforged\"}]," +
+            "\"reviews\":[{\"stage\":\"implement\",\"at\":\"2026-10-21T10:00:00+00:00\",\"mode\":\"Shadow\",\"risk\":\"High\"," +
+            $"\"summary\":\"{summary}\",\"reasons\":[{reasons}]}}]}}");
+
+        var r = await RunAsync(handler, "", "show", "p", "K-1");
+
+        Assert.Equal(0, r.Exit);
+        Assert.DoesNotContain(r.Out, c => char.IsControl(c) && c is not '\r' and not '\n');
+        Assert.DoesNotContain('‮', r.Out);
+        var lines = r.Out.Split(Environment.NewLine);
+        Assert.Equal("K-1  Fix it", lines[0]);
+        var review = Assert.Single(lines, l => l.StartsWith("Review:", StringComparison.Ordinal));
+        Assert.EndsWith("high risk: rm [2J fake line" + new string('s', 500 - "rm [2J fake line".Length - 1) + "…", review);
+        var items = lines.Where(l => l.StartsWith("  - ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(["  - reason 1  next", "  - reason 10  next", "  - (+2 more)"], [items[0], items[9], items[^1]]);
+        Assert.Contains(lines, l => l.EndsWith("[implement] reviewer: low [31m forged", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Projects_prints_agreement()
     {
         var handler = new StubHttpHandler().On(HttpMethod.Get, "/api/projects", HttpStatusCode.OK,
