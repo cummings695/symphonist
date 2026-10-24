@@ -90,6 +90,8 @@ symphonist show <project> <key>             one ticket and its event history
 symphonist approve <project> <key>          approve the stage the ticket is waiting on
 symphonist send-back <project> <key> -m "feedback" [--to <stage>]
 symphonist unblock <project> <key>          retry a blocked ticket
+symphonist forget <project> <key>           drop a ticket from Symphonist only (Jira, Bitbucket and the workspace
+                                            are untouched; if it still matches the query it is picked up again as new)
 symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)

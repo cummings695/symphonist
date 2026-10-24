@@ -114,6 +114,19 @@ public sealed class FakeTicketStore : ITicketStore
                 AgentRuns.Where(r => r.TicketId == ticketId).OrderBy(r => r.StartedAt).ToList());
     }
 
+    public Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct)
+    {
+        lock (sync)
+        {
+            var ticket = Tickets.FirstOrDefault(t => t.ProjectId == projectId && t.Key == key);
+            if (ticket is null) return Task.FromResult(false);
+            Tickets.Remove(ticket);
+            Events.RemoveAll(e => e.TicketId == ticket.Id);
+            AgentRuns.RemoveAll(r => r.TicketId == ticket.Id);
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
     {
         lock (sync)

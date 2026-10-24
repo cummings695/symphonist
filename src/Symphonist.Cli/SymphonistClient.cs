@@ -64,6 +64,9 @@ public sealed class SymphonistClient : IDisposable
     public Task<OutcomeDto> UnblockAsync(string project, string key, CancellationToken ct) =>
         SendAsync<OutcomeDto>(HttpMethod.Post, TicketPath(project, key) + "/unblock", null, ct);
 
+    public Task ForgetAsync(string project, string key, CancellationToken ct) =>
+        SendAsync<object>(HttpMethod.Delete, TicketPath(project, key), null, ct);
+
     public Task PollAsync(CancellationToken ct) => SendAsync<object>(HttpMethod.Post, "/api/poll", null, ct);
 
     public Task<List<ProjectDto>> ListProjectsAsync(CancellationToken ct) =>

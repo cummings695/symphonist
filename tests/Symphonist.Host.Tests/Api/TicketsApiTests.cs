@@ -42,6 +42,7 @@ public sealed class TicketsApiTests : IDisposable
     private readonly TestHome home = new();
     private readonly FakeTicketStore store = new();
     private readonly FakeTracker tracker = new();
+    private readonly FakeAgentRunner agent = new();
     private readonly FakeProcessRunner processes = new();
     private readonly FakeIntegrationFactory integrations;
     private readonly WebApplicationFactory<Program> factory;
@@ -57,7 +58,7 @@ public sealed class TicketsApiTests : IDisposable
             s.AddSingleton<ITicketStore>(store);
             s.AddSingleton<IIntegrationFactory>(integrations);
             s.AddSingleton<IGitWorkspace>(new FakeGitWorkspace());
-            s.AddSingleton<IAgentRunner>(new FakeAgentRunner());
+            s.AddSingleton<IAgentRunner>(agent);
             s.AddSingleton<IProcessRunner>(processes);
             s.AddSingleton<ISecretStore>(new NoSecrets());
             foreach (var name in new[] { IntegrationFactory.JiraClient, IntegrationFactory.BitbucketClient })
@@ -250,6 +251,36 @@ public sealed class TicketsApiTests : IDisposable
 
         Assert.Equal("unblocked", outcome.GetProperty("message").GetString());
         Assert.Equal(StageStatus.Pending, store.Single("ORD-1").Status);
+    }
+
+    [Fact]
+    public async Task Forget_endpoint_returns_204_and_404()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Blocked);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await Authorized().DeleteAsync("/api/tickets/orders/ORD-1")).StatusCode);
+        Assert.Empty(store.Tickets);
+        Assert.Equal(HttpStatusCode.NotFound, (await Authorized().DeleteAsync("/api/tickets/orders/ORD-1")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Authorized().DeleteAsync("/api/tickets/nope/ORD-1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Forget_refused_while_running_is_409()
+    {
+        tracker.Tickets.Add(new SourceTicket("ORD-1", "T", "", "Backlog", [], new Uri("https://acme.atlassian.net/browse/ORD-1")));
+        var release = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => release.Task;
+        var o = factory.Services.GetRequiredService<Orchestrator>();
+        await o.TickAsync(default); // starts the triage run, which blocks
+
+        var response = await Authorized().DeleteAsync("/api/tickets/billing/ORD-1");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("ticket ORD-1 has an agent run in progress; try again when it finishes",
+            (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Contains(store.Tickets, t => t.ProjectId == "billing" && t.Key == "ORD-1");
+        release.SetResult(FakeAgentRunner.Ok(FakeAgentRunner.Output()));
+        await o.WhenIdleAsync();
     }
 
     [Fact]

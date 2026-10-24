@@ -445,6 +445,50 @@ public sealed class OrchestratorTests : IDisposable
         await Assert.ThrowsAsync<KeyNotFoundException>(() => o.SendBackAsync("nope", "ORD-1", "x", null, CancellationToken.None));
     }
 
+    [Fact] public async Task Forget_removes_the_ticket()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create();
+
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+        Assert.Empty(store.Tickets);
+        Assert.Equal(ForgetResult.NotFound, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+    }
+
+    [Fact] public async Task Forget_refused_while_running()
+    {
+        Source("ORD-1", "Backlog");
+        var o = Create();
+        var release = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => release.Task;
+        await o.TickAsync(CancellationToken.None); // starts the triage run, which blocks
+
+        Assert.Equal(ForgetResult.Running, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+        Assert.Single(store.Tickets);
+
+        release.SetResult(FakeAgentRunner.Ok(FakeAgentRunner.Output()));
+        await o.WhenIdleAsync();
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+    }
+
+    [Fact] public async Task Forgotten_ticket_is_picked_up_again_if_still_matching()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.Tickets.Clear();
+        Source("ORD-1", "Backlog");
+        var oldId = store.Single("ORD-1").Id;
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.ForgetAsync("orders", "ORD-1", CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+
+        var again = store.Single("ORD-1");
+        Assert.NotEqual(oldId, again.Id);
+        Assert.Equal("triage", again.StageId);
+        Assert.Contains(store.EventMessages("ORD-1"), m => m.StartsWith("picked up at triage"));
+    }
+
     [Fact] public async Task Unblock_returns_ticket_to_pending()
     {
         await Seed("ORD-1", "build", StageStatus.Blocked, "In Review");

@@ -145,6 +145,31 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Forget_prints_confirmation()
+    {
+        var handler = new RequestRecordingHandler("");
+
+        var r = await RunAsync(handler, "", "forget", "orders", "ORD-1");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Contains("Forgot orders/ORD-1", r.Out);
+        Assert.Contains("picked up again", r.Out);
+        Assert.Equal([(HttpMethod.Delete, "/api/tickets/orders/ORD-1", Token)], handler.Requests);
+    }
+
+    [Fact]
+    public async Task Forget_running_shows_api_error()
+    {
+        var handler = new StubHttpHandler().On(HttpMethod.Delete, "/api/tickets/orders/ORD-1", HttpStatusCode.Conflict,
+            "{\"error\":\"ticket ORD-1 has an agent run in progress; try again when it finishes\"}");
+
+        var r = await RunAsync(handler, "", "forget", "orders", "ORD-1");
+
+        Assert.Equal(1, r.Exit);
+        Assert.Contains("has an agent run in progress", r.Err);
+    }
+
+    [Fact]
     public async Task Api_error_exits_1_with_server_message()
     {
         var handler = new StubHttpHandler().On(HttpMethod.Post, "/api/tickets", HttpStatusCode.NotFound,

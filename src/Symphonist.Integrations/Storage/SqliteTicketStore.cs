@@ -60,6 +60,24 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         finally { _writeLock.Release(); }
     }
 
+    public async Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            var ticket = await db.Tickets.FirstOrDefaultAsync(t => t.ProjectId == projectId && t.Key == key, ct);
+            if (ticket is null) return false;
+            // Events and runs have no foreign key to the ticket, so remove them explicitly.
+            db.TicketEvents.RemoveRange(await db.TicketEvents.Where(e => e.TicketId == ticket.Id).ToListAsync(ct));
+            db.AgentRuns.RemoveRange(await db.AgentRuns.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
+            db.Tickets.Remove(ticket);
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task<IReadOnlyList<TicketEvent>> EventsAsync(Guid ticketId, CancellationToken ct)
     {
         await using var db = await OpenAsync(ct);

@@ -138,6 +138,39 @@ public sealed class SqliteTicketStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Delete_removes_ticket_events_and_runs()
+    {
+        var gone = NewTicket("A", "plan", StageStatus.Pending);
+        var kept = NewTicket("B", "plan", StageStatus.Pending);
+        await _store.SaveAsync(gone, default);
+        await _store.SaveAsync(kept, default);
+        foreach (var t in new[] { gone, kept })
+        {
+            await _store.AddEventAsync(t.Id, "plan", "event", Now, default);
+            await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "plan", Now, TimeSpan.FromSeconds(1), true, 0.1m, null, "a.json"), default);
+        }
+
+        Assert.True(await _store.DeleteAsync("orders", "A", default));
+
+        Assert.Null(await _store.FindAsync("orders", "A", default));
+        Assert.Empty(await _store.EventsAsync(gone.Id, default));
+        Assert.Empty(await _store.AgentRunsAsync(gone.Id, default));
+        Assert.NotNull(await _store.FindAsync("orders", "B", default));
+        Assert.Single(await _store.EventsAsync(kept.Id, default));
+        Assert.Single(await _store.AgentRunsAsync(kept.Id, default));
+    }
+
+    [Fact]
+    public async Task Delete_unknown_returns_false()
+    {
+        await _store.SaveAsync(NewTicket("A", "plan", StageStatus.Pending), default);
+
+        Assert.False(await _store.DeleteAsync("orders", "NOPE", default));
+        Assert.False(await _store.DeleteAsync("other", "A", default));
+        Assert.NotNull(await _store.FindAsync("orders", "A", default));
+    }
+
+    [Fact]
     public async Task Agent_runs_round_trip_with_summary_oldest_first()
     {
         var t = NewTicket("A", "plan", StageStatus.Pending);

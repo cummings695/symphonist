@@ -11,6 +11,8 @@ public interface ITicketStore
     Task<IReadOnlyList<TicketEvent>> EventsAsync(Guid ticketId, CancellationToken ct);
     Task AddAgentRunAsync(AgentRunRecord run, CancellationToken ct);
     Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct);
+    /// <summary>Deletes the ticket with its events and agent runs; false when there is no such ticket.</summary>
+    Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct);
     Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct);
     Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct);
 }

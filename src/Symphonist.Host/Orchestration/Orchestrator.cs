@@ -13,6 +13,8 @@ public sealed record OrchestratorOptions(TimeSpan PollInterval, int MaxConcurren
     public OrchestratorOptions() : this(TimeSpan.FromMinutes(2), 1) { }
 }
 
+public enum ForgetResult { Forgotten, NotFound, Running }
+
 /// <summary>
 /// Syncs tracker tickets into the store, drives each ticket through the pipeline, and mirrors state back to the tracker.
 /// Ticks, commands (approve / send back / unblock) and agent-run completions all run under one lock, and every one of
@@ -119,6 +121,26 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     public Task<TransitionOutcome> UnblockAsync(string projectId, string key, CancellationToken ct) =>
         CommandAsync(projectId, key, (_, t, now) => PipelineEngine.Unblock(t, now), ct);
+
+    /// <summary>
+    /// Removes a ticket (with its events and runs) from Symphonist only; the tracker, repo and workspace are untouched.
+    /// Refused while an agent run for it is in flight, since the run's completion would write to the deleted ticket.
+    /// </summary>
+    public async Task<ForgetResult> ForgetAsync(string projectId, string key, CancellationToken ct)
+    {
+        projects.Get(projectId); // unknown project: KeyNotFoundException, like the other commands
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (await store.FindAsync(projectId, key, ct) is not { } t) return ForgetResult.NotFound;
+            if (inFlight.ContainsKey(t.Id)) return ForgetResult.Running;
+            return await store.DeleteAsync(projectId, key, ct) ? ForgetResult.Forgotten : ForgetResult.NotFound;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
 
     /// <summary>
     /// Cancels in-flight agent runs; their runners clean up (e.g. remove the container) before the runs complete. The

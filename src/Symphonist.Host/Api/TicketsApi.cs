@@ -63,6 +63,24 @@ public static class TicketsApi
         api.MapPost("/tickets/{project}/{key}/unblock", (string project, string key, Orchestrator o, CancellationToken ct) =>
             CommandAsync(() => o.UnblockAsync(project, key, ct)));
 
+        api.MapDelete("/tickets/{project}/{key}", async (string project, string key, Orchestrator o, CancellationToken ct) =>
+        {
+            try
+            {
+                return await o.ForgetAsync(project, key, ct) switch
+                {
+                    ForgetResult.Forgotten => Results.NoContent(),
+                    ForgetResult.Running => Results.Conflict(new ApiError(
+                        $"ticket {key} has an agent run in progress; try again when it finishes")),
+                    _ => TicketNotFound(project, key),
+                };
+            }
+            catch (KeyNotFoundException) // unknown project
+            {
+                return ProjectNotFound(project);
+            }
+        });
+
         api.MapPost("/poll", (Orchestrator o) =>
         {
             o.RequestTick();

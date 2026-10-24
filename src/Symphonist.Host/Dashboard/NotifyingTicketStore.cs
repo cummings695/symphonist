@@ -34,6 +34,13 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
         notifier.Notify();
     }
 
+    public async Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct)
+    {
+        var deleted = await inner.DeleteAsync(projectId, key, ct);
+        if (deleted) notifier.Notify();
+        return deleted;
+    }
+
     public async Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)
     {
         var reset = await inner.ResetInterruptedRunsAsync(isAgentStage, now, ct);

@@ -59,6 +59,17 @@ public static class Cli
             stdout.WriteLine((await client.UnblockAsync(r.GetValue(unblockProject)!, r.GetValue(unblockKey)!, ct)).Message));
         root.Add(unblock);
 
+        var forget = new Command("forget", "Remove a ticket from Symphonist only (tracker, repo and workspace are unchanged)");
+        var (forgetProject, forgetKey) = Ticket(forget);
+        Run(forget, async (r, ct) =>
+        {
+            var (project, key) = (r.GetValue(forgetProject)!, r.GetValue(forgetKey)!);
+            await client.ForgetAsync(project, key, ct);
+            stdout.WriteLine($"Forgot {project}/{key}. Jira, Bitbucket and the workspace are unchanged; " +
+                "if it still matches the tracker query it will be picked up again as new.");
+        });
+        root.Add(forget);
+
         var poll = new Command("poll", "Ask the host to poll now");
         Run(poll, async (_, ct) =>
         {
