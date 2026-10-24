@@ -196,6 +196,16 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Resolve_commit_returns_the_sha_or_null_when_missing()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+
+        Assert.Equal(Git(ws, "rev-parse origin/main"), await git.ResolveCommitAsync(ws, "origin/main", default));
+        Assert.Null(await git.ResolveCommitAsync(ws, "origin/symphonist/ORD-1", default));
+        await Assert.ThrowsAsync<GitCommandException>(() => git.ResolveCommitAsync(root, "origin/main", default));
+    }
+
+    [Fact]
     public async Task Changed_files_and_diff_fail_loudly_on_a_bad_range()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);

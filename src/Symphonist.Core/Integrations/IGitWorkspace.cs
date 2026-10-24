@@ -23,4 +23,7 @@ public interface IGitWorkspace
 
     /// <summary>The patch of <c>git diff {range}</c>; renames show as delete plus add.</summary>
     Task<string> DiffAsync(string workspace, string range, CancellationToken ct);
+
+    /// <summary>The commit SHA <paramref name="rev"/> (e.g. "origin/main") names, or null when there is no such commit.</summary>
+    Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct);
 }

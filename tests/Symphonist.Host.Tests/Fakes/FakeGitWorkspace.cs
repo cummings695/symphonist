@@ -38,6 +38,12 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>Thrown from DiffAsync when set.</summary>
     public Exception? DiffError { get; set; }
 
+    /// <summary>Commits ResolveCommitAsync knows; anything else resolves to null (no such commit).</summary>
+    public Dictionary<string, string> RemoteCommits { get; } = new()
+    {
+        ["origin/main"] = "main000", ["origin/production"] = "prod000", ["origin/symphonist/ORD-1"] = "head000",
+    };
+
     public Task<string> PrepareAsync(ProjectConfig project, string ticketKey, string branch, CancellationToken ct)
     {
         if (PrepareError is not null) throw PrepareError;
@@ -79,4 +85,7 @@ public sealed class FakeGitWorkspace : IGitWorkspace
         if (DiffError is not null) throw DiffError;
         return Task.FromResult(Diff);
     }
+
+    public Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct) =>
+        Task.FromResult(RemoteCommits.GetValueOrDefault(rev));
 }

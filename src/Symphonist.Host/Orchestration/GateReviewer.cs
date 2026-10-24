@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
@@ -10,19 +11,32 @@ using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
 
+/// <param name="ReviewedHead">
+/// The commit whose change was reviewed (the pushed ticket branch for implement, main for release); null when no
+/// diff was reviewed or it could not be resolved. A verdict only covers this commit.
+/// </param>
+public sealed record GateReviewOutcome(GateVerdict Verdict, string? ReviewedHead);
+
 /// <summary>
 /// Runs the read-only reviewer at a gate and returns its verdict. Fails closed: every error, and every risk-area path in
 /// the change, gives a high verdict with the reason recorded.
 /// </summary>
-public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicketStore store, TimeProvider time)
+public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicketStore store, TimeProvider time)
 {
     /// <summary>Patches longer than this are cut in the prompt, and the verdict is forced high.</summary>
     public const int MaxDiffChars = 200_000;
 
     private const int FilesListedPerArea = 5;
+    private const int MaxPathLength = 300;
+
+    /// <summary>Binary types a patch may show as "Binary files ... differ"; any other binary line hides content.</summary>
+    private static readonly HashSet<string> KnownBinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "pdf", "zip", "woff", "woff2", "ttf", "eot",
+    };
 
     /// <summary>Never throws for agent or git failures (returns <see cref="GateVerdict.Failed"/>); honours <paramref name="ct"/>.</summary>
-    public async Task<GateVerdict> ReviewAsync(ProjectConfig p, Ticket t, SourceTicket? source, CancellationToken ct)
+    public async Task<GateReviewOutcome> ReviewAsync(ProjectConfig p, Ticket t, SourceTicket? source, CancellationToken ct)
     {
         try
         {
@@ -30,7 +44,7 @@ public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicke
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
-            return GateVerdict.Failed(e.Message);
+            return new GateReviewOutcome(GateVerdict.Failed(e.Message), null);
         }
     }
 
@@ -40,30 +54,54 @@ public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicke
             : string.Join("\n", areas.Select(a =>
                 a.Paths.Count == 0 ? $"- {a.Name}: {a.Description}" : $"- {a.Name}: {a.Description} (paths: {string.Join(", ", a.Paths)})"));
 
-    private async Task<GateVerdict> RunAsync(ProjectConfig p, Ticket t, SourceTicket? source, CancellationToken ct)
+    private async Task<GateReviewOutcome> RunAsync(ProjectConfig p, Ticket t, SourceTicket? source, CancellationToken ct)
     {
         var stage = p.Stage(t.StageId);
         var runner = agents.For(p.Review.Agent.Type);
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
+        var forced = new List<string>();
 
-        var range = DiffRange(p, stage.Kind);
+        // Pin the review to commits: what is pushed (implement) or about to ship (release), never the local checkout.
+        var range = "";
+        string? head = null;
         IReadOnlyList<string> changed = [];
         var diff = "";
-        if (range.Length > 0)
+        if (DiffRefs(p, stage.Kind, branch) is var (baseRef, headRef))
         {
+            var baseSha = await git.ResolveCommitAsync(workspace, baseRef, ct);
+            if (baseSha is null) return new(GateVerdict.Failed($"cannot resolve {baseRef}"), null);
+            head = await git.ResolveCommitAsync(workspace, headRef, ct);
+            if (head is null)
+                return new(GateVerdict.Failed(stage.Kind == StageKind.Implement
+                    ? $"branch not pushed: {headRef}"
+                    : $"cannot resolve {headRef}"), null);
+            range = $"{baseSha}...{head}";
             changed = await git.ChangedFilesAsync(workspace, range, ct);
             diff = await git.DiffAsync(workspace, range, ct);
+            if (stage.Kind == StageKind.Implement && changed.Count == 0) forced.Add("no changes to review");
         }
         var truncated = diff.Length > MaxDiffChars;
 
-        // A random fence per run: text inside cannot guess it to close the fence early.
+        // A random fence per run: text inside cannot guess it, and forged markers inside are neutralised.
         var nonce = Guid.NewGuid().ToString("N");
-        string Fence(string text) => $"<untrusted-{nonce}>\n{text}\n</untrusted-{nonce}>";
+        string Fence(string text) => $"<untrusted-{nonce}>\n{ForgedMarker().Replace(text, "&lt;$1")}\n</untrusted-{nonce}>";
 
         var values = PromptValues.For(p, t, source, branch, feedback: "");
-        foreach (var key in new[] { "ticket.title", "ticket.description", "ticket.comments" })
+        foreach (var key in new[] { "ticket.title", "ticket.description", "ticket.comments", "ticket.url", "branch" })
             values[key] = Fence(values[key] ?? "");
+        foreach (var key in new[] { "spec_path", "plan_path" })
+        {
+            var path = values[key] ?? "";
+            if (path.Length == 0) continue;
+            if (IsSafeRepoPath(path)) values[key] = Fence(path);
+            else
+            {
+                values[key] = "(invalid path)";
+                forced.Add($"invalid {key}");
+            }
+        }
+        values["review.fence_id"] = nonce;
         values["gate.stage"] = stage.Id;
         values["gate.kind"] = stage.Kind.ToString().ToLowerInvariant();
         values["review.diff_range"] = range;
@@ -96,7 +134,8 @@ public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicke
         var verdict = result.Succeeded
             ? GateVerdictParser.Parse(result.Structured)
             : GateVerdict.Failed(result.Error ?? "reviewer run failed");
-        verdict = Guard(p, changed, truncated, verdict);
+        verdict = Guard(p, changed, diff, truncated, verdict);
+        foreach (var reason in forced) verdict = verdict.WithForcedHigh(reason);
 
         var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
         var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-review-{stamp}.json");
@@ -104,18 +143,35 @@ public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicke
         await File.WriteAllTextAsync(logPath, result.RawLog, ct);
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, $"{Level(verdict.Risk)} risk: {verdict.Summary}", IsReview: true), ct);
-        return verdict;
+        return new GateReviewOutcome(verdict, head);
     }
 
-    private static string DiffRange(ProjectConfig p, StageKind kind) => kind switch
+    [GeneratedRegex("<(/?untrusted-)", RegexOptions.IgnoreCase)]
+    private static partial Regex ForgedMarker();
+
+    [GeneratedRegex("^Binary files (.+) and (.+) differ$")]
+    private static partial Regex BinaryLine();
+
+    private static (string Base, string Head)? DiffRefs(ProjectConfig p, StageKind kind, string branch) => kind switch
     {
-        StageKind.Implement => $"origin/{p.Repo.MainBranch}...HEAD",
-        StageKind.Release => $"origin/{p.Repo.ProductionBranch}...origin/{p.Repo.MainBranch}",
-        _ => "", // Triage, Plan: the reviewer reads the ticket and the spec/plan files
+        StageKind.Implement => ($"origin/{p.Repo.MainBranch}", $"origin/{branch}"),
+        StageKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{p.Repo.MainBranch}"),
+        _ => null, // Triage, Plan: the reviewer reads the ticket and the spec/plan files
     };
 
-    /// <summary>What the reviewer's word alone cannot clear: risk-area paths, names we could not read, a cut diff.</summary>
-    private static GateVerdict Guard(ProjectConfig p, IReadOnlyList<string> changed, bool truncated, GateVerdict verdict)
+    /// <summary>Single-line, repo-relative, no "..", at most <see cref="MaxPathLength"/> characters.</summary>
+    private static bool IsSafeRepoPath(string path) =>
+        path.Length <= MaxPathLength
+        && !path.Any(char.IsControl)
+        && !path.StartsWith('/') && !path.StartsWith('\\') && !path.Contains(':') && !Path.IsPathRooted(path)
+        && !path.Split('/', '\\').Contains("..");
+
+    /// <summary>
+    /// What the reviewer's word alone cannot clear: risk-area paths, names we could not read, a cut diff, and changes
+    /// whose content the patch does not show (unknown binary files, submodule pointers, git attributes).
+    /// </summary>
+    private static GateVerdict Guard(ProjectConfig p, IReadOnlyList<string> changed, string diff, bool truncated,
+        GateVerdict verdict)
     {
         foreach (var area in RiskAreaMatcher.Touched(p.RiskAreas, changed).GroupBy(x => x.Area))
         {
@@ -128,8 +184,35 @@ public sealed class GateReviewer(IGitWorkspace git, IAgentRunners agents, ITicke
         // git paths are bytes; one that is not valid UTF-8 decodes with U+FFFD and could dodge a pattern.
         foreach (var file in changed.Where(f => f.Contains('\uFFFD')))
             verdict = verdict.WithForcedHigh($"changed file name could not be decoded: {file}");
+        foreach (var file in changed.Where(IsGitMetadata))
+            verdict = verdict.WithForcedHigh($"changes git attributes or submodules: {file}");
+
+        var lines = diff.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+        foreach (var line in lines)
+        {
+            if (BinaryLine().Match(line) is not { Success: true } m) continue;
+            var sides = new[] { m.Groups[1].Value, m.Groups[2].Value }.Where(s => s != "/dev/null").Select(Unquote).ToList();
+            foreach (var side in sides.Where(s => !KnownBinaryExtensions.Contains(Path.GetExtension(s).TrimStart('.'))).Take(1))
+                verdict = verdict.WithForcedHigh($"patch hides the content of {side} (shown as binary)");
+        }
+        if (lines.Any(l => l.StartsWith("+Subproject commit ", StringComparison.Ordinal)
+                           || l.StartsWith("-Subproject commit ", StringComparison.Ordinal)))
+            verdict = verdict.WithForcedHigh("changes a submodule pointer");
+
         if (truncated) verdict = verdict.WithForcedHigh("diff too large to review fully");
         return verdict;
+    }
+
+    private static bool IsGitMetadata(string file) =>
+        file.Equals(".gitattributes", StringComparison.OrdinalIgnoreCase)
+        || file.Equals(".gitmodules", StringComparison.OrdinalIgnoreCase)
+        || file.EndsWith("/.gitattributes", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Drops the C-quotes and the a/ or b/ prefix of a patch path (enough to read its extension).</summary>
+    private static string Unquote(string side)
+    {
+        if (side.Length >= 2 && side[0] == '"' && side[^1] == '"') side = side[1..^1];
+        return side.StartsWith("a/", StringComparison.Ordinal) || side.StartsWith("b/", StringComparison.Ordinal) ? side[2..] : side;
     }
 
     private async Task<string> HistoryAsync(ProjectConfig p, Ticket t, StageDefinition stage, CancellationToken ct)

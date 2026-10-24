@@ -102,11 +102,23 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         await GitAsync(workspace, ct, [.. DiffArgs, range, "--"]);
 
     /// <summary>
-    /// Ignores repo-local settings that could run code on the host (external diff, textconv drivers) or change what is
-    /// listed (relative paths, colour codes).
+    /// Ignores settings that could run code on the host (external diff, textconv drivers) or change what is listed
+    /// (relative paths, colour codes, a global attributes file, hidden submodule changes).
     /// </summary>
     private static readonly string[] DiffArgs =
-        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative", "--no-renames"];
+    [
+        "-c", "core.attributesFile=", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+        "--no-renames", "--ignore-submodules=none",
+    ];
+
+    public async Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct)
+    {
+        var r = await RunAsync(workspace, ct, "rev-parse", "--verify", "--quiet", rev + "^{commit}");
+        if (!r.TimedOut && r.ExitCode == 0) return r.StandardOutput.Trim();
+        if (!r.TimedOut && r.ExitCode == 1) return null; // --quiet: no such commit
+        throw new GitCommandException(GitUrls.Redact(
+            $"git rev-parse {rev} failed (exit {r.ExitCode}{(r.TimedOut ? ", timed out" : "")}): {r.StandardError.Trim()}"));
+    }
 
     private async Task<bool> RemoteBranchExistsAsync(string ws, string branch, CancellationToken ct)
     {

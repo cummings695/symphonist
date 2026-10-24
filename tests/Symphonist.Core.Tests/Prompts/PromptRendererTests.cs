@@ -88,7 +88,8 @@ public class PromptRendererTests
 
         PromptRenderer.Validate(prompt);
         foreach (var placeholder in new[] { "{{risk.areas}}", "{{gate.stage}}", "{{gate.kind}}", "{{review.diff_range}}",
-                     "{{review.changed_files}}", "{{review.diff}}", "{{review.history}}", "{{review.stage_summary}}" })
+                     "{{review.changed_files}}", "{{review.diff}}", "{{review.history}}", "{{review.stage_summary}}",
+                     "{{review.fence_id}}" })
             Assert.Contains(placeholder, prompt);
         Assert.Contains("Do not modify files", prompt);
         Assert.Contains("`high` whenever you are unsure", prompt);
