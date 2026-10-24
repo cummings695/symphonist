@@ -49,6 +49,19 @@ public sealed class Ticket
     /// <summary>The latest reviewer verdict (the card's badge); null until a review has finished.</summary>
     public RiskLevel? Risk { get; set; }
 
+    /// <summary>
+    /// For a round the reviewer auto-approved at an implement or release gate: the branch that will be merged (the ticket
+    /// branch, or main) and the commit of it that was reviewed. The merge waits for a new round if the branch moved.
+    /// Null for human approvals and every other round.
+    /// </summary>
+    public string? ApprovedBranch { get; set; }
+
+    /// <inheritdoc cref="ApprovedBranch"/>
+    public string? ApprovedHead { get; set; }
+
+    /// <summary>For an auto-approved release: the production commit the change was reviewed against.</summary>
+    public string? ApprovedBaseHead { get; set; }
+
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();
 }

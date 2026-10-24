@@ -15,7 +15,10 @@ namespace Symphonist.Host.Orchestration;
 /// The commit whose change was reviewed (the pushed ticket branch for implement, main for release); null when no
 /// diff was reviewed or it could not be resolved. A verdict only covers this commit.
 /// </param>
-public sealed record GateReviewOutcome(GateVerdict Verdict, string? ReviewedHead);
+/// <param name="ReviewedBranch">The branch <paramref name="ReviewedHead"/> is the head of; null when there is none.</param>
+/// <param name="ReviewedBase">The commit the change was diffed against (main for implement, production for release).</param>
+public sealed record GateReviewOutcome(GateVerdict Verdict, string? ReviewedHead, string? ReviewedBranch = null,
+    string? ReviewedBase = null);
 
 /// <summary>
 /// Runs the read-only reviewer at a gate and returns its verdict. Fails closed: every error, and every risk-area path in
@@ -67,12 +70,13 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         // Pin the review to commits: what is pushed (implement) or about to ship (release), never the local checkout.
         // Full ref names: a tag or local branch called "origin/main" must not shadow the remote-tracking branch.
         var range = "";
-        string? head = null;
+        string? baseSha = null, head = null, headBranch = null;
         IReadOnlyList<string> changed = [];
         var diff = "";
         if (DiffRefs(p, stage.Kind, branch) is var (baseRef, headRef))
         {
-            var baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/{baseRef}", ct);
+            headBranch = headRef["origin/".Length..];
+            baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/{baseRef}", ct);
             if (baseSha is null) return new(GateVerdict.Failed($"cannot resolve {baseRef}"), null);
             head = await git.ResolveCommitAsync(workspace, $"refs/remotes/{headRef}", ct);
             if (head is null)
@@ -146,7 +150,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         await File.WriteAllTextAsync(logPath, result.RawLog, ct);
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, $"{Level(verdict.Risk)} risk: {verdict.Summary}", IsReview: true), ct);
-        return new GateReviewOutcome(verdict, head);
+        return new GateReviewOutcome(verdict, head, head is null ? null : headBranch, baseSha);
     }
 
     [GeneratedRegex("<(/?untrusted-)", RegexOptions.IgnoreCase)]

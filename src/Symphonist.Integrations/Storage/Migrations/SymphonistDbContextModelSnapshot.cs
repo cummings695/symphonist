@@ -23,6 +23,15 @@ namespace Symphonist.Integrations.Storage.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ApprovedBaseHead")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ApprovedBranch")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ApprovedHead")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("Attempts")
                         .HasColumnType("INTEGER");
 

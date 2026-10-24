@@ -53,6 +53,7 @@ public static class PipelineEngine
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = ToStoredPrecision(now);
             t.UpdatedAt = now;
+            ClearApprovedHeads(t); // a new round
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             t.ReviewDue = p.Reviews(stage);
             outcome = new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
@@ -85,6 +86,7 @@ public static class PipelineEngine
         var stage = p.Stage(t.StageId);
         var decision = DecisionOn(t, GateDecision.Approved);
         t.ReviewDue = false;
+        ClearApprovedHeads(t); // a human approval pins no commit; an auto-approval sets them afterwards
         if (HasPostApprovalAction(stage.Kind))
         {
             t.Status = StageStatus.Approved;
@@ -134,6 +136,26 @@ public static class PipelineEngine
             : v.Risk == RiskLevel.High ? $"{t.StageId} needs you: high risk — {v.Reasons.FirstOrDefault() ?? v.Summary}"
             : $"reviewer: {risk} risk — {v.Summary}";
         return new(true, null, message);
+    }
+
+    /// <summary>
+    /// The merge of an auto-approved round must not go ahead (the reviewed branch moved, or could not be checked): the
+    /// gate waits again as a new round, with a review owed per configuration.
+    /// </summary>
+    public static TransitionOutcome MergeHeld(ProjectConfig p, Ticket t, string reason, DateTimeOffset now)
+    {
+        if (t.Status != StageStatus.Approved) return NoChange($"{t.StageId} is not approved");
+        var stage = p.Stage(t.StageId);
+        var since = ToStoredPrecision(now);
+        // A different round key even when the clock has not moved past the approved round.
+        if (t.WaitingSince is { } previous && since <= previous) since = previous.AddMilliseconds(1);
+        t.Status = StageStatus.AwaitingApproval;
+        t.WaitingSince = since;
+        t.ReviewDue = p.Reviews(stage);
+        t.Attempts = 0;
+        t.UpdatedAt = now;
+        ClearApprovedHeads(t);
+        return new(true, stage.OnGateStatus, $"merge held: {reason}");
     }
 
     public static TransitionOutcome PostApprovalCompleted(ProjectConfig p, Ticket t, DateTimeOffset now)
@@ -254,6 +276,14 @@ public static class PipelineEngine
         t.PendingSourceStatus = null;
         t.StageStartedAt = now;
         t.UpdatedAt = now;
+        ClearApprovedHeads(t);
+    }
+
+    private static void ClearApprovedHeads(Ticket t)
+    {
+        t.ApprovedBranch = null;
+        t.ApprovedHead = null;
+        t.ApprovedBaseHead = null;
     }
 
     private static int IndexOf(ProjectConfig p, string stageId)

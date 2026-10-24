@@ -1396,7 +1396,7 @@ public sealed class OrchestratorTests : IDisposable
 
         var t = store.Single("ORD-1");
         Assert.Equal((StageStatus.AwaitingApproval, RiskLevel.High, false), (t.Status, t.Risk, t.ReviewDue));
-        Assert.Single(store.EventMessages("ORD-1"), m => m == "reviewer failed: timed out; waiting on you");
+        Assert.Equal(["reviewing plan", "reviewer failed: timed out; waiting on you"], store.EventMessages("ORD-1"));
         Assert.Equal("timed out", Assert.Single(store.GateReviews).Verdict.Error);
 
         await TickIdle(o);
@@ -1439,15 +1439,101 @@ public sealed class OrchestratorTests : IDisposable
         await TickIdle(o);
 
         var t = store.Single("ORD-1");
-        Assert.Equal(RiskLevel.Low, t.Risk);
         Assert.Equal(approved ? StageStatus.Approved : StageStatus.AwaitingApproval, t.Status);
+        Assert.Equal(approved ? RiskLevel.Low : RiskLevel.High, t.Risk); // a low verdict on an old commit is not low
         Assert.Equal(approved ? 1 : 0, AutoApprovalComments.Count);
         Assert.Equal(approved ? 1 : 0, store.GateDecisions.Count);
+        var reasons = Assert.Single(store.GateReviews).Verdict.Reasons;
+        if (approved)
+        {
+            Assert.Equal(("symphonist/ORD-1", "head000", null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
+            scm.PullRequests[7] = FakeSourceControl.Pr(7);
+            await TickIdle(o); // the head is unchanged: merges as before
+            Assert.Equal([7L], scm.MergeCalls);
+            Assert.Equal("build", store.Single("ORD-1").StageId);
+        }
         if (currentHead == "pushed-later")
-            Assert.Contains("auto-approval skipped: symphonist/ORD-1 moved since review; waiting on you", store.EventMessages("ORD-1"));
+        {
+            Assert.Contains("reviewed head000 but symphonist/ORD-1 is now pushed-later", reasons);
+            Assert.Contains("auto-approval skipped: reviewed head000 but symphonist/ORD-1 is now pushed-later; waiting on you",
+                store.EventMessages("ORD-1"));
+        }
         if (currentHead is null)
             Assert.Contains(store.EventMessages("ORD-1"), m =>
-                m.StartsWith("auto-approval skipped: could not check symphonist/ORD-1", StringComparison.Ordinal));
+                m.StartsWith("auto-approval skipped: could not confirm the reviewed commit of symphonist/ORD-1", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("pushed-later", "merge held: symphonist/ORD-1 moved since auto-approval (head000 → pushed-later)")]
+    [InlineData(null, "merge held: could not check symphonist/ORD-1: branch symphonist/ORD-1 not found")]
+    public async Task Auto_approved_implement_waits_again_when_the_branch_moves_before_the_merge(string? newHead, string message)
+    {
+        Configure("active", ("implement", "auto"));
+        AnswerReviews(Low);
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        await SeedWaiting("ORD-1", "implement", "In Review", t => t.PullRequestId = 7);
+        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        var o = Create();
+        await TickIdle(o);
+        var approved = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Approved, approved.Status);
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        if (newHead is null) scm.BranchHeads.Remove("symphonist/ORD-1");
+        else scm.BranchHeads["symphonist/ORD-1"] = newHead;
+        await TickIdle(o); // the merge tick
+
+        var t = store.Single("ORD-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(("implement", StageStatus.AwaitingApproval, true), (t.StageId, t.Status, t.ReviewDue));
+        Assert.NotEqual(approved.WaitingSince, t.WaitingSince); // a new round
+        Assert.Null(t.ApprovedHead);
+        Assert.Equal(message, store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Theory]
+    [InlineData("main", "main001", "merge held: main moved since auto-approval (main000 → main001)")]
+    [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
+    public async Task Auto_approved_release_waits_again_when_main_or_production_moves_before_the_merge(string branch,
+        string newHead, string message)
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        scm.BranchHeads["main"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await TickIdle(o); // release PR opened
+        await TickIdle(o); // review: low -> approved
+        var approved = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Approved, approved.Status);
+        Assert.Equal(("main", "main000", "prod000"), (approved.ApprovedBranch, approved.ApprovedHead, approved.ApprovedBaseHead));
+
+        scm.BranchHeads[branch] = newHead; // e.g. another ticket's merge into main
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(("release", StageStatus.AwaitingApproval, true), (t.StageId, t.Status, t.ReviewDue));
+        Assert.NotEqual(approved.WaitingSince, t.WaitingSince);
+        Assert.Equal(message, store.EventMessages("ORD-1")[^1]);
+
+        await TickIdle(o); // the new round is reviewed against the new heads
+        Assert.Equal(2, ReviewRequests);
+    }
+
+    [Fact] public async Task Human_approved_merge_checks_no_heads()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review", t => t.PullRequestId = 7);
+        scm.PullRequests[7] = FakeSourceControl.Pr(7); // no branch heads known: any head check would fail
+        var o = Create();
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal([7L], scm.MergeCalls);
+        Assert.Equal("build", store.Single("ORD-1").StageId);
     }
 
     [Fact] public async Task Review_uses_a_concurrency_slot()
@@ -1580,6 +1666,7 @@ public sealed class OrchestratorTests : IDisposable
         AnswerReviews(() => FakeAgentRunner.Review("low", "one safe change", checkedItems: ["diff", "build passed"]));
         await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
         scm.BranchHeads["main"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
         builds.Statuses["merge-1"] = BuildStatus.Succeeded;
         var o = Create();
 

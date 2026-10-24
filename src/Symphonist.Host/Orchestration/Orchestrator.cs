@@ -398,6 +398,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             case StageStatus.Approved:
             {
                 var fromStageId = t.StageId;
+                if (await MergeHeldAsync(p, io, t, ct) is { } reason)
+                {
+                    // The reviewed change is not what would be merged now: wait again, as a new round.
+                    var held = PipelineEngine.MergeHeld(p, t, reason, time.GetUtcNow());
+                    await store.SaveAsync(t, ct);
+                    await ApplyAsync(io, t, fromStageId, held, ct);
+                    return;
+                }
                 var result = await executor.PostApprovalAsync(p, io, t, ct);
                 var now = time.GetUtcNow();
                 TransitionOutcome? outcome = null;
@@ -526,8 +534,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Records the verdict for its round (always, even when the gate was decided meanwhile) and applies it. A low verdict
-    /// at an active auto gate approves only when the reviewed commit is still the head and the auto-approval comment
-    /// was posted; otherwise the gate waits on the developer.
+    /// at an active auto gate approves only when the reviewed commits are still the heads (else it counts as high) and
+    /// the auto-approval comment was posted; otherwise the gate waits on the developer.
     /// </summary>
     private async Task CompleteReviewAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, GateReviewOutcome result,
         CancellationToken ct)
@@ -542,12 +550,20 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var verdict = result.Verdict;
         var waitingSince = run.WaitingSince!.Value; // the round key as loaded from the store, never a fresh clock read
         var stage = p.Stage(run.StageId);
+        string? doubt = null;
+        if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)
+            && await UnconfirmedHeadAsync(p, io, t, stage, result, ct) is { } unconfirmed)
+        {
+            doubt = unconfirmed;
+            verdict = verdict.WithForcedHigh(unconfirmed); // a low verdict on a commit that is no longer the head
+        }
         await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
             p.Review.Mode, stage.Gate, verdict), ct);
+        if (doubt is not null) await AddEventAsync(t, $"auto-approval skipped: {doubt}; waiting on you", ct);
 
         var allowAutoApprove = true;
         if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)
-            && await AutoApprovalHeldAsync(p, io, t, stage, result, ct) is { } held)
+            && await AutoApprovalCommentFailedAsync(io, t, stage, verdict, ct) is { } held)
         {
             allowAutoApprove = false;
             await AddEventAsync(t, held, ct);
@@ -561,46 +577,63 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await AddEventAsync(t, $"review of {run.StageId} finished after the gate was decided; not applied", ct);
             return;
         }
+        if (outcome.Decision is { Auto: true } && stage.Kind is StageKind.Implement or StageKind.Release)
+        {
+            // The merge, on a later tick, must merge exactly what was reviewed.
+            t.ApprovedBranch = result.ReviewedBranch;
+            t.ApprovedHead = result.ReviewedHead;
+            t.ApprovedBaseHead = stage.Kind == StageKind.Release ? result.ReviewedBase : null;
+        }
+        // One event for a failed review: the failure, not the high verdict it was turned into.
+        if (verdict.Error is { } error) outcome = outcome with { Message = $"reviewer failed: {error}; waiting on you" };
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, fromStageId, outcome, ct);
-        if (verdict.Error is { } error) await AddEventAsync(t, $"reviewer failed: {error}; waiting on you", ct);
     }
 
     /// <summary>
-    /// Why a low verdict must not auto-approve after all (the event to record), or null once the signed auto-approval
-    /// comment is posted. An implement or release verdict covers only the reviewed commit, so the branch that would be
-    /// merged (the ticket branch, or main for a release) must still be at it; any doubt holds the approval.
+    /// Why the reviewed commits cannot be confirmed as the current heads, or null when they are (or the gate reviews no
+    /// commit). An implement or release verdict covers only the reviewed commit of the branch that would be merged (the
+    /// ticket branch, or main), and a release also its production base; any doubt makes the verdict high.
     /// </summary>
-    private async Task<string?> AutoApprovalHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t,
+    private async Task<string?> UnconfirmedHeadAsync(ProjectConfig p, ProjectIntegrations io, Ticket t,
         StageDefinition stage, GateReviewOutcome result, CancellationToken ct)
     {
-        var branch = stage.Kind switch
-        {
-            StageKind.Implement => t.Branch ?? $"symphonist/{t.Key}",
-            StageKind.Release => p.Repo.MainBranch,
-            _ => null, // triage and plan review the ticket and its documents, not a commit
-        };
-        if (branch is not null)
-        {
-            if (result.ReviewedHead is not { } reviewed)
-                return $"auto-approval skipped: no reviewed commit of {branch}; waiting on you";
-            string current;
-            try
-            {
-                current = await io.SourceControl.GetBranchHeadAsync(branch, ct);
-            }
-            catch (Exception e) when (!ct.IsCancellationRequested)
-            {
-                log.LogWarning(e, "Head of {Branch} for {Key} could not be checked", branch, t.Key);
-                return $"auto-approval skipped: could not check {branch}: {e.Message}; waiting on you";
-            }
-            if (!string.Equals(current, reviewed, StringComparison.OrdinalIgnoreCase))
-                return $"auto-approval skipped: {branch} moved since review; waiting on you";
-        }
+        if (stage.Kind is not (StageKind.Implement or StageKind.Release)) return null; // the ticket and its documents
+        if (result is not { ReviewedBranch: { } branch, ReviewedHead: { } head })
+            return "could not confirm the reviewed commit";
+        if (await MovedAsync(io, t, branch, head, ct) is { } moved) return moved;
+        if (stage.Kind != StageKind.Release) return null;
+        if (result.ReviewedBase is not { } baseHead)
+            return $"could not confirm the reviewed commit of {p.Repo.ProductionBranch}";
+        return await MovedAsync(io, t, p.Repo.ProductionBranch, baseHead, ct);
+    }
 
+    /// <summary>Null when <paramref name="branch"/> is still at <paramref name="expected"/>; otherwise why not.</summary>
+    private async Task<string?> MovedAsync(ProjectIntegrations io, Ticket t, string branch, string expected,
+        CancellationToken ct)
+    {
+        string current;
         try
         {
-            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(AutoApprovalComment.Format(stage.Id, result.Verdict)), ct);
+            current = await io.SourceControl.GetBranchHeadAsync(branch, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Head of {Branch} for {Key} could not be checked", branch, t.Key);
+            return $"could not confirm the reviewed commit of {branch}: {e.Message}";
+        }
+        return string.Equals(current, expected, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : $"reviewed {expected} but {branch} is now {current}";
+    }
+
+    /// <summary>Posts the signed auto-approval comment; returns the event holding the approval when it cannot be posted.</summary>
+    private async Task<string?> AutoApprovalCommentFailedAsync(ProjectIntegrations io, Ticket t, StageDefinition stage,
+        GateVerdict verdict, CancellationToken ct)
+    {
+        try
+        {
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(AutoApprovalComment.Format(stage.Id, verdict)), ct);
             return null;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -608,6 +641,38 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             log.LogWarning(e, "Auto-approval comment on {Key} failed", t.Key);
             return $"auto-approval held: could not post comment: {e.Message}; waiting on you";
         }
+    }
+
+    /// <summary>
+    /// For an auto-approved round, why the merge must not go ahead: the reviewed branch (or a release's production base)
+    /// is no longer at the reviewed commit, or cannot be checked. Null for human approvals, which pin no commit.
+    /// </summary>
+    private async Task<string?> MergeHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct)
+    {
+        if (t.ApprovedHead is null && t.ApprovedBaseHead is null) return null;
+        if (t is not { ApprovedBranch: { } branch, ApprovedHead: { } head }) return "the auto-approved commit is not recorded";
+        var checks = new List<(string Branch, string Head)> { (branch, head) };
+        if (p.Stage(t.StageId).Kind == StageKind.Release)
+        {
+            if (t.ApprovedBaseHead is not { } baseHead) return "the auto-approved production commit is not recorded";
+            checks.Add((p.Repo.ProductionBranch, baseHead));
+        }
+        foreach (var (name, expected) in checks)
+        {
+            string current;
+            try
+            {
+                current = await io.SourceControl.GetBranchHeadAsync(name, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Head of {Branch} for {Key} could not be checked before merging", name, t.Key);
+                return $"could not check {name}: {e.Message}";
+            }
+            if (!string.Equals(current, expected, StringComparison.OrdinalIgnoreCase))
+                return $"{name} moved since auto-approval ({expected} → {current})";
+        }
+        return null;
     }
 
     private Task ApplyAsync(ProjectIntegrations io, Ticket t, string fromStageId, TransitionOutcome outcome,

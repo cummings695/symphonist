@@ -482,6 +482,44 @@ public class PipelineEngineTests
         Assert.Equal((StageStatus.Blocked, (DateTimeOffset?)null, false), (t.Status, t.WaitingSince, t.ReviewDue));
     }
 
+    [Fact] public void Merge_held_waits_again_as_a_new_round()
+    {
+        var p = With("release", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("release");
+        var round = t.WaitingSince!.Value;
+        PipelineEngine.ReviewCompleted(p, t, Low, round, allowAutoApprove: true, Now);
+        Assert.Equal(StageStatus.Approved, t.Status);
+        (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.Attempts) = ("main", "m1", "p1", 2);
+
+        var o = PipelineEngine.MergeHeld(p, t, "main moved since auto-approval (m1 → m2)", round.AddTicks(1)); // same ms
+
+        Assert.True(o.Changed);
+        Assert.Equal("merge held: main moved since auto-approval (m1 → m2)", o.Message);
+        Assert.Equal((StageStatus.AwaitingApproval, true, 0), (t.Status, t.ReviewDue, t.Attempts));
+        Assert.Equal(round.AddMilliseconds(1), t.WaitingSince); // a different round key even on the same clock
+        Assert.Equal((null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
+        Assert.False(PipelineEngine.MergeHeld(p, t, "again", Now).Changed);
+    }
+
+    [Fact] public void Approved_heads_are_cleared_by_a_new_round_a_human_approval_and_a_new_stage()
+    {
+        static void Pin(Ticket t) => (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead) = ("b", "h", "p");
+        static void AssertCleared(Ticket t) => Assert.Equal((null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead));
+
+        var t = At("implement");
+        Pin(t);
+        PipelineEngine.StageSucceeded(P, t, Now);
+        AssertCleared(t);
+
+        Pin(t);
+        PipelineEngine.Approve(P, t, Now);
+        AssertCleared(t);
+
+        Pin(t);
+        PipelineEngine.PostApprovalCompleted(P, t, Now);
+        AssertCleared(t);
+    }
+
     [Fact] public void Waits_on_reviewer_only_for_active_auto_gates()
     {
         var t = Reviewing("plan");
