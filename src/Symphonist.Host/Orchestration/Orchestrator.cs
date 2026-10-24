@@ -254,6 +254,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 continue;
             }
 
+            t.TrackerRetryStatus = null; // the developer moved the card; never move it back to the old target
             if (t.Status == StageStatus.Done)
             {
                 t.LastSourceStatus = s.Status;
@@ -263,7 +264,6 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 continue;
             }
 
-            t.TrackerRetryStatus = null; // the developer moved the card; never move it back to the old target
             var outcome = PipelineEngine.SourceStatusChanged(p, t, s.Status, LatestFeedback(s, t), now);
             await store.SaveAsync(t, ct); // LastSourceStatus changes even when the outcome doesn't
             await ApplyAsync(io, t, outcome, ct);
@@ -283,7 +283,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// </summary>
     private async Task RetryTrackerMoveAsync(ProjectIntegrations io, Ticket t, CancellationToken ct)
     {
-        if (t.TrackerRetryStatus is not { } target || t.Status == StageStatus.Done) return;
+        if (t.TrackerRetryStatus is not { } target) return; // also a done ticket's final move
         bool moved;
         try
         {

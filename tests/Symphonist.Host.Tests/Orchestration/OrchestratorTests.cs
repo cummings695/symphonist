@@ -283,6 +283,35 @@ public sealed class OrchestratorTests : IDisposable
         Assert.DoesNotContain(("ORD-1", "In Progress"), tracker.Transitions);
     }
 
+    [Fact] public async Task Failed_final_move_of_a_done_ticket_is_retried()
+    {
+        await Seed("ORD-1", "done", StageStatus.Done, "In Review", t => t.TrackerRetryStatus = "Done");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal([("ORD-1", "Done")], tracker.Transitions);
+        Assert.Equal("Done", t.LastSourceStatus);
+        Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal("tracker moved to 'Done' on retry", store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Fact] public async Task Developer_move_of_a_done_card_cancels_its_retry()
+    {
+        await Seed("ORD-1", "done", StageStatus.Done, "In Review", t => t.TrackerRetryStatus = "Done");
+        tracker.Move("ORD-1", "Released");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Empty(tracker.Transitions);
+        Assert.Equal("Released", t.LastSourceStatus);
+        Assert.Null(t.TrackerRetryStatus);
+    }
+
     [Fact] public async Task No_transition_is_not_retried()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
