@@ -53,6 +53,7 @@ public static class PipelineEngine
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = ToStoredPrecision(now);
             t.UpdatedAt = now;
+            t.Risk = null; // until this round's review finishes
             ClearApprovedHeads(t); // a new round
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             t.ReviewDue = p.Reviews(stage);
@@ -138,24 +139,34 @@ public static class PipelineEngine
         return new(true, null, message);
     }
 
+    /// <summary>Merge holds at a stage after which the next round waits on the developer instead of a review.</summary>
+    public const int MaxMergeHoldsBeforeDeveloper = 2;
+
     /// <summary>
     /// The merge of an auto-approved round must not go ahead (the reviewed branch moved, or could not be checked): the
-    /// gate waits again as a new round, with a review owed per configuration.
+    /// gate waits again as a new round, with a review owed per configuration. After
+    /// <see cref="MaxMergeHoldsBeforeDeveloper"/> holds at the stage (e.g. a busy main), the round waits on the
+    /// developer, so review, auto-approval comment and hold do not repeat without end.
     /// </summary>
     public static TransitionOutcome MergeHeld(ProjectConfig p, Ticket t, string reason, DateTimeOffset now)
     {
         if (t.Status != StageStatus.Approved) return NoChange($"{t.StageId} is not approved");
         var stage = p.Stage(t.StageId);
+        var branch = t.ApprovedBranch ?? (stage.Kind == StageKind.Release ? p.Repo.MainBranch : t.Branch);
         var since = ToStoredPrecision(now);
         // A different round key even when the clock has not moved past the approved round.
         if (t.WaitingSince is { } previous && since <= previous) since = previous.AddMilliseconds(1);
+        t.MergeHolds++;
+        var toDeveloper = t.MergeHolds > MaxMergeHoldsBeforeDeveloper;
         t.Status = StageStatus.AwaitingApproval;
         t.WaitingSince = since;
-        t.ReviewDue = p.Reviews(stage);
+        t.ReviewDue = !toDeveloper && p.Reviews(stage);
+        t.Risk = null;
         t.Attempts = 0;
         t.UpdatedAt = now;
         ClearApprovedHeads(t);
-        return new(true, stage.OnGateStatus, $"merge held: {reason}");
+        return new(true, stage.OnGateStatus,
+            toDeveloper ? $"merge held: {reason}; {branch} keeps moving; waiting on you" : $"merge held: {reason}");
     }
 
     public static TransitionOutcome PostApprovalCompleted(ProjectConfig p, Ticket t, DateTimeOffset now)
@@ -276,6 +287,8 @@ public static class PipelineEngine
         t.PendingSourceStatus = null;
         t.StageStartedAt = now;
         t.UpdatedAt = now;
+        t.Risk = null; // no reviewer has judged this stage yet
+        t.MergeHolds = 0;
         ClearApprovedHeads(t);
     }
 

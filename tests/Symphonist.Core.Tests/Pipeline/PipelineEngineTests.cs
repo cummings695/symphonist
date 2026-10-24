@@ -375,7 +375,8 @@ public class PipelineEngineTests
 
         var o = PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
 
-        Assert.Equal(("implement", StageStatus.Pending, RiskLevel.Low, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
+        // The plan's verdict is not implement's: the badge waits for implement's own review.
+        Assert.Equal(("implement", StageStatus.Pending, (RiskLevel?)null, false), (t.StageId, t.Status, t.Risk, t.ReviewDue));
         Assert.StartsWith("auto-approved plan", o.Message);
         Assert.Equal("In Progress", o.SourceStatusToSet);
         Assert.Equal(new GateDecisionInfo("plan", Gate, GateDecision.Approved, Auto: true), o.Decision);
@@ -499,6 +500,57 @@ public class PipelineEngineTests
         Assert.Equal(round.AddMilliseconds(1), t.WaitingSince); // a different round key even on the same clock
         Assert.Equal((null, null, null, null), (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead, t.MergeAcceptedAt));
         Assert.False(PipelineEngine.MergeHeld(p, t, "again", Now).Changed);
+    }
+
+    [Fact] public void Risk_badge_is_cleared_when_a_new_round_or_stage_starts()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("implement");
+        PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+        Assert.Equal((StageStatus.Approved, RiskLevel.Low), (t.Status, t.Risk));
+
+        PipelineEngine.PostApprovalCompleted(p, t, Now); // merged: on to build, which no reviewer judged
+        Assert.Equal(("build", (RiskLevel?)null), (t.StageId, t.Risk));
+
+        var release = At("release"); release.Risk = RiskLevel.Low; // e.g. the implement verdict
+        PipelineEngine.StageSucceeded(p, release, Now);
+        Assert.Equal((StageStatus.AwaitingApproval, true, (RiskLevel?)null), (release.Status, release.ReviewDue, release.Risk));
+    }
+
+    [Fact] public void Merge_held_clears_the_risk_badge()
+    {
+        var p = With("implement", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("implement");
+        PipelineEngine.ReviewCompleted(p, t, Low, Gate, allowAutoApprove: true, Now);
+
+        PipelineEngine.MergeHeld(p, t, "moved", Now);
+
+        Assert.Equal((StageStatus.AwaitingApproval, (RiskLevel?)null), (t.Status, t.Risk));
+    }
+
+    [Fact] public void Third_merge_hold_owes_no_review_and_waits_on_the_developer()
+    {
+        var p = With("release", GatePolicy.AutoWhenLowRisk, ReviewMode.Active);
+        var t = Reviewing("release");
+        var messages = new List<string>();
+        for (var i = 1; i <= 3; i++)
+        {
+            PipelineEngine.ReviewCompleted(p, t, Low, t.WaitingSince!.Value, allowAutoApprove: true, Now);
+            Assert.Equal(StageStatus.Approved, t.Status);
+            (t.ApprovedBranch, t.ApprovedHead, t.ApprovedBaseHead) = ("main", $"m{i}", "p1");
+            var o = PipelineEngine.MergeHeld(p, t, $"main moved since auto-approval (m{i} → m{i + 1})", Now.AddMinutes(i));
+            messages.Add(o.Message);
+            Assert.Equal(i, t.MergeHolds);
+            Assert.Equal(i < 3, t.ReviewDue);
+        }
+
+        Assert.Equal("merge held: main moved since auto-approval (m3 → m4); main keeps moving; waiting on you", messages[^1]);
+        Assert.Equal("merge held: main moved since auto-approval (m2 → m3)", messages[1]);
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+        Assert.False(PipelineEngine.WaitsOnReviewer(p, t));
+
+        PipelineEngine.SendBack(p, t, null, "implement", Now); // a new stage starts the count again
+        Assert.Equal(0, t.MergeHolds);
     }
 
     [Fact] public void Approved_heads_are_cleared_by_a_new_round_a_human_approval_and_a_new_stage()

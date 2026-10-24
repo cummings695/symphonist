@@ -68,6 +68,12 @@ public sealed class Ticket
     /// </summary>
     public DateTimeOffset? MergeAcceptedAt { get; set; }
 
+    /// <summary>
+    /// How often an auto-approved merge at the current stage was held because what would merge moved after the review.
+    /// From the third hold on, the gate waits on the developer instead of owing yet another review. Reset on a new stage.
+    /// </summary>
+    public int MergeHolds { get; set; }
+
     /// <summary>A copy of every property (all are values or immutable strings, so a memberwise copy is complete).</summary>
     public Ticket Clone() => (Ticket)MemberwiseClone();
 }

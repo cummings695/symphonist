@@ -1297,7 +1297,9 @@ public sealed class OrchestratorTests : IDisposable
         await TickIdle(o); // review run: low
 
         var t = store.Single("ORD-1");
-        Assert.Equal(("implement", StageStatus.Pending, RiskLevel.Low), (t.StageId, t.Status, t.Risk));
+        // The plan's low verdict is recorded; implement has no badge until its own review.
+        Assert.Equal(("implement", StageStatus.Pending, (RiskLevel?)null), (t.StageId, t.Status, t.Risk));
+        Assert.Equal(RiskLevel.Low, Assert.Single(store.GateReviews).Verdict.Risk);
         var review = Assert.Single(agent.Requests, FakeAgentRunner.IsReview);
         Assert.True(review.ReadOnlyWorkspace);
         var comment = tracker.Comments[^1]; // after the plan stage's own comment
@@ -1588,6 +1590,41 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(2, ReviewRequests);
     }
 
+    [Fact] public async Task Third_merge_hold_waits_on_the_developer_without_another_review()
+    {
+        // A busy main: every auto-approved release is overtaken by another merge before its own.
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        scm.BranchHeads["main"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await TickIdle(o); // release PR opened
+        await TickIdle(o); // review: low -> approved
+
+        for (var i = 1; i <= 3; i++)
+        {
+            Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+            scm.BranchHeads["main"] = git.RemoteCommits["refs/remotes/origin/main"] = $"main00{i}";
+            await TickIdle(o); // held
+            await TickIdle(o); // reviewed again (and auto-approved), unless the hold went to the developer
+        }
+
+        await TickIdle(o);
+        var t = store.Single("ORD-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal((StageStatus.AwaitingApproval, false, 3, null), (t.Status, t.ReviewDue, t.MergeHolds, t.Risk));
+        Assert.Equal(3, ReviewRequests);
+        Assert.Equal(3, AutoApprovalComments.Count);
+        Assert.Equal("merge held: main moved since auto-approval (main002 → main003); main keeps moving; waiting on you",
+            store.EventMessages("ORD-1")[^1]);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed); // the developer decides
+        await TickIdle(o);
+        Assert.Single(scm.MergeCalls);
+        Assert.Equal(("deploy", 0), (store.Single("ORD-1").StageId, store.Single("ORD-1").MergeHolds));
+    }
+
     [Theory]
     [InlineData("release")]
     [InlineData("implement")]
@@ -1824,7 +1861,8 @@ public sealed class OrchestratorTests : IDisposable
         await TickIdle(o); // review: low
 
         var t = store.Single("ORD-1");
-        Assert.Equal(("plan", RiskLevel.Low), (t.StageId, t.Risk));
+        Assert.Equal(("plan", (RiskLevel?)null), (t.StageId, t.Risk));
+        Assert.Equal(RiskLevel.Low, store.GateReviews[^1].Verdict.Risk);
         Assert.Equal(2, ReviewRequests);
         Assert.StartsWith("Auto-approved triage: low risk.", Assert.Single(AutoApprovalComments));
         Assert.Equal([(GateDecision.SentBack, false), (GateDecision.Approved, true)],
