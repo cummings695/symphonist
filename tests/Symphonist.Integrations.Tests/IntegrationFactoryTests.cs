@@ -1,7 +1,10 @@
+using System.Net;
+using System.Text;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Integrations.Bitbucket;
 using Symphonist.Integrations.Jira;
+using Symphonist.Tests.Http;
 
 namespace Symphonist.Integrations.Tests;
 
@@ -10,10 +13,11 @@ public class IntegrationFactoryTests
     private sealed class FakeHttpClientFactory : IHttpClientFactory
     {
         public List<string> Names { get; } = [];
+        public HttpMessageHandler? Handler { get; init; }
         public HttpClient CreateClient(string name)
         {
             Names.Add(name);
-            return new HttpClient();
+            return Handler is null ? new HttpClient() : new HttpClient(Handler, disposeHandler: false);
         }
     }
 
@@ -71,6 +75,53 @@ public class IntegrationFactoryTests
         Assert.Same(first, factory.Create(config));
         Assert.NotSame(first, factory.Create(Project("billing")));
         Assert.NotSame(first, factory.Create(Project())); // reloaded config for the same id
+    }
+
+    [Fact]
+    public async Task New_secret_value_is_used_without_restart()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, "/rest/api/3/search/jql", HttpStatusCode.OK, "{\"issues\":[]}")
+            .On(HttpMethod.Get, "/rest/api/3/myself", HttpStatusCode.OK, "{\"accountId\":\"me\"}");
+        var factory = new IntegrationFactory(new FakeHttpClientFactory { Handler = stub }, secrets);
+        var config = Project();
+        secrets.Set("jira-acme", "old");
+        secrets.Set("bitbucket-acme", "b");
+        var io1 = factory.Create(config);
+
+        secrets.Set("jira-acme", "new");
+        var io2 = factory.Create(config);
+
+        Assert.NotSame(io1, io2);
+        await io2.Tracker.QueryAsync(CancellationToken.None);
+        var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("dev@example.com:new"));
+        Assert.NotEmpty(stub.Authorizations);
+        Assert.All(stub.Authorizations, a => Assert.Equal(expected, a));
+    }
+
+    [Fact]
+    public void Unchanged_secrets_reuse_integrations()
+    {
+        secrets.Set("jira-acme", "j");
+        secrets.Set("bitbucket-acme", "b");
+        var factory = new IntegrationFactory(http, secrets);
+        var config = Project();
+
+        Assert.Same(factory.Create(config), factory.Create(config));
+    }
+
+    [Fact]
+    public void Removed_secret_is_reported()
+    {
+        secrets.Set("jira-acme", "j");
+        secrets.Set("bitbucket-acme", "b");
+        var factory = new IntegrationFactory(http, secrets);
+        var config = Project();
+        factory.Create(config);
+
+        secrets.Remove("jira-acme");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => factory.Create(config));
+        Assert.Equal("secret 'jira-acme' not set; run: symphonist secret set jira-acme", ex.Message);
     }
 
     [Fact]

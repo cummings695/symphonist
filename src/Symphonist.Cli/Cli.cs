@@ -103,7 +103,7 @@ public static class Cli
         {
             var name = r.GetValue(secretName)!;
             var value = interactive ? ReadHidden(stdout, name) : stdin.ReadLine();
-            value = value?.TrimEnd('\r', '\n');
+            value = value?.Trim();
             if (string.IsNullOrEmpty(value)) throw new ApiException("Secret value must not be empty");
             try
             {

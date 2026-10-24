@@ -327,6 +327,29 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Secret_set_trims_whitespace()
+    {
+        var secrets = new FakeSecrets();
+
+        var r = await RunAsync(new StubHttpHandler(), secrets, "  tok-123 \t\r\n", "secret", "set", "jira-token");
+
+        Assert.Equal(0, r.Exit);
+        Assert.Equal("tok-123", secrets.Values["jira-token"]);
+    }
+
+    [Fact]
+    public async Task Secret_set_rejects_whitespace_only()
+    {
+        var secrets = new FakeSecrets();
+
+        var r = await RunAsync(new StubHttpHandler(), secrets, "   ", "secret", "set", "jira-token");
+
+        Assert.Equal(1, r.Exit);
+        Assert.Contains("Secret value must not be empty", r.Err);
+        Assert.Empty(secrets.Values);
+    }
+
+    [Fact]
     public async Task Secret_set_with_empty_value_fails()
     {
         var secrets = new FakeSecrets();
