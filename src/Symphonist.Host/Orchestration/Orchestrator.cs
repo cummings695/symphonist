@@ -50,7 +50,6 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// <summary>Starts a background tick now (coalesced with ticks already requested).</summary>
     public void RequestTick() => TickTrigger.Request();
 
-    private readonly Dictionary<string, (ProjectConfig Config, ProjectIntegrations Io)> io = []; // used under gate only
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
 
     /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
@@ -544,13 +543,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
     }
 
-    private ProjectIntegrations IntegrationsFor(ProjectConfig p)
-    {
-        if (io.TryGetValue(p.Id, out var cached) && ReferenceEquals(cached.Config, p)) return cached.Io;
-        var created = integrations.Create(p);
-        io[p.Id] = (p, created);
-        return created;
-    }
+    /// <summary>
+    /// Not cached here: the factory re-reads the secrets on every call, so a corrected or removed secret takes effect at
+    /// the next tick or command. A tick resolves them once and uses them throughout.
+    /// </summary>
+    private ProjectIntegrations IntegrationsFor(ProjectConfig p) => integrations.Create(p);
 
     private bool IsAgentStage(string projectId, string stageId)
     {

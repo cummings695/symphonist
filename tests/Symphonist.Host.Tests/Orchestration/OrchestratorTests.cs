@@ -204,6 +204,25 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Contains("tracker moved to 'In Progress' on retry", store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Corrected_secret_is_picked_up_by_the_next_tick()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        tracker.TransitionError = new HttpRequestException("401 Unauthorized"); // present but wrong token
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        Assert.Equal("In Progress", store.Single("ORD-1").TrackerRetryStatus);
+
+        var fixedTracker = new FakeTracker(); // the factory builds new clients for the corrected token
+        fixedTracker.Tickets.AddRange(tracker.Tickets);
+        factory!.Integrations = new ProjectIntegrations(fixedTracker, scm, builds);
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal([("ORD-1", "In Progress")], fixedTracker.Transitions);
+        Assert.Null(store.Single("ORD-1").TrackerRetryStatus);
+    }
+
     [Fact] public async Task Thrown_move_is_retried_once_per_tick_without_event_flood()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
