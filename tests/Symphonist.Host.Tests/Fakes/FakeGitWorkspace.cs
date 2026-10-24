@@ -24,6 +24,20 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>Thrown from PushAsync when set.</summary>
     public Exception? PushError { get; set; }
 
+    /// <summary>Returned by ChangedFilesAsync; default none.</summary>
+    public List<string> ChangedFiles { get; set; } = [];
+    public List<(string Workspace, string Range)> ChangedFilesCalls { get; } = [];
+
+    /// <summary>Thrown from ChangedFilesAsync when set.</summary>
+    public Exception? ChangedFilesError { get; set; }
+
+    /// <summary>Returned by DiffAsync; default a one-line patch.</summary>
+    public string Diff { get; set; } = "diff --git a/x b/x\n+change\n";
+    public List<(string Workspace, string Range)> DiffCalls { get; } = [];
+
+    /// <summary>Thrown from DiffAsync when set.</summary>
+    public Exception? DiffError { get; set; }
+
     public Task<string> PrepareAsync(ProjectConfig project, string ticketKey, string branch, CancellationToken ct)
     {
         if (PrepareError is not null) throw PrepareError;
@@ -50,5 +64,19 @@ public sealed class FakeGitWorkspace : IGitWorkspace
         if (PushError is not null) throw PushError;
         Pushes.Add((workspace, branch));
         return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<string>> ChangedFilesAsync(string workspace, string range, CancellationToken ct)
+    {
+        ChangedFilesCalls.Add((workspace, range));
+        if (ChangedFilesError is not null) throw ChangedFilesError;
+        return Task.FromResult<IReadOnlyList<string>>(ChangedFiles.ToList());
+    }
+
+    public Task<string> DiffAsync(string workspace, string range, CancellationToken ct)
+    {
+        DiffCalls.Add((workspace, range));
+        if (DiffError is not null) throw DiffError;
+        return Task.FromResult(Diff);
     }
 }

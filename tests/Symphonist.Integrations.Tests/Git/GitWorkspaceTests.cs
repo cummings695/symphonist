@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
+using Symphonist.Core.Risk;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
 
@@ -129,6 +130,97 @@ public sealed class GitWorkspaceTests : IDisposable
         var ws2 = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
         Assert.Equal("pushed", File.ReadAllText(Path.Combine(ws2, "x.txt")));
         Assert.Equal("symphonist/ORD-1", Git(ws2, "branch --show-current"));
+    }
+
+    private static void WriteFile(string ws, string relative, string text)
+    {
+        var path = Path.Combine([ws, .. relative.Split('/')]);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, text);
+    }
+
+    [Fact]
+    public async Task Changed_files_lists_branch_changes()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        WriteFile(ws, "a/b.cs", "class B {}");
+        await git.CommitAllAsync(ws, "add b", default);
+
+        Assert.Equal(["a/b.cs"], await git.ChangedFilesAsync(ws, "origin/main...HEAD", default));
+    }
+
+    [Fact]
+    public async Task Changed_files_keep_non_ascii_and_spaced_paths_exact_and_force_risk_area_match()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        WriteFile(ws, "src/Pricing/Prix é.cs", "class Prix {}");
+        WriteFile(ws, "src/Pricing/税.cs", "class Tax {}");
+        await git.CommitAllAsync(ws, "add pricing", default);
+
+        var files = await git.ChangedFilesAsync(ws, "origin/main...HEAD", default);
+
+        Assert.Equal(["src/Pricing/Prix é.cs", "src/Pricing/税.cs"], files.Order(StringComparer.Ordinal));
+        var pricing = new RiskArea("pricing", "prices", ["src/Pricing/**"]);
+        Assert.Equal(2, RiskAreaMatcher.Touched([pricing], files).Count);
+    }
+
+    [Fact]
+    public async Task A_rename_out_of_a_risk_area_lists_the_old_path_too()
+    {
+        WriteFile(dev, "src/Pricing/Calc.cs", "class Calc { /* long enough to be detected as a rename */ }");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "pricing");
+        Run(dev, "push", "origin", "main");
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        Run(ws, "mv", "src/Pricing/Calc.cs", "src/Calc.cs");
+        await git.CommitAllAsync(ws, "move calc out", default);
+
+        var files = await git.ChangedFilesAsync(ws, "origin/main...HEAD", default);
+
+        Assert.Equal(["src/Calc.cs", "src/Pricing/Calc.cs"], files.Order(StringComparer.Ordinal));
+        Assert.Contains(("pricing", "src/Pricing/Calc.cs"),
+            RiskAreaMatcher.Touched([new RiskArea("pricing", "prices", ["src/Pricing"])], files));
+    }
+
+    [Fact]
+    public async Task Diff_returns_the_patch_of_the_range()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        WriteFile(ws, "a/b.cs", "class B { int secretSauce; }");
+        await git.CommitAllAsync(ws, "add b", default);
+
+        var patch = await git.DiffAsync(ws, "origin/main...HEAD", default);
+
+        Assert.Contains("+++ b/a/b.cs", patch);
+        Assert.Contains("+class B { int secretSauce; }", patch);
+    }
+
+    [Fact]
+    public async Task Changed_files_and_diff_fail_loudly_on_a_bad_range()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        await Assert.ThrowsAsync<GitCommandException>(() => git.ChangedFilesAsync(ws, "origin/nope...HEAD", default));
+        await Assert.ThrowsAsync<GitCommandException>(() => git.DiffAsync(ws, "origin/nope...HEAD", default));
+    }
+
+    [Fact]
+    public async Task Diff_never_runs_an_external_diff_or_textconv_configured_in_the_workspace()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        var marker = Path.Combine(root, "diff-driver-ran");
+        var script = Path.Combine(ws, ".git", "evil-diff");
+        WriteHook(script, $"touch '{ShPath(marker)}'\nexit 0");
+        Run(ws, "config", "diff.external", ShPath(script));
+        Run(ws, "config", "diff.evil.textconv", ShPath(script));
+        Directory.CreateDirectory(Path.Combine(ws, ".git", "info"));
+        File.WriteAllText(Path.Combine(ws, ".git", "info", "attributes"), "* diff=evil\n");
+        WriteFile(ws, "a/b.cs", "class B {}");
+        await git.CommitAllAsync(ws, "add b", default);
+
+        await git.ChangedFilesAsync(ws, "origin/main...HEAD", default);
+        await git.DiffAsync(ws, "origin/main...HEAD", default);
+
+        Assert.False(File.Exists(marker), "a diff driver from the workspace's .git ran on the host");
     }
 
     [Fact]

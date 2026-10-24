@@ -9,7 +9,9 @@ public static partial class PromptRenderer
     public static readonly IReadOnlySet<string> KnownPlaceholders = new HashSet<string>
     {
         "ticket.key", "ticket.title", "ticket.description", "ticket.comments", "ticket.url",
-        "project.name", "branch", "feedback", "spec_path", "plan_path",
+        "project.name", "branch", "feedback", "spec_path", "plan_path", "risk.areas",
+        "gate.stage", "gate.kind", "review.diff_range", "review.changed_files", "review.diff", "review.history",
+        "review.stage_summary",
     };
 
     [GeneratedRegex(@"\{\{([a-z_.]+)\}\}")]

@@ -88,6 +88,26 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
     public async Task PushAsync(string workspace, string branch, CancellationToken ct) =>
         await GitAsync(workspace, ct, "push", "-u", "origin", branch);
 
+    /// <summary>
+    /// NUL-separated output is never C-quoted, so non-ASCII names come back exactly; with --no-renames a file moved out
+    /// of a risk area still lists its old path.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ChangedFilesAsync(string workspace, string range, CancellationToken ct)
+    {
+        var output = await GitAsync(workspace, ct, [.. DiffArgs, "-z", "--name-only", range, "--"]);
+        return output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    public async Task<string> DiffAsync(string workspace, string range, CancellationToken ct) =>
+        await GitAsync(workspace, ct, [.. DiffArgs, range, "--"]);
+
+    /// <summary>
+    /// Ignores repo-local settings that could run code on the host (external diff, textconv drivers) or change what is
+    /// listed (relative paths, colour codes).
+    /// </summary>
+    private static readonly string[] DiffArgs =
+        ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative", "--no-renames"];
+
     private async Task<bool> RemoteBranchExistsAsync(string ws, string branch, CancellationToken ct)
     {
         var r = await RunAsync(ws, ct, "rev-parse", "--verify", "--quiet", $"refs/remotes/origin/{branch}");

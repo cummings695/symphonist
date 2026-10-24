@@ -227,7 +227,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
-        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind), PromptValues(p, t, source, branch));
+        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind), PromptValues.For(p, t, source, branch, t.Feedback ?? ""));
 
         var startedAt = time.GetUtcNow();
         AgentRunResult result;
@@ -254,22 +254,6 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             : null;
         return new AgentStep(workspace, branch, result.Output, failure);
     }
-
-    private static Dictionary<string, string?> PromptValues(ProjectConfig p, Ticket t, SourceTicket? source, string branch) => new()
-    {
-        ["ticket.key"] = t.Key,
-        ["ticket.title"] = t.Title,
-        ["ticket.description"] = source?.Description ?? "",
-        ["ticket.comments"] = source is null
-            ? ""
-            : string.Join("\n", source.Comments.OrderBy(c => c.Created).Select(c => $"{c.Author}: {c.Body}")),
-        ["ticket.url"] = source?.WebUrl.ToString() ?? "",
-        ["project.name"] = p.Name,
-        ["branch"] = branch,
-        ["feedback"] = t.Feedback ?? "",
-        ["spec_path"] = t.SpecPath ?? "",
-        ["plan_path"] = t.PlanPath ?? "",
-    };
 
     private static ExecutionResult Failed(string error) => new(ExecutionStatus.Failed, error);
 }

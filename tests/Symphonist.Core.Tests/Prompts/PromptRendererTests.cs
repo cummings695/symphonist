@@ -80,4 +80,39 @@ public class PromptRendererTests
         Assert.Contains("Symphonist makes the commits", prompt);
         Assert.Contains("do not run `git commit` or `git push`", prompt);
     }
+
+    [Fact]
+    public void Review_placeholders_are_known()
+    {
+        var prompt = PromptLibrary.GetReview(ConfigWithoutOverrides());
+
+        PromptRenderer.Validate(prompt);
+        foreach (var placeholder in new[] { "{{risk.areas}}", "{{gate.stage}}", "{{gate.kind}}", "{{review.diff_range}}",
+                     "{{review.changed_files}}", "{{review.diff}}", "{{review.history}}", "{{review.stage_summary}}" })
+            Assert.Contains(placeholder, prompt);
+        Assert.Contains("Do not modify files", prompt);
+        Assert.Contains("`high` whenever you are unsure", prompt);
+    }
+
+    [Fact]
+    public void Review_prompt_override_wins_and_is_validated()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"symphonist-{Guid.NewGuid():N}.md");
+        File.WriteAllText(path, "review {{gate.stage}}");
+        try
+        {
+            var config = ConfigWithoutOverrides();
+            config = config with { Review = config.Review with { PromptPath = path } };
+            Assert.Equal("review {{gate.stage}}", PromptLibrary.GetReview(config));
+
+            File.WriteAllText(path, "review {{nope}}");
+            Assert.Throws<PromptTemplateException>(() => PromptLibrary.GetReview(config));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Plan_prompt_asks_about_risk_areas()
+        => Assert.Contains("Risk areas for this project: {{risk.areas}}. Say in the plan which of them the change touches.",
+            PromptLibrary.Get(ConfigWithoutOverrides(), StageKind.Plan));
 }

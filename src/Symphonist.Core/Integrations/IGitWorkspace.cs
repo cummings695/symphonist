@@ -14,4 +14,13 @@ public interface IGitWorkspace
     Task<bool> HasCommitsAheadAsync(string workspace, string baseBranch, CancellationToken ct);
 
     Task PushAsync(string workspace, string branch, CancellationToken ct);
+
+    /// <summary>
+    /// Files changed in <c>git diff --name-only {range}</c> ('/'-separated, exactly as stored), e.g. "origin/main...HEAD".
+    /// A rename lists both its old and its new path.
+    /// </summary>
+    Task<IReadOnlyList<string>> ChangedFilesAsync(string workspace, string range, CancellationToken ct);
+
+    /// <summary>The patch of <c>git diff {range}</c>; renames show as delete plus add.</summary>
+    Task<string> DiffAsync(string workspace, string range, CancellationToken ct);
 }

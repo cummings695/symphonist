@@ -73,6 +73,7 @@ builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictiona
     ["claude-code"] = sp.GetRequiredService<IAgentRunner>(),
 }));
 builder.Services.AddSingleton<StageExecutor>();
+builder.Services.AddSingleton<GateReviewer>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
