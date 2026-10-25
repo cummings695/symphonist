@@ -59,14 +59,16 @@ else
                 @foreach (var column in model.Columns)
                 {
                     var total = column.Cards.Count + column.HiddenCount;
-                    var folded = total > 0 && IsFolded(column);
+                    // At phone width an empty stage is only its header line already, so only stages with tickets fold there.
+                    var foldable = total > 0 || phone == false;
+                    var folded = foldable && IsFolded(column);
                     var waiting = column.Cards.Count(c => c.WaitingOnYou);
                     <section class="column @(column.Kind is { } kind ? $"lane-{kind.ToString().ToLowerInvariant()}" : null) @(column.Id == BoardQuery.UnknownColumnId ? "column-unknown" : null) @(folded ? "collapsed" : null)"
                              role="listitem" data-column="@column.Id" aria-labelledby="col-@column.Id">
                         <h2 class="column-header" id="col-@column.Id">
-                            @if (total > 0 && phone != false)
+                            @if (foldable)
                             {
-                                @* A toggle only at phone width; on a desktop the CSS shows it as the plain heading. *@
+                                @* Folds the stage to its header line at phone width, and to a narrow upright strip on a desktop. *@
                                 <button type="button" class="column-toggle" aria-expanded="@(folded ? "false" : "true")"
                                         aria-controls="cards-@column.Id" @onclick="() => ToggleAsync(column)">
                                     <span class="column-mark" aria-hidden="true"></span>

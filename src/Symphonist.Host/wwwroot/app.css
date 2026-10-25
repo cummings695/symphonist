@@ -477,11 +477,12 @@ select {
     font-weight: 600;
 }
 
-/* The stage-colour mark before the title; the title itself says which stage it is. */
+/* The stage-colour mark before the title; the title itself says which stage it is. Logical sizes, so it lies
+   across the title in a folded (upright) stage too. */
 .column-mark {
     flex: none;
-    width: 4px;
-    height: 1rem;
+    inline-size: 4px;
+    block-size: 1rem;
     border-radius: 2px;
     background: var(--stage);
 }
@@ -502,7 +503,7 @@ select {
     font-variant-numeric: tabular-nums;
 }
 
-/* The stage toggle reads as the plain heading on a desktop; it only folds at phone width (below). */
+/* The stage toggle: the whole header folds the stage, sideways on a desktop and to its header line at phone width. */
 .column-toggle {
     display: flex;
     flex: 1;
@@ -515,15 +516,15 @@ select {
     background: none;
     color: inherit;
     font: inherit;
-    text-align: left;
-    cursor: default;
+    text-align: start;
+    cursor: pointer;
 }
 
 .column-meta {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-left: auto;
+    margin-inline-start: auto;
 }
 
 .column-meta .column-count {
@@ -535,7 +536,14 @@ select {
 }
 
 .column-chevron {
-    display: none;
+    display: inline-block;
+    flex: none;
+    width: 0.45rem;
+    height: 0.45rem;
+    margin-inline-start: 0.1rem;
+    border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted);
+    transition: transform 0.15s ease;
 }
 
 .column-cards {
@@ -553,6 +561,67 @@ select {
 
 .column-more {
     text-align: center;
+}
+
+/* Desktop: the board fills the page below its heading and scrolls on its own, so its sideways scrollbar sits at the
+   bottom of the window rather than under the tallest stage. A stage folds sideways to an upright strip. */
+@media not all and (max-width: 40rem) {
+    .content:has(> [data-board-loaded] > .columns) {
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 0.5rem;
+    }
+
+    [data-board-loaded]:has(> .columns) {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    [data-board-loaded] > .columns {
+        flex: 1;
+        min-height: 12rem;
+        overflow: auto;
+    }
+
+    /* Points left: folds the stage away. */
+    .column-chevron {
+        transform: rotate(135deg);
+    }
+
+    .column-toggle[aria-expanded="false"] .column-chevron {
+        transform: rotate(-45deg);
+    }
+
+    .column.collapsed {
+        flex: none;
+        min-width: 0;
+        padding-inline: 0.35rem;
+    }
+
+    .column.collapsed .column-header {
+        margin: 0.1rem 0;
+        writing-mode: vertical-rl;
+    }
+
+    .column.collapsed .column-toggle {
+        align-items: center;
+    }
+
+    .column.collapsed .column-title {
+        overflow-wrap: normal;
+        white-space: nowrap;
+    }
+
+    /* The count stays a level pill; the rest of the header reads top to bottom. */
+    .column.collapsed .column-count {
+        writing-mode: horizontal-tb;
+    }
+
+    .column.collapsed .column-cards {
+        display: none;
+    }
 }
 
 /* Phone width: stages stack top to bottom instead of scrolling sideways. */
@@ -597,14 +666,7 @@ select {
     }
 
     .column-chevron {
-        display: inline-block;
-        width: 0.45rem;
-        height: 0.45rem;
-        margin-left: 0.1rem;
-        border-right: 2px solid var(--muted);
-        border-bottom: 2px solid var(--muted);
         transform: translateY(-0.15rem) rotate(45deg);
-        transition: transform 0.15s ease;
     }
 
     .column-toggle[aria-expanded="false"] .column-chevron {
@@ -624,7 +686,7 @@ select {
     }
 }
 
-@media (max-width: 40rem) and (prefers-reduced-motion: reduce) {
+@media (prefers-reduced-motion: reduce) {
     .column-chevron {
         transition: none;
     }
