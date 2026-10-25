@@ -70,7 +70,8 @@ is never taken from arguments.
    other projects still load. After editing a file by hand, run `symphonist projects reload` (or use Reload projects on
    the board); the setup screen reloads by itself. A ticket whose stage you removed is blocked until you send it back
    to an existing stage. Docker images are prepared when the host starts, so after adding a container project or
-   changing its `agent` image or packages by hand, restart the host before its first agent run.
+   changing its `agent` image or packages by hand, run the container check on the project's setup screen (or restart
+   the host) before its first agent run.
 
    Each of `tracker`, `repo` and `build` picks its provider with `type`, and you can mix them: for example a Jira
    tracker with a GitHub repository, or a GitHub Projects board with a Bitbucket repository. The one rule is that the
@@ -109,7 +110,14 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
 - If any project uses container isolation, the host first removes agent containers left over from a previous run and
   makes sure the agent image (and any `agent.packages` image) exists. The first image build can take several minutes
   and delays startup (and the first poll) until it finishes. If Docker is not running, the host still starts, but agent
-  stages of container projects fail with a clear error until you start Docker and restart the host.
+  stages of container projects fail with a clear error until you start Docker and run the container check on the
+  project's setup screen (no restart needed; restarting the host also works).
+- The container check (setup screen, optional) checks that Docker answers, builds the agent image (and any
+  `agent.packages` image) when missing or stale, then lets an agent build and test the repository in a throwaway clone
+  (`work/<id>/_container-check`, deleted before and after; nothing is committed or pushed), with the project's normal
+  container sandbox and `allowedDomains`. A passing Docker step switches container runs back on, and a ready image
+  clears that image's startup error, so no restart is needed. It can be cancelled, and a failing check does not stop
+  you saving. Host-isolated projects skip it. Its log is written to `logs/<id>/_onboarding/container-check-<time>.json`.
 
 ## Daily use
 
@@ -283,8 +291,10 @@ repo with a trivial `bitbucket-pipelines.yml`; or a throwaway GitHub Projects bo
   user, lost the label, or moved to a column outside `statuses`. Build or Deploy `Blocked` with `build failed` means a
   workflow run on the commit failed; re-run it in GitHub Actions, then `symphonist unblock <project> <key>`. Runs
   triggered by issue comments, schedules, manual dispatches and other non-code events are ignored.
-- Docker not running: container stages fail with a Docker error. Start Docker and restart the host (availability is
-  checked at startup).
+- Docker not running: container stages fail with a Docker error. Start Docker, then run the container check on the
+  project's setup screen; when it passes, container runs work again without a restart. (Availability is otherwise
+  checked only at startup, so restarting the host also works.) Run the check once per container project whose image
+  was not prepared.
 - `Symphonist host is not running on 127.0.0.1:<port>` (exit code 2): start the host, and check that `SYMPHONIST_PORT`
   matches for host and CLI. The same message appears if `~/.symphonist/api-token` does not exist yet.
 - A project is missing from `symphonist projects`: run `symphonist projects reload`; it names each skipped file and

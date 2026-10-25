@@ -130,4 +130,27 @@ public class IsolationLauncherTests
         Assert.Equal("docker image 'acme/agent:7' not found", ex.Message);
         Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)).FileName);
     }
+
+    [Fact]
+    public void Enable_containers_and_image_clear_problems()
+    {
+        var launcher = Real();
+        var custom = Request(Isolation.Container) with
+        {
+            Settings = Request(Isolation.Container).Settings with { Image = "acme/agent:7" },
+        };
+        launcher.DisableContainers(IsolationLauncher.DockerNotAvailable);
+        launcher.DisableImage("acme/agent:7", "docker image 'acme/agent:7' not found");
+        launcher.DisableImage(DockerLauncher.DefaultImage, "build failed");
+
+        launcher.EnableContainers();
+        Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), custom));
+        launcher.EnableImage("acme/agent:7");
+
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), custom).FileName);
+        // Only the named image is cleared.
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)));
+        Assert.Equal("build failed", ex.Message);
+    }
 }

@@ -27,6 +27,12 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
     /// </summary>
     public void DisableImage(string image, string reason) => imageProblems[image] = reason;
 
+    /// <summary>Clears <see cref="DisableContainers"/> (e.g. Docker was started after the host and a check found it).</summary>
+    public void EnableContainers() => containersProblem = null;
+
+    /// <summary>Clears <see cref="DisableImage"/> for <paramref name="image"/> (e.g. a check has built it since).</summary>
+    public void EnableImage(string image) => imageProblems.TryRemove(image, out _);
+
     public bool ProvidesIsolation(AgentRunRequest request) => For(request).ProvidesIsolation(request);
 
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
