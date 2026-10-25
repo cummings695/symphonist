@@ -107,6 +107,7 @@ public sealed class TicketDocumentComponentTests : IDisposable
 
         var bitbucket = cut.Find("[data-doc-source]");
         Assert.Equal("https://scm.example/src/symphonist/ORD-1/docs/plans/2026-10-24-ORD-1-plan.md", bitbucket.GetAttribute("href"));
+        Assert.Equal("Open on scm.example \u2197", bitbucket.TextContent);
         Assert.Equal("_blank", bitbucket.GetAttribute("target"));
         Assert.Contains("noopener", bitbucket.GetAttribute("rel"));
 
@@ -135,6 +136,7 @@ public sealed class TicketDocumentComponentTests : IDisposable
         await Seed(plan: stored);
         var cut = Render("plan");
         Assert.Contains("not a safe path", Problem(cut));
+        Assert.Empty(cut.FindAll("[data-doc-source]")); // nothing is built from a refused path
         AssertNoSecret(cut);
     }
 
@@ -144,6 +146,7 @@ public sealed class TicketDocumentComponentTests : IDisposable
         await Seed(plan: Path.Combine(outside, "secret.md"));
         var cut = Render("plan");
         Assert.Contains("not a safe path", Problem(cut));
+        Assert.Empty(cut.FindAll("[data-doc-source]")); // nothing is built from a refused path
         AssertNoSecret(cut);
     }
 

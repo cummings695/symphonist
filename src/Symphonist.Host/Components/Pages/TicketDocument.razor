@@ -37,7 +37,7 @@
                 <code data-doc-path>@path</code>
                 @if (sourceUrl is not null)
                 {
-                    <a href="@sourceUrl" target="_blank" rel="noopener noreferrer" data-doc-source>Open on Bitbucket<span aria-hidden="true"> ↗</span></a>
+                    <a href="@sourceUrl" target="_blank" rel="noopener noreferrer" data-doc-source>Open on @sourceUrl.Host<span aria-hidden="true"> ↗</span></a>
                 }
             </p>
         }
@@ -122,10 +122,10 @@
                 return;
             }
 
-            sourceUrl = SourceUrl(project, ticket.Branch, path);
             var file = await Files.ReadAsync(ticket.ProjectId, ticket.Key, path, disposed.Token);
             if (disposed.IsCancellationRequested || loadedFor != current) return;
             problem = file.Problem;
+            if (!file.PathRefused) sourceUrl = SourceUrl(project, ticket.Branch, path); // never link a refused path
             html = file.Text is { } text ? MarkdownView.ToHtml(text) : null;
         }
         catch (OperationCanceledException) when (disposed.IsCancellationRequested)
@@ -135,7 +135,7 @@
         catch (Exception e)
         {
             Log.LogError(e, "Loading the {Kind} of {Project}/{Key} failed", Kind, Project, Key);
-            problem = $"Could not load the {Kind}: {e.Message}";
+            problem = $"Could not load the {Kind} (the details are in the host log).";
         }
         finally
         {

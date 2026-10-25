@@ -12,6 +12,15 @@ public sealed class SymlinkFactAttribute : FactAttribute
     }
 }
 
+/// <summary>A fact that only runs on Windows.</summary>
+public sealed class WindowsFactAttribute : FactAttribute
+{
+    public WindowsFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows()) Skip = "Only Windows reports the hard link count";
+    }
+}
+
 /// <summary>Creates links the way an agent could inside a workspace.</summary>
 public static class WorkspaceLinks
 {
@@ -37,6 +46,9 @@ public static class WorkspaceLinks
         }
     }
 
+    /// <summary>A second hard link to <paramref name="target"/> (Windows; no privilege needed).</summary>
+    public static void HardLink(string link, string target) => Cmd("/c", "mklink", "/H", link, target);
+
     /// <summary>A directory link: a symbolic link where possible, else (Windows without the privilege) a junction.</summary>
     public static void LinkDirectory(string link, string target)
     {
@@ -45,7 +57,12 @@ public static class WorkspaceLinks
             Directory.CreateSymbolicLink(link, target);
             return;
         }
-        using var p = Process.Start(new ProcessStartInfo("cmd.exe", ["/c", "mklink", "/J", link, target])
+        Cmd("/c", "mklink", "/J", link, target);
+    }
+
+    private static void Cmd(params string[] arguments)
+    {
+        using var p = Process.Start(new ProcessStartInfo("cmd.exe", arguments)
         {
             RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
         })!;
@@ -124,6 +141,20 @@ public sealed class WorkspaceFilesTests : IDisposable
     [InlineData("docs/a.md\0.txt")]
     [InlineData("docs/a\n.md")]
     [InlineData("docs/a.md:stream")]
+    [InlineData("docs/.. /../../secret.md")]
+    [InlineData(".. /.. /secret.md")]
+    [InlineData("docs/... /a.md")]
+    [InlineData("docs/a.md.")]
+    [InlineData("docs/a.md ")]
+    [InlineData("CON")]
+    [InlineData("docs/nul.md")]
+    [InlineData("docs/NUL")]
+    [InlineData("COM1/a.md")]
+    [InlineData("docs/lpt9.txt")]
+    [InlineData("docs/Aux .md")]
+    [InlineData("docs/conin$")]
+    [InlineData("docs/CONOUT$.md")]
+    [InlineData("docs/COM\u00b9")]
     public async Task Unsafe_paths_are_refused(string relative)
     {
         Write("docs/a.md", "fine");
@@ -135,11 +166,17 @@ public sealed class WorkspaceFilesTests : IDisposable
     [Fact]
     public async Task Rooted_paths_are_refused()
     {
-        foreach (var rooted in new[] { Path.Combine(outside, "secret.md"), "/etc/passwd", @"\secret.md", "C:/secret.md", @"\\server\share\x.md" })
+        foreach (var rooted in new[]
+                 {
+                     Path.Combine(outside, "secret.md"), "/etc/passwd", @"\secret.md", "C:/secret.md", @"\\server\share\x.md",
+                     @"\\?\" + Path.Combine(outside, "secret.md"), @"\\.\" + Path.Combine(outside, "secret.md"),
+                     @"\\?\UNC\server\share\x.md", @"\\.\CON",
+                 })
         {
             var result = await Read(rooted);
             Assert.Null(result.Text);
             Assert.Contains("not a safe path", result.Problem);
+            Assert.True(result.PathRefused);
         }
     }
 
@@ -219,5 +256,71 @@ public sealed class WorkspaceFilesTests : IDisposable
         var result = await Read("secret.md");
         Assert.Null(result.Text);
         Assert.Contains("symbolic link", result.Problem);
+    }
+
+    [Fact]
+    public async Task Device_names_inside_other_words_are_fine()
+    {
+        Write("docs/console.md", "a");
+        Write("docs/com10.md", "b");
+        Assert.Equal("a", (await Read("docs/console.md")).Text);
+        Assert.Equal("b", (await Read("docs/com10.md")).Text);
+    }
+
+    private string RealWorkspace => WorkspaceFiles.RealDirectoryPath(Workspace)!;
+
+    [Fact]
+    public void Open_file_inside_the_workspace_passes_the_handle_check()
+    {
+        Write("docs/a.md", "fine");
+        using var stream = File.OpenRead(Path.Combine(Workspace, "docs", "a.md"));
+        Assert.Null(WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
+    }
+
+    [Fact]
+    public void File_opened_through_a_linked_directory_fails_the_handle_check()
+    {
+        // As if docs/ were swapped for a link after the name checks: the open handle still shows where the file really is.
+        WorkspaceLinks.LinkDirectory(Path.Combine(Workspace, "docs"), outside);
+        using var stream = File.OpenRead(Path.Combine(Workspace, "docs", "secret.md"));
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
+    }
+
+    [SymlinkFact]
+    public void File_opened_through_a_symlink_fails_the_handle_check()
+    {
+        Directory.CreateDirectory(Path.Combine(Workspace, "docs"));
+        File.CreateSymbolicLink(Path.Combine(Workspace, "docs", "spec.md"), Path.Combine(outside, "secret.md"));
+        using var stream = File.OpenRead(Path.Combine(Workspace, "docs", "spec.md"));
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
+    }
+
+    [Fact]
+    public async Task Workspace_under_a_linked_work_root_is_still_readable()
+    {
+        // A work root under a linked folder (e.g. a home on another drive) is the developer's choice, not the agent's.
+        var linkedRoot = root + "-linkedroot";
+        WorkspaceLinks.LinkDirectory(linkedRoot, root);
+        try
+        {
+            Write("docs/a.md", "fine");
+            var result = await new WorkspaceFiles(Path.Combine(linkedRoot, "work")).ReadAsync("orders", "ORD-1", "docs/a.md", default);
+            Assert.Equal("fine", result.Text);
+        }
+        finally
+        {
+            Directory.Delete(linkedRoot);
+        }
+    }
+
+    [WindowsFact]
+    public async Task Hard_linked_file_is_refused()
+    {
+        Directory.CreateDirectory(Path.Combine(Workspace, "docs"));
+        WorkspaceLinks.HardLink(Path.Combine(Workspace, "docs", "spec.md"), Path.Combine(outside, "secret.md"));
+
+        var result = await Read("docs/spec.md");
+        Assert.Null(result.Text);
+        Assert.Equal(WorkspaceFiles.HardLinked, result.Problem);
     }
 }

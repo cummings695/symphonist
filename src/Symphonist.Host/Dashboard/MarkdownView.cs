@@ -16,7 +16,7 @@ namespace Symphonist.Host.Dashboard;
 /// <item>raw HTML is disabled, so HTML blocks and inline HTML are written out escaped, as text;</item>
 /// <item>the renderer escapes all text, attribute values and URLs;</item>
 /// <item>only the pipe-tables extension is enabled (no attributes, no auto-identifiers, nothing that emits raw HTML);</item>
-/// <item>links keep only http, https, mailto and in-page (#fragment) URLs; any other link becomes its plain text;</item>
+/// <item>links keep only http, https and mailto URLs; any other link (javascript:, data:, relative, #fragment) becomes its plain text;</item>
 /// <item>images are never loaded (no external requests, no data URLs): each becomes its alt text.</item>
 /// </list>
 /// </remarks>
@@ -48,14 +48,14 @@ public static class MarkdownView
         foreach (var link in document.Descendants<LinkInline>().ToList())
         {
             var url = link.GetDynamicUrl?.Invoke() ?? link.Url;
-            if (IsSafeUrl(url)) MarkExternal(link, url!);
+            if (IsSafeUrl(url)) MarkExternal(link);
             else Unwrap(link);
         }
 
         foreach (var autolink in document.Descendants<AutolinkInline>().ToList())
         {
             var url = autolink.IsEmail ? "mailto:" + autolink.Url : autolink.Url;
-            if (IsSafeUrl(url)) MarkExternal(autolink, url);
+            if (IsSafeUrl(url)) MarkExternal(autolink);
             else
             {
                 autolink.InsertBefore(new LiteralInline(autolink.Url));
@@ -65,22 +65,21 @@ public static class MarkdownView
     }
 
     /// <summary>
-    /// http(s), mailto and #fragment only. Anything with whitespace or control characters is refused, since browsers
-    /// strip those (e.g. <c>java&#9;script:</c>); relative paths are refused too (they would resolve against the dashboard).
+    /// http(s) and mailto only. Anything with whitespace or control characters is refused, since browsers strip those
+    /// (e.g. <c>java&#9;script:</c>); relative paths would resolve against the dashboard, and #fragments go nowhere
+    /// (headings get no ids), so both are refused too.
     /// </summary>
     internal static bool IsSafeUrl(string? url)
     {
         if (string.IsNullOrEmpty(url) || url.Any(c => char.IsWhiteSpace(c) || char.IsControl(c))) return false;
-        return url.StartsWith('#')
-            || url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+        return url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
             || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
             || url.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Links that leave the page open in a new tab without telling the target where they came from.</summary>
-    private static void MarkExternal(Inline link, string url)
+    /// <summary>Links (all leave the page) open in a new tab without telling the target where they came from.</summary>
+    private static void MarkExternal(Inline link)
     {
-        if (url.StartsWith('#')) return;
         var attributes = link.GetAttributes();
         attributes.AddPropertyIfNotExist("target", "_blank");
         attributes.AddPropertyIfNotExist("rel", "noopener noreferrer");

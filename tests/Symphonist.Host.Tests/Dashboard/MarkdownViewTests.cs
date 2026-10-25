@@ -21,7 +21,7 @@ public sealed class MarkdownViewTests
         foreach (var a in doc.Body.QuerySelectorAll("a"))
         {
             var href = a.GetAttribute("href") ?? "";
-            Assert.True(href.Length == 0 || href.StartsWith('#') || href.StartsWith("http://", StringComparison.Ordinal)
+            Assert.True(href.StartsWith("http://", StringComparison.Ordinal)
                 || href.StartsWith("https://", StringComparison.Ordinal) || href.StartsWith("mailto:", StringComparison.Ordinal),
                 $"unexpected href {href}");
         }
@@ -95,6 +95,11 @@ public sealed class MarkdownViewTests
     [InlineData("[click](//evil.example/x)")]
     [InlineData("[click](../other.md)")]
     [InlineData("<javascript:alert(1)>")]
+    [InlineData("[below](#steps)")]
+    [InlineData("[x](&#106;avascript:alert(1))")]
+    [InlineData("[x](&#x6A;avascript&colon;alert(1))")]
+    [InlineData("[x](java&#x09;script:alert(1))")]
+    [InlineData("[empty]()")]
     [InlineData("<data:text/html,hi>")]
     public void Unsafe_links_become_plain_text(string markdown)
     {
@@ -115,17 +120,14 @@ public sealed class MarkdownViewTests
     [InlineData("[site](https://example.com/a?b=1)", "https://example.com/a?b=1")]
     [InlineData("[site](http://example.com)", "http://example.com")]
     [InlineData("[mail](mailto:dev@example.com)", "mailto:dev@example.com")]
-    [InlineData("[below](#steps)", "#steps")]
     [InlineData("<https://example.com/auto>", "https://example.com/auto")]
-    public void Safe_links_are_kept_and_open_in_a_new_tab(string markdown, string href)
+    [InlineData("<dev@example.com>", "mailto:dev@example.com")]
+    public void Http_and_mail_links_are_kept_and_open_in_a_new_tab(string markdown, string href)
     {
         var a = Assert.Single(Parse(markdown).QuerySelectorAll("a"));
         Assert.Equal(href, a.GetAttribute("href"));
-        if (!href.StartsWith('#'))
-        {
-            Assert.Equal("_blank", a.GetAttribute("target"));
-            Assert.Equal("noopener noreferrer", a.GetAttribute("rel"));
-        }
+        Assert.Equal("_blank", a.GetAttribute("target"));
+        Assert.Equal("noopener noreferrer", a.GetAttribute("rel"));
     }
 
     [Theory]
