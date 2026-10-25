@@ -631,10 +631,42 @@ public sealed class BoardComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-column='Triage'] .column-header button")));
         Assert.Equal("Plan", cut.Find("[data-column='Plan'] .column-title").TextContent.Trim());
 
-        Toggle(cut, "Triage").Click(); // empty, but still a lane's width on a desktop
-        Assert.Contains("collapsed", Column(cut, "Triage").ClassList);
-        Assert.Equal(new Dictionary<string, bool> { ["Triage"] = true },
+        Assert.Contains("collapsed", Column(cut, "Triage").ClassList); // empty: folded by default
+        Assert.DoesNotContain("collapsed", Column(cut, "Plan").ClassList);
+
+        Toggle(cut, "Triage").Click(); // opening an empty stage lasts only for this page
+        Assert.DoesNotContain("collapsed", Column(cut, "Triage").ClassList);
+        Assert.Empty(module.Invocations["save"]);
+
+        Toggle(cut, "Plan").Click();
+        Assert.Contains("collapsed", Column(cut, "Plan").ClassList);
+        Assert.Equal(new Dictionary<string, bool> { ["Plan"] = true },
             module.Invocations["save"][^1].Arguments[0] as Dictionary<string, bool>);
+    }
+
+    [Fact]
+    public async Task Empty_stages_fold_whatever_was_stored_until_they_have_tickets()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending);
+        var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
+        module.Setup<Dictionary<string, bool>?>("load", _ => true)
+            .SetResult(new Dictionary<string, bool> { ["Triage"] = false, ["Implement"] = true, ["Done"] = false });
+        module.Setup<bool>("watchPhone", _ => true).SetResult(false);
+        module.Setup<bool>("save", _ => true).SetResult(true);
+
+        var cut = RenderBoard();
+        cut.WaitForAssertion(() => Assert.Single(module.Invocations["load"]));
+
+        Assert.Contains("collapsed", Column(cut, "Triage").ClassList); // stored open, but empty
+        Assert.Contains("collapsed", Column(cut, "Implement").ClassList);
+        Assert.DoesNotContain("collapsed", Column(cut, "Done").ClassList); // Done always follows the choice, even empty
+
+        await Seed("ORD-2", "triage", StageStatus.Pending);
+        await Seed("ORD-3", "implement", StageStatus.Pending);
+        notifier.Notify();
+        time.Advance(BoardNotifier.Window);
+        cut.WaitForAssertion(() => Assert.DoesNotContain("collapsed", Column(cut, "Triage").ClassList));
+        Assert.Contains("collapsed", Column(cut, "Implement").ClassList); // back to the stored choice
     }
 
     [Fact]

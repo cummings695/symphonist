@@ -140,6 +140,7 @@ else
     private string? loadedFilter;
     private PeriodicTimer? clock;
     private readonly Dictionary<string, bool> foldChoices = [];
+    private readonly HashSet<string> openedWhileEmpty = [];
     private IJSObjectReference? folds;
     private DotNetObjectReference<Board>? self;
     private bool? phone; // unknown until the browser says; the CSS decides meanwhile
@@ -170,8 +171,19 @@ else
         await LoadFoldsAsync();
     }
 
-    /// <summary>A stage's folded state: the developer's choice in this browser, else folded for Done only.</summary>
-    private bool IsFolded(BoardColumn column) => foldChoices.TryGetValue(column.Id, out var folded) ? folded : column.IsDone;
+    /// <summary>
+    /// A stage's folded state. Done follows the developer's choice in this browser (folded until they choose). Any other
+    /// stage is folded while it has no tickets (opening it then lasts only for this page), and follows the developer's
+    /// choice, else open, once it has some.
+    /// </summary>
+    private bool IsFolded(BoardColumn column)
+    {
+        if (column.IsDone) return foldChoices.TryGetValue(column.Id, out var done) ? done : true;
+        if (IsEmpty(column)) return !openedWhileEmpty.Contains(column.Id);
+        return foldChoices.TryGetValue(column.Id, out var folded) && folded;
+    }
+
+    private static bool IsEmpty(BoardColumn column) => column.Cards.Count + column.HiddenCount == 0;
 
     /// <summary>Applies the folds stored in this browser and learns whether it is at phone width.</summary>
     private async Task LoadFoldsAsync()
@@ -203,6 +215,12 @@ else
 
     private async Task ToggleAsync(BoardColumn column)
     {
+        if (!column.IsDone && IsEmpty(column))
+        {
+            // An empty stage folds again on the next visit; the stored choice is kept for when it has tickets.
+            if (!openedWhileEmpty.Remove(column.Id)) openedWhileEmpty.Add(column.Id);
+            return;
+        }
         foldChoices[column.Id] = !IsFolded(column);
         try
         {
