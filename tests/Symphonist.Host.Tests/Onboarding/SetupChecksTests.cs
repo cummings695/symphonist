@@ -49,23 +49,50 @@ public sealed class SetupChecksTests : IDisposable
     private Task<ConnectionReport> Check(ProjectConfig draft) => checks.CheckAsync(draft, adopted.Add, CancellationToken.None);
 
     [Fact]
-    public async Task Missing_secrets_skip_remote_checks()
+    public async Task Missing_secrets_skip_only_the_checks_that_need_them()
     {
         var report = await Check(Draft());
 
         Assert.Equal(StepNames, report.Steps.Select(s => s.Name));
         Assert.Equal(new CheckStep("Secrets", CheckStatus.Failed,
             "not set: jira-orders, bitbucket-orders, claude-code-token; enter them above"), report.Steps[0]);
-        Assert.All(report.Steps.Skip(1).Take(6), s =>
-        {
-            Assert.Equal(CheckStatus.Skipped, s.Status);
-            Assert.Equal("needs secrets", s.Detail);
-        });
+        Assert.All(report.Steps.Skip(1).Take(3), s => Assert.Equal((CheckStatus.Skipped, "needs secret jira-orders"), (s.Status, s.Detail)));
+        Assert.All(report.Steps.Skip(4).Take(3), s => Assert.Equal((CheckStatus.Skipped, "needs secret bitbucket-orders"), (s.Status, s.Detail)));
         Assert.Equal(CheckStatus.Passed, report.Steps[7].Status);
         Assert.Equal(0, discovery.Calls);
         Assert.Null(report.Tracker);
         Assert.Null(report.Repository);
         Assert.Null(report.Build);
+    }
+
+    [Fact]
+    public async Task Missing_claude_token_fails_only_the_secrets_line()
+    {
+        var draft = Draft();
+        secrets.Set(draft.Tracker.TokenSecret, "t");
+        secrets.Set(draft.Repo.TokenSecret, "r");
+
+        var report = await Check(draft);
+
+        Assert.Equal(new CheckStep("Secrets", CheckStatus.Failed, "not set: claude-code-token; enter them above"), report.Steps[0]);
+        Assert.All(report.Steps.Skip(1), s => Assert.Equal(CheckStatus.Passed, s.Status));
+        Assert.NotNull(report.Tracker);
+        Assert.NotNull(report.Repository);
+        Assert.NotNull(report.Build);
+    }
+
+    [Fact]
+    public async Task Missing_repo_secret_still_checks_the_tracker()
+    {
+        var draft = Draft();
+        secrets.Set(draft.Tracker.TokenSecret, "t");
+
+        var report = await Check(draft);
+
+        Assert.Equal(CheckStatus.Passed, report.Steps[1].Status);
+        Assert.NotNull(report.Tracker);
+        Assert.All(report.Steps.Skip(4).Take(3), s => Assert.Equal("needs secret bitbucket-orders", s.Detail));
+        Assert.Null(report.Repository);
     }
 
     [Fact]

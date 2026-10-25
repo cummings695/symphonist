@@ -21,7 +21,7 @@ public sealed record ConnectionReport(IReadOnlyList<CheckStep> Steps, TrackerDis
 /// </summary>
 public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry providers, ISecretStore secrets, IGitWorkspace git)
 {
-    private const string NeedsSecrets = "needs secrets";
+    private static string NeedsSecret(string name) => $"needs secret {name}";
 
     /// <summary>
     /// Steps in order: "Secrets", "Tracker sign-in", "Tracker statuses", "Tracker query", "Repository",
@@ -40,17 +40,19 @@ public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry pr
         RepositoryDiscovery? repository = null;
         BuildDiscovery? build = null;
 
+        // A missing secret skips only the checks that need it (claude-code-token is needed by none of them).
         var missing = MissingSecrets(draft);
-        if (missing.Count > 0)
+        steps.Add(missing.Count > 0
+            ? Failed("Secrets", $"not set: {string.Join(", ", missing)}; enter them above")
+            : Passed("Secrets", "all set"));
+
+        if (missing.Contains(draft.Tracker.TokenSecret))
         {
-            steps.Add(Failed("Secrets", $"not set: {string.Join(", ", missing)}; enter them above"));
-            foreach (var name in (string[])["Tracker sign-in", "Tracker statuses", "Tracker query", "Repository", "Production branch", "Build"])
-                steps.Add(new CheckStep(name, CheckStatus.Skipped, NeedsSecrets));
+            foreach (var name in (string[])["Tracker sign-in", "Tracker statuses", "Tracker query"])
+                steps.Add(new CheckStep(name, CheckStatus.Skipped, NeedsSecret(draft.Tracker.TokenSecret)));
         }
         else
         {
-            steps.Add(Passed("Secrets", "all set"));
-
             try
             {
                 tracker = await discovery.DiscoverTrackerAsync(draft, ct);
@@ -75,7 +77,15 @@ public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry pr
                 steps.Add(Passed("Tracker query",
                     tracker.MatchingTickets is { } count ? $"{count} tickets match" : "count unavailable"));
             }
+        }
 
+        if (missing.Contains(draft.Repo.TokenSecret))
+        {
+            foreach (var name in (string[])["Repository", "Production branch", "Build"])
+                steps.Add(new CheckStep(name, CheckStatus.Skipped, NeedsSecret(draft.Repo.TokenSecret)));
+        }
+        else
+        {
             try
             {
                 repository = await discovery.DiscoverRepositoryAsync(draft, ct);
