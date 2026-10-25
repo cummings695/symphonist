@@ -284,6 +284,23 @@ public sealed class OnboardingServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Steps_run_for_a_file_with_a_folded_jql()
+    {
+        var text = WriteProject("orders");
+        Assert.Contains("  jql: acme\n", text);
+        home.WriteProject("orders.yaml", text.Replace("  jql: acme\n", "  jql: >\n    project = ACME\n    AND labels = Claude\n"));
+        registry.Reload();
+        var session = service.Open("orders");
+        SetSecretsOf(session);
+
+        await service.CheckConnectionsAsync(session);
+
+        Assert.Null(session.LastError);
+        Assert.NotNull(session.Connections);
+        Assert.Equal("project = ACME AND labels = Claude\n", session.Form.Tracker.Values["jql"]);
+    }
+
+    [Fact]
     public async Task Draft_error_is_shown_and_nothing_runs()
     {
         var session = service.Open(null);

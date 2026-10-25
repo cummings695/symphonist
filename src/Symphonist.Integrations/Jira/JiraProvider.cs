@@ -32,7 +32,7 @@ public sealed partial class JiraProvider : ITrackerProvider
         new("site", "Site URL", ProviderFieldKind.Url, Required: true, Help: "Jira Cloud base URL, e.g. https://acme.atlassian.net"),
         new("email", "Account email", ProviderFieldKind.Text, Required: true, Help: "Atlassian account email (basic auth with the API token)"),
         new("projectKey", "Project key", ProviderFieldKind.Text, Help: "Optional; the setup screen reads statuses from it"),
-        new("jql", "JQL", ProviderFieldKind.Text, Required: true, Help: "Tickets Symphonist works on"),
+        new("jql", "JQL", ProviderFieldKind.MultilineText, Required: true, Help: "Tickets Symphonist works on"),
         new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the Atlassian API token"),
     ];
 

@@ -235,7 +235,8 @@ public sealed class ProjectForm
     };
 
     /// <summary>
-    /// Errors the loader cannot see: line breaks or control characters in any value, invalid secret names, Number
+    /// Errors the loader cannot see: line breaks or control characters in any value (descriptions and
+    /// <see cref="ProviderFieldKind.MultilineText"/> fields may hold "\n" line breaks), invalid secret names, Number
     /// fields that are not integers, duplicate stage ids and blank list items.
     /// </summary>
     public IReadOnlyList<string> Validate(ProviderRegistry providers)
@@ -269,7 +270,7 @@ public sealed class ProjectForm
         foreach (var area in RiskAreas)
         {
             Line("riskAreas[].name", area.Name, errors);
-            Line($"riskAreas '{area.Name}' description", area.Description, errors);
+            Multiline($"riskAreas '{area.Name}' description", area.Description, errors);
             Items($"riskAreas '{area.Name}' paths", area.Paths, errors);
         }
 
@@ -286,8 +287,9 @@ public sealed class ProjectForm
         Line($"{slot}.type", section.Type, errors);
         foreach (var (key, value) in section.Values)
         {
-            Line($"{slot}.{key}", value, errors);
             var field = fields?.FirstOrDefault(f => f.Key == key);
+            if (field?.Kind == ProviderFieldKind.MultilineText) Multiline($"{slot}.{key}", value, errors);
+            else Line($"{slot}.{key}", value, errors);
             if (string.IsNullOrWhiteSpace(value) || field is null) continue;
             if (field.Kind == ProviderFieldKind.Secret && !SecretNames.IsValid(value))
                 errors.Add($"invalid secret name '{value}'");
@@ -311,6 +313,15 @@ public sealed class ProjectForm
         // YAML also reads NEL and the Unicode line/paragraph separators as line breaks.
         if (value.IndexOfAny(['\n', '\r', '\u0085', '\u2028', '\u2029']) >= 0) errors.Add($"{field} must be a single line");
         else if (value.Any(char.IsControl)) errors.Add($"{field} contains a control character");
+    }
+
+    /// <summary>Like <see cref="Line"/>, but "\n" line breaks are allowed (written as a literal block scalar).</summary>
+    private static void Multiline(string field, string? value, List<string> errors)
+    {
+        if (value is null) return;
+        if (value.IndexOfAny(['\r', '\u0085', '\u2028', '\u2029']) >= 0)
+            errors.Add($"{field} contains an unsupported line break (only plain line breaks are allowed)");
+        else if (value.Any(c => c != '\n' && char.IsControl(c))) errors.Add($"{field} contains a control character");
     }
 
     private ProviderSectionForm ChangeType(ProviderSectionForm current, string type,

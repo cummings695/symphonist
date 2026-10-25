@@ -21,8 +21,8 @@
                     </div>
                     <div class="setup-field setup-field-wide">
                         <label for="@($"{prefix}-description")">Description</label>
-                        <input id="@($"{prefix}-description")" type="text" value="@area.Description" autocomplete="off"
-                               @onchange="e => EditAsync(() => area.Description = e.Value as string ?? string.Empty)" />
+                        <textarea id="@($"{prefix}-description")" rows="2" value="@area.Description"
+                                  @onchange="e => EditAsync(() => area.Description = ProviderSectionEditor.Text(e.Value as string))"></textarea>
                     </div>
                     <div class="setup-field setup-field-wide">
                         <label for="@($"{prefix}-paths")">Paths</label>

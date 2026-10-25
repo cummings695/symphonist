@@ -405,6 +405,24 @@ public sealed class ProjectSetupComponentTests : IDisposable
     }
 
     [Fact]
+    public void Jql_and_risk_descriptions_are_multi_line_text_areas()
+    {
+        var cut = Render();
+
+        var jql = cut.Find("#tracker-jql");
+        Assert.Equal("TEXTAREA", jql.TagName);
+        jql.Change("project = ACME\r\nAND labels = Claude");
+        cut.FindAll("button").First(b => b.TextContent == "Add risk area").Click();
+        var description = cut.Find("#risk-0-description");
+        Assert.Equal("TEXTAREA", description.TagName);
+        description.Change("Prices.\r\nAnd tax.");
+
+        var form = service.Current!.Form;
+        Assert.Equal("project = ACME\nAND labels = Claude", form.Tracker.Values["jql"]);
+        Assert.Equal("Prices.\nAnd tax.", form.RiskAreas[0].Description);
+    }
+
+    [Fact]
     public async Task Ended_session_shows_its_message_with_a_reload_link()
     {
         WriteProject("orders");

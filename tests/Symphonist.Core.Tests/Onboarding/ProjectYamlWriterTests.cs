@@ -153,14 +153,95 @@ public class ProjectYamlWriterTests
     {
         var form = Filled();
         form.Name = "a\nb";
-        form.Tracker.Values["jql"] = "a\nb";
+        form.Tracker.Values["jql"] = "a\rb";
         form.Pipeline[0].EntryStatuses = ["ok", "x\r"];
+        form.RiskAreas.Add(new RiskAreaForm { Name = "x", Description = "a\u2028b", Paths = [] });
 
         var errors = form.Validate(Registry);
 
         Assert.Contains("name must be a single line", errors);
-        Assert.Contains("tracker.jql must be a single line", errors);
+        Assert.Contains("tracker.jql contains an unsupported line break (only plain line breaks are allowed)", errors);
         Assert.Contains("pipeline stage 'triage' entryStatuses must be a single line", errors);
+        Assert.Contains("riskAreas 'x' description contains an unsupported line break (only plain line breaks are allowed)",
+            errors);
+    }
+
+    [Fact]
+    public void Descriptions_and_jql_may_span_lines()
+    {
+        var form = Filled();
+        form.Tracker.Values["jql"] = "project = ACME\nAND labels = Claude";
+        form.RiskAreas.Add(new RiskAreaForm { Name = "pricing", Description = "Prices.\nAnd tax.\n", Paths = [] });
+
+        Assert.Empty(form.Validate(Registry));
+    }
+
+    [Theory]
+    [InlineData("line one\nline two")]
+    [InlineData("line one\nline two\n")]
+    [InlineData("line one\nline two\n\n")]
+    [InlineData(" leading space\nnext")]
+    [InlineData("\nstarts with a break")]
+    [InlineData("a: b # not a comment\n  indented\n\n- not a list\n   ")]
+    public void Multi_line_descriptions_and_jql_are_literal_blocks_that_round_trip(string value)
+    {
+        var form = Filled();
+        form.Tracker.Values["jql"] = value;
+        form.RiskAreas.Add(new RiskAreaForm { Name = "pricing", Description = value, Paths = ["src/**"] });
+
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+
+        Assert.Matches(@"\n  jql: \|", text);
+        Assert.Matches(@"\n    description: \|", text);
+        var config = Parse(text);
+        Assert.Equal(value, ((Symphonist.Integrations.Jira.JiraTrackerConfig)config.Tracker).Jql);
+        Assert.Equal(value, Assert.Single(config.RiskAreas).Description);
+        Assert.Equal(["src/**"], config.RiskAreas[0].Paths);
+    }
+
+    private const string FoldedDescription =
+        "    description: >\n      Anything that changes how order prices,\n      discounts or tax are computed.\n";
+
+    private static (string Text, ProjectForm Form) WithFoldedDescription()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n");
+        text = text.Replace("    description: Anything that changes how order prices, discounts or tax are computed.\n",
+            FoldedDescription);
+        Assert.Contains(FoldedDescription, text);
+        return (text, ProjectForm.From(Parse(text), Registry));
+    }
+
+    [Fact]
+    public void Folded_description_is_kept_byte_for_byte_by_an_unrelated_edit()
+    {
+        var (text, original) = WithFoldedDescription();
+        Assert.Equal("Anything that changes how order prices, discounts or tax are computed.\n",
+            original.RiskAreas[0].Description);
+        var edited = original.Clone();
+        edited.Pipeline[3].Gate = GatePolicy.Human;
+
+        Assert.Empty(edited.Validate(Registry));
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        var start = text.IndexOf("riskAreas:", StringComparison.Ordinal);
+        var end = text.IndexOf("# Risk reviewer", StringComparison.Ordinal);
+        Assert.Contains(text[start..end], result);
+        Assert.Equal(GatePolicy.Human, Parse(result).Pipeline[3].Gate);
+        // The draft the setup steps run with (NewFile of the form) loads too.
+        Assert.Equal(original.RiskAreas[0].Description, Parse(ProjectYamlWriter.NewFile(edited, Registry)).RiskAreas[0].Description);
+    }
+
+    [Fact]
+    public void Editing_a_folded_description_to_two_lines_writes_a_literal_block()
+    {
+        var (text, original) = WithFoldedDescription();
+        var edited = original.Clone();
+        edited.RiskAreas[0].Description = "Prices and discounts.\nTax too.";
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Contains("    description: |-\n      Prices and discounts.\n      Tax too.\n", result);
+        Assert.Equal("Prices and discounts.\nTax too.", Parse(result).RiskAreas[0].Description);
     }
 
     [Fact]

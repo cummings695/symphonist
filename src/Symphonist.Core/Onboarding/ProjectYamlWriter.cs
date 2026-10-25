@@ -134,7 +134,8 @@ public static class ProjectYamlWriter
             }
             if (!section.Values.TryGetValue(field.Key, out var value) || string.IsNullOrWhiteSpace(value)
                 || value == field.Default) continue;
-            text.Append($"  {field.Key}: {Scalar(value)}\n");
+            text.Append($"  {field.Key}: ");
+            text.Append(field.Kind == ProviderFieldKind.MultilineText ? Multiline(value, "    ") : $"{Scalar(value)}\n");
         }
         return text.ToString();
     }
@@ -184,7 +185,7 @@ public static class ProjectYamlWriter
         foreach (var area in areas)
         {
             text.Append($"  - name: {Scalar(area.Name)}\n");
-            text.Append($"    description: {Scalar(area.Description)}\n");
+            text.Append("    description: ").Append(Multiline(area.Description, "      "));
             if (area.Paths.Count > 0) text.Append($"    paths: {List(area.Paths)}\n");
         }
         return text.ToString();
@@ -282,6 +283,32 @@ public static class ProjectYamlWriter
     }
 
     private static string Scalar(string value) => Scalar(value, flow: false);
+
+    /// <summary>
+    /// The value after "key: " up to and including the line end: a one-line scalar, or, when the value holds "\n"
+    /// line breaks, a literal block scalar whose lines are indented by <paramref name="indent"/> (two more spaces than
+    /// the key). The chomping indicator keeps the trailing line breaks exactly; an indentation indicator is added when
+    /// the value starts with a space or a line break, where YAML could not detect the indentation itself.
+    /// </summary>
+    private static string Multiline(string value, string indent)
+    {
+        if (!value.Contains('\n')) return $"{Scalar(value)}\n";
+        if (value.IndexOfAny(['\r', '\u0085', '\u2028', '\u2029']) >= 0 || value.Any(c => c != '\n' && char.IsControl(c)))
+            throw new ProjectYamlEditException("a value contains a line break or control character that cannot be written");
+        string chomp, body;
+        if (!value.EndsWith('\n')) (chomp, body) = ("-", value);
+        else if (value.EndsWith("\n\n", StringComparison.Ordinal)) (chomp, body) = ("+", value[..^1]);
+        else (chomp, body) = ("", value[..^1]);
+        var text = new StringBuilder("|");
+        if (value[0] is ' ' or '\n') text.Append('2');
+        text.Append(chomp).Append('\n');
+        foreach (var line in body.Split('\n'))
+        {
+            if (line.Length > 0) text.Append(indent).Append(line);
+            text.Append('\n');
+        }
+        return text.ToString();
+    }
 
     private static string FlowScalar(string value) => Scalar(value, flow: true);
 }

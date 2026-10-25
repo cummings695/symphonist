@@ -51,6 +51,11 @@
                                    @onchange="e => AddToListAsync(field.Key, e)" />
                         }
                         break;
+                    case ProviderFieldKind.MultilineText:
+                        <textarea id="@id" rows="2" spellcheck="false" aria-describedby="@hint" value="@Value(field.Key)"
+                                  placeholder="@(field.Required ? null : field.Default)"
+                                  @onchange="e => SetValueAsync(field.Key, e)"></textarea>
+                        break;
                     default:
                         <input id="@id" type="text" value="@Value(field.Key)" autocomplete="off" spellcheck="false"
                                inputmode="@(field.Kind switch { ProviderFieldKind.Number => "numeric", ProviderFieldKind.Url => "url", _ => null })"
@@ -101,7 +106,7 @@
 
     private Task SetValueAsync(string key, ChangeEventArgs e)
     {
-        var value = e.Value as string ?? "";
+        var value = Text(e.Value as string);
         if (value.Length == 0) Section.Values.Remove(key);
         else Section.Values[key] = value;
         return OnChanged.InvokeAsync();
@@ -124,6 +129,9 @@
         Section.Lists[key] = items;
         return OnChanged.InvokeAsync();
     }
+
+    /// <summary>Text as typed, with "\r\n" line ends (a pasted value) made "\n", the only break a value may hold.</summary>
+    public static string Text(string? text) => (text ?? "").Replace("\r\n", "\n");
 
     /// <summary>One item per non-blank line, as typed (line ends only removed).</summary>
     public static List<string> Lines(string? text) =>

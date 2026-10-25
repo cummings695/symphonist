@@ -1,6 +1,10 @@
 namespace Symphonist.Core.Integrations.Providers;
 
-public enum ProviderFieldKind { Text, Number, Url, Path, Secret, Choice, List }
+/// <summary>
+/// How a field is edited and written. <see cref="MultilineText"/> is free text that may span lines (written as a
+/// literal block scalar when it does); every other scalar kind is a single line.
+/// </summary>
+public enum ProviderFieldKind { Text, Number, Url, Path, Secret, Choice, List, MultilineText }
 
 /// <summary>One key a provider's YAML section accepts, for the setup screen and the YAML writer.</summary>
 /// <param name="Key">camelCase YAML key inside the section (never "type").</param>
