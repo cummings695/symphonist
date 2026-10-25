@@ -27,7 +27,7 @@
                     </div>
                     <div class="setup-field">
                         <label for="@($"{prefix}-kind")">Kind</label>
-                        <select id="@($"{prefix}-kind")" value="@stage.Kind" @onchange="e => EditAsync(() => stage.Kind = Enum.Parse<StageKind>(Text(e) ?? stage.Kind.ToString()))">
+                        <select id="@($"{prefix}-kind")" value="@stage.Kind" @onchange="e => EditAsync(() => stage.Kind = Parse(e, stage.Kind))">
                             @foreach (var kind in Enum.GetValues<StageKind>())
                             {
                                 <option value="@kind" selected="@(stage.Kind == kind)">@kind.ToString().ToLowerInvariant()</option>
@@ -36,7 +36,7 @@
                     </div>
                     <div class="setup-field">
                         <label for="@($"{prefix}-gate")">Gate</label>
-                        <select id="@($"{prefix}-gate")" value="@stage.Gate" @onchange="e => EditAsync(() => stage.Gate = Enum.Parse<GatePolicy>(Text(e) ?? stage.Gate.ToString()))">
+                        <select id="@($"{prefix}-gate")" value="@stage.Gate" @onchange="e => EditAsync(() => stage.Gate = Parse(e, stage.Gate))">
                             @foreach (var (gate, word) in Gates)
                             {
                                 <option value="@gate" selected="@(stage.Gate == gate)">@word</option>
@@ -68,11 +68,11 @@
                 </div>
                 <div class="stage-actions">
                     <button type="button" class="button button-quiet" disabled="@(index == 0)" aria-label="@($"Move stage {stage.Id} up")"
-                            @onclick="() => EditAsync(() => Move(index, -1))">Move up</button>
+                            @onclick="() => EditAsync(() => Move(stage, -1))">Move up</button>
                     <button type="button" class="button button-quiet" disabled="@(index == Stages.Count - 1)" aria-label="@($"Move stage {stage.Id} down")"
-                            @onclick="() => EditAsync(() => Move(index, 1))">Move down</button>
+                            @onclick="() => EditAsync(() => Move(stage, 1))">Move down</button>
                     <button type="button" class="button button-quiet" aria-label="@($"Remove stage {stage.Id}")"
-                            @onclick="() => EditAsync(() => Stages.RemoveAt(index))">Remove</button>
+                            @onclick="() => EditAsync(() => Stages.Remove(stage))">Remove</button>
                 </div>
             </fieldset>
         </li>
@@ -144,8 +144,21 @@
     /// <summary>The typed text, or null when blank.</summary>
     private static string? Text(ChangeEventArgs e) => e.Value is string text && !string.IsNullOrWhiteSpace(text) ? text : null;
 
+    /// <summary>
+    /// The posted enum name, or <paramref name="current"/> when it is not one (a tampered or stale post must not break
+    /// the circuit).
+    /// </summary>
+    private static T Parse<T>(ChangeEventArgs e, T current) where T : struct, Enum
+    {
+        var text = Text(e);
+        foreach (var value in Enum.GetValues<T>())
+            if (value.ToString() == text) return value;
+        return current;
+    }
+
     private static void SetEntry(StageForm stage, int at, string? value)
     {
+        if (at < 0 || at >= stage.EntryStatuses.Count) return; // stale index: the list changed since rendering
         if (value is null) stage.EntryStatuses.RemoveAt(at);
         else stage.EntryStatuses[at] = value;
     }
@@ -156,10 +169,11 @@
         if (value is not null) stage.EntryStatuses.Add(value);
     }
 
-    private void Move(int index, int by)
+    private void Move(StageForm stage, int by)
     {
+        var index = Stages.IndexOf(stage);
         var to = index + by;
-        if (to < 0 || to >= Stages.Count) return;
+        if (index < 0 || to < 0 || to >= Stages.Count) return;
         (Stages[index], Stages[to]) = (Stages[to], Stages[index]);
     }
 
