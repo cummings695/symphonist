@@ -5,6 +5,14 @@ using System.Text.Json;
 
 namespace Symphonist.Integrations.GitHub;
 
+/// <summary>A GraphQL response (HTTP 200) carrying an <c>errors</c> array.</summary>
+/// <param name="errorTypes">Each error's <c>type</c> (e.g. <c>NOT_FOUND</c>), empty when GitHub gave none.</param>
+public sealed class GitHubGraphQlException(string message, IReadOnlyList<string> errorTypes)
+    : HttpRequestException(message)
+{
+    public IReadOnlyList<string> ErrorTypes { get; } = errorTypes;
+}
+
 /// <summary>Shared GitHub (github.com) request plumbing: per-request headers, base address, rate limits, error excerpts.</summary>
 internal sealed class GitHubApi(HttpClient http, string token)
 {
@@ -41,16 +49,30 @@ internal sealed class GitHubApi(HttpClient http, string token)
         return JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
     }
 
-    /// <summary>POST to <c>graphql</c>; GraphQL reports most errors with HTTP 200, so an <c>errors</c> array throws.</summary>
+    /// <summary>
+    /// POST to <c>graphql</c>. Non-2xx throws <see cref="HttpRequestException"/>; GraphQL reports most errors with
+    /// HTTP 200, so a non-empty <c>errors</c> array throws <see cref="GitHubGraphQlException"/> joining their messages.
+    /// </summary>
     public async Task<JsonDocument> GraphQlAsync(string query, object variables, CancellationToken ct)
     {
         var doc = await SendAsync(HttpMethod.Post, "graphql", new { query, variables }, ct);
         if (doc.RootElement.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array
             && errors.GetArrayLength() > 0)
         {
-            var text = Excerpt(errors.GetRawText());
+            var messages = new List<string>();
+            var types = new List<string>();
+            foreach (var error in errors.EnumerateArray())
+            {
+                if (error.ValueKind != JsonValueKind.Object) continue;
+                if (error.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String)
+                    messages.Add(m.GetString()!);
+                types.Add(error.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString()! : "");
+            }
+
+            var text = messages.Count > 0 ? string.Join("; ", messages) : errors.GetRawText();
             doc.Dispose();
-            throw new HttpRequestException($"GitHub POST graphql failed: {text}");
+            throw new GitHubGraphQlException($"GitHub POST graphql failed: {Excerpt(text)}", types);
         }
 
         return doc;

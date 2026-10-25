@@ -9,7 +9,7 @@ namespace Symphonist.Integrations;
 public static class BuiltInProviders
 {
     public static ProviderRegistry Registry { get; } = new(
-        [new JiraProvider()],
+        [new JiraProvider(), new GitHubProjectsProvider()],
         [new BitbucketProvider(), new GitHubRepoProvider()],
         [new BitbucketPipelinesProvider(), new GitHubActionsProvider()]);
 }

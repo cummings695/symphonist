@@ -1,0 +1,27 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": { "hasNextPage": false, "endCursor": "items-end" },
+        "nodes": [
+          {
+            "id": "PVTI_12",
+            "fieldValueByName": { "name": "Planned" },
+            "content": {
+              "__typename": "Issue",
+              "id": "I_12",
+              "number": 12,
+              "title": "Add login throttling",
+              "body": "Throttle failed logins.\n\nAfter five attempts, lock for 15 minutes.",
+              "url": "https://github.com/acme/orders/issues/12",
+              "state": "OPEN",
+              "repository": { "name": "orders", "nameWithOwner": "Acme/Orders" },
+              "assignees": { "nodes": [ { "login": "someone-else" }, { "login": "Octo-Dev" } ] },
+              "labels": { "nodes": [ { "name": "claude" } ] }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
