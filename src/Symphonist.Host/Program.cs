@@ -83,6 +83,8 @@ builder.Services.AddSingleton<Orchestrator>();
 builder.Services.AddSingleton<ProjectFileStore>();
 builder.Services.AddSingleton<OnboardingProposer>();
 builder.Services.AddSingleton<ContainerCheck>();
+builder.Services.AddSingleton<SetupChecks>();
+builder.Services.AddSingleton<OnboardingService>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();

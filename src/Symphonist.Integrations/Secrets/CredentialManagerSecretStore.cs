@@ -27,6 +27,10 @@ public sealed class CredentialManagerSecretStore : ISecretStore
         return store.Value.Get(Service, name)?.Password is { Length: > 0 } stored ? stored : null;
     }
 
+    /// <summary>True when <c>SYMPHONIST_SECRET_&lt;NAME&gt;</c> is set (non-empty), so <see cref="Get"/> ignores the store.</summary>
+    public bool IsOverridden(string name) =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(EnvironmentVariable(name)));
+
     public void Set(string name, string value) => store.Value.AddOrUpdate(Service, name, value);
 
     public void Remove(string name) => store.Value.Remove(Service, name);
