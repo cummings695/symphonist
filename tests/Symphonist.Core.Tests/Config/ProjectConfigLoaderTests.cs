@@ -231,6 +231,17 @@ public class ProjectConfigLoaderTests
         Assert.Contains("invalid tracker.projectKey 'acme-1'", ex.Message);
     }
 
+    [Theory]
+    [InlineData("http://acme.atlassian.net")]
+    [InlineData("ftp://acme.atlassian.net")]
+    [InlineData("acme.atlassian.net")]
+    public void Jira_site_must_be_https(string site)
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml().Replace("  site: https://acme.atlassian.net", $"  site: {site}")));
+        Assert.Contains($"tracker.site must be an https:// URL (got '{site}')", ex.Message);
+    }
+
     private static ProjectConfig LoadYaml(string yaml)
     {
         var dir = Directory.CreateTempSubdirectory("symphonist-cfg").FullName;

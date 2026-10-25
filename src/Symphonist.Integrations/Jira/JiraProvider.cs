@@ -23,7 +23,11 @@ public sealed partial class JiraProvider : ITrackerProvider
         var dto = section.Bind<Dto>();
         if (dto.ProjectKey is not null && !ProjectKeyPattern().IsMatch(dto.ProjectKey))
             throw new ProjectConfigException($"invalid tracker.projectKey '{dto.ProjectKey}'");
-        return new JiraTrackerConfig(section.Type, section.TokenSecret, new Uri(section.Required(dto.Site, "site")),
+        var site = section.Required(dto.Site, "site");
+        // The API token travels with every request: never over plain http.
+        if (!Uri.TryCreate(site, UriKind.Absolute, out var siteUri) || siteUri.Scheme != Uri.UriSchemeHttps)
+            throw new ProjectConfigException($"tracker.site must be an https:// URL (got '{site}')");
+        return new JiraTrackerConfig(section.Type, section.TokenSecret, siteUri,
             section.Required(dto.Email, "email"), section.Required(dto.Jql, "jql"), dto.ProjectKey);
     }
 
