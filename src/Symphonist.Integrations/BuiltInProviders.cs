@@ -11,5 +11,5 @@ public static class BuiltInProviders
     public static ProviderRegistry Registry { get; } = new(
         [new JiraProvider()],
         [new BitbucketProvider(), new GitHubRepoProvider()],
-        [new BitbucketPipelinesProvider()]);
+        [new BitbucketPipelinesProvider(), new GitHubActionsProvider()]);
 }
