@@ -241,11 +241,11 @@
                 }
                 @if (model.SpecPath is { Length: > 0 } spec)
                 {
-                    <div><span class="link-label">Spec</span> <code>@spec</code></div>
+                    <div><span class="link-label">Spec</span> <a href="@DocHref("spec")" class="doc-link" data-spec-link><code>@spec</code></a></div>
                 }
                 @if (model.PlanPath is { Length: > 0 } plan)
                 {
-                    <div><span class="link-label">Plan</span> <code>@plan</code></div>
+                    <div><span class="link-label">Plan</span> <a href="@DocHref("plan")" class="doc-link" data-plan-link><code>@plan</code></a></div>
                 }
             </section>
         </aside>
@@ -278,6 +278,9 @@
         : card.WaitingOnYou ? "summary-waiting"
         : card.Status == StageStatus.Blocked ? "summary-blocked"
         : "";
+
+    /// <summary>The page that renders the ticket's stored spec or plan (the path itself is never put in the address).</summary>
+    private string DocHref(string kind) => $"/tickets/{Uri.EscapeDataString(Project)}/{Uri.EscapeDataString(Key)}/docs/{kind}";
 
     protected override void OnInitialized() => Notifier.Changed += OnTicketChanged;
 

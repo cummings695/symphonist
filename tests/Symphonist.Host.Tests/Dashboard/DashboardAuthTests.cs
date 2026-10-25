@@ -118,6 +118,34 @@ public sealed class DashboardAuthTests : IDisposable
         Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
     }
 
+    [Theory]
+    [InlineData("/tickets/orders/ORD-1/docs/plan")]
+    [InlineData("/tickets/orders/ORD-1/docs/spec")]
+    public async Task Document_page_requires_sign_in(string path)
+    {
+        var response = await Client().GetAsync(path);
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
+    }
+
+    [Fact]
+    public async Task Document_page_with_unknown_kind_is_404()
+    {
+        var at = DateTimeOffset.Parse("2026-10-21T12:00:00Z");
+        await store.SaveAsync(new Ticket
+        {
+            Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-42", Title = "Seeded", StageId = "plan",
+            Status = StageStatus.AwaitingApproval, CreatedAt = at, UpdatedAt = at, WaitingSince = at, PlanPath = "docs/plan.md",
+        }, default);
+        var client = Client();
+        await SignInAsync(client);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/tickets/orders/ORD-42/docs/plan")).StatusCode);
+        var response = await client.GetAsync("/tickets/orders/ORD-42/docs/readme");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("Not found", await response.Content.ReadAsStringAsync());
+    }
+
     [Fact]
     public async Task Missing_ticket_page_is_404_with_a_not_found_page()
     {

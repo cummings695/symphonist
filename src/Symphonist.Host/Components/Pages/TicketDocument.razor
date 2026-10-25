@@ -1,0 +1,168 @@
+@page "/tickets/{Project}/{Key}/docs/{Kind}"
+@using Microsoft.AspNetCore.Http
+@using Symphonist.Core.Integrations
+@using Symphonist.Core.Storage
+@implements IDisposable
+@inject ProjectRegistry Projects
+@inject ITicketStore Store
+@inject IIntegrationFactory Integrations
+@inject WorkspaceFiles Files
+@inject DashboardChrome Chrome
+@inject NavigationManager Navigation
+@inject ILogger<TicketDocument> Log
+
+@* A ticket's spec or plan, read from its workspace. The path is never taken from the address: only the one the ticket
+   stores for this kind is read, and WorkspaceFiles keeps it inside the workspace. *@
+<nav class="crumbs" aria-label="Breadcrumb">
+    <a href="@($"/?project={Uri.EscapeDataString(Project)}")">@(projectName ?? Project)</a>
+    <span class="crumb-sep" aria-hidden="true">/</span>
+    <a href="@TicketHref">@Key</a>
+    @if (Label is { } crumb && !notFound)
+    {
+        <span class="crumb-sep" aria-hidden="true">/</span>
+        <span aria-current="page">@crumb</span>
+    }
+</nav>
+
+<article class="doc @(notFound ? "not-found" : "")" data-doc-loaded="@loaded">
+    <header class="doc-head">
+        <h1>@Heading</h1>
+        @if (notFound)
+        {
+            <p>There is no such document for ticket @Key in project @Project. <a href="@TicketHref">Back to the ticket</a></p>
+        }
+        else if (path is not null)
+        {
+            <p class="doc-meta">
+                <code data-doc-path>@path</code>
+                @if (sourceUrl is not null)
+                {
+                    <a href="@sourceUrl" target="_blank" rel="noopener noreferrer" data-doc-source>Open on Bitbucket<span aria-hidden="true"> ↗</span></a>
+                }
+            </p>
+        }
+    </header>
+    @if (!loaded)
+    {
+        <p class="loading">Loading the @(Label?.ToLowerInvariant() ?? "document")…</p>
+    }
+    else if (problem is not null)
+    {
+        <p class="doc-problem" role="status" data-doc-problem>@problem</p>
+    }
+    else if (html is not null)
+    {
+        @* The one MarkupString in the dashboard: MarkdownView escapes all text and strips raw HTML, unsafe links and images. *@
+        <div class="prose" data-doc-body>@((MarkupString)html)</div>
+    }
+</article>
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private string? loadedFor;
+    private bool loaded;
+    private bool notFound;
+    private string? projectName;
+    private string? path;
+    private Uri? sourceUrl;
+    private string? problem;
+    private string? html;
+
+    [Parameter] public string Project { get; set; } = "";
+
+    [Parameter] public string Key { get; set; } = "";
+
+    /// <summary>Exactly "spec" or "plan"; anything else is not found.</summary>
+    [Parameter] public string Kind { get; set; } = "";
+
+    /// <summary>Set while prerendering, so a missing ticket or document answers 404 with the not-found page.</summary>
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    private string? Label => Kind switch { "spec" => "Spec", "plan" => "Plan", _ => null };
+
+    private string TicketHref => $"/tickets/{Uri.EscapeDataString(Project)}/{Uri.EscapeDataString(Key)}";
+
+    private string Heading =>
+        notFound ? "Not found"
+        : path is { Length: > 0 } p ? $"{Label}: {FileName(p)}"
+        : Label ?? Key;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var current = $"{Project}/{Key}/{Kind}";
+        if (loadedFor == current) return;
+        loadedFor = current;
+        (loaded, notFound, projectName, path, sourceUrl, problem, html) = (false, false, null, null, null, null, null);
+        Chrome.ClearForNavigation(); // the previous page's message and errors
+        Chrome.SetPage(Label is { } label ? $"{label} · {Key}" : Key, Project);
+        await LoadAsync(current);
+        // While prerendering, answer 404 with the not-found page (a bare status would reach the browser with no body).
+        if (notFound && HttpContext is { Response.HasStarted: false }) Navigation.NotFound();
+    }
+
+    private async Task LoadAsync(string current)
+    {
+        try
+        {
+            var project = Projects.Projects.FirstOrDefault(p => p.Id == Project);
+            projectName = project?.Name;
+            var ticket = Label is null ? null : await Store.FindAsync(Project, Key, disposed.Token);
+            if (disposed.IsCancellationRequested || loadedFor != current) return;
+            if (ticket is null)
+            {
+                notFound = true;
+                return;
+            }
+
+            path = Kind == "spec" ? ticket.SpecPath : ticket.PlanPath;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                path = null;
+                problem = $"No {Kind} has been recorded for this ticket yet.";
+                return;
+            }
+
+            sourceUrl = SourceUrl(project, ticket.Branch, path);
+            var file = await Files.ReadAsync(ticket.ProjectId, ticket.Key, path, disposed.Token);
+            if (disposed.IsCancellationRequested || loadedFor != current) return;
+            problem = file.Problem;
+            html = file.Text is { } text ? MarkdownView.ToHtml(text) : null;
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Loading the {Kind} of {Project}/{Key} failed", Kind, Project, Key);
+            problem = $"Could not load the {Kind}: {e.Message}";
+        }
+        finally
+        {
+            if (loadedFor == current) loaded = true;
+        }
+    }
+
+    /// <summary>The file on the ticket's branch at the repository host, or null when the integrations cannot be created.</summary>
+    private Uri? SourceUrl(ProjectConfig? project, string? branch, string file)
+    {
+        if (project is null || string.IsNullOrEmpty(branch)) return null;
+        try
+        {
+            return Integrations.Create(project).SourceControl.BranchFileUrl(branch, file);
+        }
+        catch (Exception e)
+        {
+            Log.LogDebug(e, "No source link for {Project}/{Key}", Project, Key);
+            return null;
+        }
+    }
+
+    private static string FileName(string p) => p.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? p;
+
+    public void Dispose()
+    {
+        disposed.Cancel();
+        disposed.Dispose();
+    }
+}

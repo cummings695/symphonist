@@ -536,4 +536,24 @@ public sealed class TicketDetailComponentTests : IDisposable
         Assert.Equal("/", cut.Find("a").GetAttribute("href"));
         Assert.Empty(cut.FindAll(".back"));
     }
+
+    [Fact]
+    public async Task Spec_and_plan_paths_link_to_the_document_pages()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, t =>
+        {
+            t.SpecPath = "docs/specs/2026-10-24-ORD-1-spec.md";
+            t.PlanPath = "docs/plans/2026-10-24-ORD-1-plan.md";
+        });
+        var cut = Loaded(Render());
+
+        var spec = cut.Find("a[data-spec-link]");
+        Assert.Equal("/tickets/orders/ORD-1/docs/spec", spec.GetAttribute("href"));
+        Assert.Equal("docs/specs/2026-10-24-ORD-1-spec.md", spec.TextContent.Trim());
+        Assert.Null(spec.GetAttribute("target"));
+        var plan = cut.Find("a[data-plan-link]");
+        Assert.Equal("/tickets/orders/ORD-1/docs/plan", plan.GetAttribute("href"));
+        Assert.Equal("docs/plans/2026-10-24-ORD-1-plan.md", plan.TextContent.Trim());
+        Assert.Null(plan.GetAttribute("target"));
+    }
 }
