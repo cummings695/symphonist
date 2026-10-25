@@ -19,6 +19,24 @@ public sealed class AgentRunEntity
     public string RawLogPath { get; set; } = "";
     public string? Summary { get; set; }
     public bool IsReview { get; set; }
+    public bool IsEvidence { get; set; }
+}
+
+public sealed class EvidenceEntity
+{
+    public long Id { get; set; }
+    public Guid TicketId { get; set; }
+    public string ProjectId { get; set; } = "";
+    public string StageId { get; set; } = "";
+    public DateTimeOffset WaitingSince { get; set; }
+    public DateTimeOffset At { get; set; }
+    public string? Head { get; set; }
+    public string? ReportJson { get; set; }
+    public bool HasIssues { get; set; }
+    public string? Error { get; set; }
+    /// <summary>JSON array of strings.</summary>
+    public string ScreenshotsJson { get; set; } = "[]";
+    public bool Posted { get; set; }
 }
 
 public sealed class GateReviewEntity
@@ -59,6 +77,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
     public DbSet<AgentRunEntity> AgentRuns => Set<AgentRunEntity>();
     public DbSet<GateReviewEntity> GateReviews => Set<GateReviewEntity>();
     public DbSet<GateDecisionEntity> GateDecisions => Set<GateDecisionEntity>();
+    public DbSet<EvidenceEntity> Evidence => Set<EvidenceEntity>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -76,6 +95,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(t => t.WaitingSince).HasConversion(dto);
             e.Property(t => t.ClaudeCommentsHandledAt).HasConversion(dto);
             e.Property(t => t.MergeAcceptedAt).HasConversion(dto);
+            e.Property(t => t.PrCommentsHandledAt).HasConversion(dto);
             e.Property(t => t.Risk).HasConversion<string>();
         });
 
@@ -111,6 +131,14 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(x => x.WaitingSince).HasConversion(dto);
             e.Property(x => x.At).HasConversion(dto);
             e.Property(x => x.Decision).HasConversion<string>();
+        });
+
+        b.Entity<EvidenceEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.TicketId);
+            e.Property(x => x.WaitingSince).HasConversion(dto);
+            e.Property(x => x.At).HasConversion(dto);
         });
     }
 }

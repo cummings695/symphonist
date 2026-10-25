@@ -46,6 +46,15 @@ public sealed class Ticket
     /// <summary>A reviewer run is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
     public bool ReviewDue { get; set; }
 
+    /// <summary>Evidence is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
+    public bool EvidenceDue { get; set; }
+
+    /// <summary>The Created time of the newest PR "@claude" comment acted on; older ones are never acted on again.</summary>
+    public DateTimeOffset? PrCommentsHandledAt { get; set; }
+
+    /// <summary>PR comments (PrFeedback JSON) the next implement run addresses; cleared when that run succeeds or the stage is entered.</summary>
+    public string? PrFeedbackJson { get; set; }
+
     /// <summary>The latest reviewer verdict (the card's badge); null until a review has finished.</summary>
     public RiskLevel? Risk { get; set; }
 

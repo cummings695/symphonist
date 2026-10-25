@@ -75,6 +75,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             db.AgentRuns.RemoveRange(await db.AgentRuns.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
             db.GateReviews.RemoveRange(await db.GateReviews.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
             db.GateDecisions.RemoveRange(await db.GateDecisions.Where(d => d.TicketId == ticket.Id).ToListAsync(ct));
+            db.Evidence.RemoveRange(await db.Evidence.Where(x => x.TicketId == ticket.Id).ToListAsync(ct));
             db.Tickets.Remove(ticket);
             await db.SaveChangesAsync(ct);
             return true;
@@ -99,7 +100,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             {
                 TicketId = run.TicketId, StageId = run.StageId, StartedAt = run.StartedAt, Duration = run.Duration,
                 Succeeded = run.Succeeded, CostUsd = run.CostUsd, Error = run.Error, RawLogPath = run.RawLogPath,
-                Summary = run.Summary, IsReview = run.IsReview,
+                Summary = run.Summary, IsReview = run.IsReview, IsEvidence = run.IsEvidence,
             });
             await db.SaveChangesAsync(ct);
         }
@@ -112,7 +113,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var runs = await db.AgentRuns.AsNoTracking().Where(r => r.TicketId == ticketId)
             .OrderBy(r => r.StartedAt).ThenBy(r => r.Id).ToListAsync(ct);
         return runs.Select(r => new AgentRunRecord(r.TicketId, r.StageId, r.StartedAt, r.Duration, r.Succeeded,
-            r.CostUsd, r.Error, r.RawLogPath, r.Summary, r.IsReview)).ToList();
+            r.CostUsd, r.Error, r.RawLogPath, r.Summary, r.IsReview, r.IsEvidence)).ToList();
     }
 
     public async Task AddGateReviewAsync(GateReview review, CancellationToken ct)
@@ -190,6 +191,44 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             new GateVerdict(r.Risk, r.Summary, Strings(r.ReasonsJson), Strings(r.CheckedJson), Strings(r.AreasJson), r.Error));
 
     private static List<string> Strings(string json) => JsonSerializer.Deserialize<List<string>>(json) ?? [];
+
+    public async Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.Evidence.Add(new EvidenceEntity
+            {
+                TicketId = record.TicketId, ProjectId = record.ProjectId, StageId = record.StageId,
+                WaitingSince = record.WaitingSince, At = record.At, Head = record.Head, ReportJson = record.ReportJson,
+                HasIssues = record.HasIssues, Error = record.Error,
+                ScreenshotsJson = JsonSerializer.Serialize(record.Screenshots), Posted = record.Posted,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.Evidence.AsNoTracking().Where(x => x.TicketId == ticketId).ToListAsync(ct);
+        // Ordered client-side: At is stored as a binary long.
+        return rows.OrderByDescending(x => x.At).ThenByDescending(x => x.Id).Select(ToRecord).ToList();
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.Evidence.AsNoTracking().Select(x => new { x.TicketId, x.At, x.Id, x.HasIssues }).ToListAsync(ct);
+        return rows.GroupBy(x => x.TicketId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.At).ThenByDescending(x => x.Id).First().HasIssues);
+    }
+
+    private static EvidenceRecord ToRecord(EvidenceEntity x) =>
+        new(x.TicketId, x.ProjectId, x.StageId, x.WaitingSince, x.At, x.Head, x.ReportJson, x.HasIssues, x.Error,
+            Strings(x.ScreenshotsJson), x.Posted);
 
     public async Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
     {

@@ -47,6 +47,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("EvidenceDue")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Feedback")
                         .HasColumnType("TEXT");
 
@@ -70,6 +73,12 @@ namespace Symphonist.Integrations.Storage.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("PlanPath")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("PrCommentsHandledAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PrFeedbackJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ProjectId")
@@ -168,6 +177,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<string>("Error")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("IsEvidence")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("IsReview")
                         .HasColumnType("INTEGER");
 
@@ -196,6 +208,55 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.HasIndex("TicketId");
 
                     b.ToTable("AgentRuns");
+                });
+
+            modelBuilder.Entity("Symphonist.Integrations.Storage.EvidenceEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("At")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("HasIssues")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Head")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Posted")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportJson")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ScreenshotsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StageId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("WaitingSince")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId");
+
+                    b.ToTable("Evidence");
                 });
 
             modelBuilder.Entity("Symphonist.Integrations.Storage.GateDecisionEntity", b =>

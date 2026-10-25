@@ -470,4 +470,87 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Null(Assert.Single(await _store.GateReviewsAsync(gone.Id, default)).Decision);
         Assert.Equal(1, (await _store.ReviewAgreementAsync(null, default)).Sum(a => a.Decided));
     }
+
+    private static EvidenceRecord Ev(Ticket t, DateTimeOffset at, bool issues = false, string? report = "{\"a\":1}") =>
+        new(t.Id, t.ProjectId, "implement", Now, at, "abc123", report, issues, null, ["a.png", "b/c.png"], Posted: true);
+
+    [Fact]
+    public async Task Evidence_records_round_trip_newest_first()
+    {
+        var t = NewTicket("E1", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(t, default);
+        await _store.AddEvidenceAsync(Ev(t, Now.AddMinutes(1)) with { Head = "old" }, default);
+        await _store.AddEvidenceAsync(Ev(t, Now.AddMinutes(2)) with { Head = "new", Error = "boom" }, default);
+
+        var all = await _store.EvidenceAsync(t.Id, default);
+
+        Assert.Equal(["new", "old"], all.Select(x => x.Head));
+        Assert.Equal(["a.png", "b/c.png"], all[0].Screenshots);
+        Assert.Equal("{\"a\":1}", all[0].ReportJson);
+        Assert.Equal((Now, Now.AddMinutes(2), "boom", true), (all[0].WaitingSince, all[0].At, all[0].Error, all[0].Posted));
+    }
+
+    [Fact]
+    public async Task Evidence_issues_reports_latest_record_per_ticket()
+    {
+        var a = NewTicket("E2", "implement", StageStatus.AwaitingApproval);
+        var b = NewTicket("E3", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(a, default);
+        await _store.SaveAsync(b, default);
+        await _store.AddEvidenceAsync(Ev(a, Now.AddMinutes(1), issues: true), default);
+        await _store.AddEvidenceAsync(Ev(a, Now.AddMinutes(2), issues: false), default);
+        await _store.AddEvidenceAsync(Ev(b, Now.AddMinutes(1), issues: true), default);
+
+        var issues = await _store.EvidenceIssuesAsync(default);
+
+        Assert.False(issues[a.Id]);
+        Assert.True(issues[b.Id]);
+        Assert.Equal(2, issues.Count);
+    }
+
+    [Fact]
+    public async Task Delete_removes_evidence()
+    {
+        var gone = NewTicket("E4", "implement", StageStatus.Pending);
+        var kept = NewTicket("E5", "implement", StageStatus.Pending);
+        await _store.SaveAsync(gone, default);
+        await _store.SaveAsync(kept, default);
+        await _store.AddEvidenceAsync(Ev(gone, Now), default);
+        await _store.AddEvidenceAsync(Ev(kept, Now), default);
+
+        Assert.True(await _store.DeleteAsync("orders", "E4", default));
+
+        Assert.Empty(await _store.EvidenceAsync(gone.Id, default));
+        Assert.Single(await _store.EvidenceAsync(kept.Id, default));
+    }
+
+    [Fact]
+    public async Task New_ticket_fields_persist()
+    {
+        var t = NewTicket("E6", "implement", StageStatus.AwaitingApproval);
+        t.EvidenceDue = true;
+        t.PrCommentsHandledAt = new DateTimeOffset(2026, 10, 21, 12, 0, 0, 123, TimeSpan.Zero);
+        t.PrFeedbackJson = "[{\"id\":\"issue:1\"}]";
+        await _store.SaveAsync(t, default);
+
+        var found = await _store.FindAsync("orders", "E6", default);
+
+        Assert.True(found!.EvidenceDue);
+        Assert.Equal(t.PrCommentsHandledAt.Value.Ticks, found.PrCommentsHandledAt!.Value.Ticks);
+        Assert.Equal(t.PrFeedbackJson, found.PrFeedbackJson);
+    }
+
+    [Fact]
+    public async Task Agent_run_is_evidence_persists()
+    {
+        var t = NewTicket("E7", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(t, default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "implement", Now, TimeSpan.FromSeconds(3), true, 0.2m, null, "r.json", "s", IsEvidence: true), default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "implement", Now.AddSeconds(5), TimeSpan.FromSeconds(3), true, null, null, "r2.json"), default);
+
+        var runs = await _store.AgentRunsAsync(t.Id, default);
+
+        Assert.Equal([true, false], runs.Select(r => r.IsEvidence));
+        Assert.False(runs[0].IsReview);
+    }
 }

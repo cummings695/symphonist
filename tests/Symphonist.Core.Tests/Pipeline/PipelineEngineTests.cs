@@ -607,4 +607,94 @@ public class PipelineEngineTests
         t.ReviewDue = false;
         Assert.False(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active), t));
     }
+
+    private static ProjectConfig Evidence(EvidenceMode mode, ReviewMode review = ReviewMode.Off) =>
+        With("implement", GatePolicy.Human, review) with { Evidence = P.Evidence with { Mode = mode } };
+
+    [Fact] public void Gate_round_owes_evidence_for_gated_implement()
+    {
+        var on = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), on, Now);
+        Assert.True(on.EvidenceDue);
+
+        var plan = At("plan");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), plan, Now);
+        Assert.False(plan.EvidenceDue);
+
+        var off = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.Off), off, Now);
+        Assert.False(off.EvidenceDue);
+    }
+
+    [Fact] public void Waits_on_evidence_only_after_owed_review()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true; t.ReviewDue = true;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.ReviewDue = false;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+        t.WaitingSince = null;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.WaitingSince = Gate; t.EvidenceDue = false;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
+    [Fact] public void Decisions_clear_evidence_due()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var approve = Awaiting("implement"); approve.WaitingSince = Gate; approve.EvidenceDue = true;
+        PipelineEngine.Approve(p, approve, Now);
+        Assert.False(approve.EvidenceDue);
+
+        var back = Awaiting("implement"); back.WaitingSince = Gate; back.EvidenceDue = true;
+        PipelineEngine.SendBack(p, back, "fix", null, Now);
+        Assert.False(back.EvidenceDue);
+
+        var block = Awaiting("implement"); block.WaitingSince = Gate; block.EvidenceDue = true;
+        PipelineEngine.Block(block, "no", Now);
+        Assert.False(block.EvidenceDue);
+    }
+
+    [Fact] public void Merge_hold_owes_evidence_again()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = At("implement", StageStatus.Approved); t.WaitingSince = Gate;
+        PipelineEngine.MergeHeld(p, t, "moved", Now);
+        Assert.True(t.EvidenceDue);
+
+        var off = At("implement", StageStatus.Approved); off.WaitingSince = Gate; off.EvidenceDue = true;
+        PipelineEngine.MergeHeld(Evidence(EvidenceMode.Off), off, "moved", Now);
+        Assert.False(off.EvidenceDue);
+    }
+
+    [Fact] public void Evidence_completed_applies_to_same_round_only()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true;
+
+        var other = PipelineEngine.EvidenceCompleted(p, t, Gate.AddSeconds(1), "done", Now);
+        Assert.False(other.Changed);
+        Assert.Equal("evidence for implement finished after the gate was decided; not applied", other.Message);
+        Assert.True(t.EvidenceDue);
+
+        var same = PipelineEngine.EvidenceCompleted(p, t, Gate, "evidence gathered", Now);
+        Assert.True(same.Changed);
+        Assert.False(t.EvidenceDue);
+        Assert.Equal("evidence gathered", same.Message);
+
+        var notWaiting = At("implement", StageStatus.Approved); notWaiting.WaitingSince = Gate;
+        Assert.False(PipelineEngine.EvidenceCompleted(p, notWaiting, Gate, "x", Now).Changed);
+    }
+
+    [Fact] public void Send_back_and_success_clear_pr_feedback()
+    {
+        var p = Evidence(EvidenceMode.Off);
+        var t = At("implement", StageStatus.Running); t.PrFeedbackJson = "[]";
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Null(t.PrFeedbackJson);
+
+        var back = Awaiting("implement"); back.WaitingSince = Gate; back.PrFeedbackJson = "[]";
+        PipelineEngine.SendBack(p, back, "fix", null, Now);
+        Assert.Null(back.PrFeedbackJson);
+    }
 }

@@ -35,6 +35,7 @@ public static class PipelineEngine
         var pending = t.PendingSourceStatus;
         t.PendingSourceStatus = null;
         t.Feedback = null;
+        t.PrFeedbackJson = null;
 
         // Apply the decision only while the card still says so; a later move (e.g. back again) overrides it.
         string? discarded = null;
@@ -55,6 +56,7 @@ public static class PipelineEngine
             t.UpdatedAt = now;
             t.Risk = null; // until this round's review finishes
             ClearApprovedHeads(t); // a new round
+            t.EvidenceDue = p.WantsEvidence(stage);
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             t.ReviewDue = p.Reviews(stage);
             outcome = new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
@@ -88,6 +90,7 @@ public static class PipelineEngine
         var stage = p.Stage(t.StageId);
         var decision = DecisionOn(t, GateDecision.Approved);
         t.ReviewDue = false;
+        t.EvidenceDue = false;
         ClearApprovedHeads(t); // a human approval pins no commit; an auto-approval sets them afterwards
         if (HasPostApprovalAction(stage.Kind))
         {
@@ -140,6 +143,27 @@ public static class PipelineEngine
         return new(true, null, message);
     }
 
+    /// <summary>
+    /// The gate waits on evidence: it is owed for the round, review (if any) is done, and the stage still wants it.
+    /// </summary>
+    public static bool WaitsOnEvidence(ProjectConfig p, Ticket t) =>
+        t.Status == StageStatus.AwaitingApproval && t.EvidenceDue && t.WaitingSince is not null
+        && p.WantsEvidence(p.Stage(t.StageId)) && !(t.ReviewDue && p.Reviews(p.Stage(t.StageId)));
+
+    /// <summary>
+    /// Evidence for the round (<paramref name="waitingSince"/>) finished: mark it no longer owed. Evidence never decides
+    /// the gate. A result for a round already decided is not applied.
+    /// </summary>
+    public static TransitionOutcome EvidenceCompleted(ProjectConfig p, Ticket t, DateTimeOffset waitingSince, string message,
+        DateTimeOffset now)
+    {
+        if (t.Status != StageStatus.AwaitingApproval || t.WaitingSince != waitingSince)
+            return NoChange($"evidence for {t.StageId} finished after the gate was decided; not applied");
+        t.EvidenceDue = false;
+        t.UpdatedAt = now;
+        return new(true, null, message);
+    }
+
     /// <summary>Merge holds at a stage after which the next round waits on the developer instead of a review.</summary>
     public const int MaxMergeHoldsBeforeDeveloper = 2;
 
@@ -163,6 +187,7 @@ public static class PipelineEngine
         t.Status = StageStatus.AwaitingApproval;
         t.WaitingSince = since;
         t.ReviewDue = !toDeveloper && p.Reviews(stage);
+        t.EvidenceDue = p.WantsEvidence(stage);
         t.Risk = null;
         t.Attempts = 0;
         t.UpdatedAt = now;
@@ -226,6 +251,7 @@ public static class PipelineEngine
         t.PendingSourceStatus = null;
         t.WaitingSince = null; // the gate round ends: a late review or click of it must not apply
         t.ReviewDue = false;
+        t.EvidenceDue = false;
         t.UpdatedAt = now;
         return new(true, null, $"blocked: {reason}");
     }
@@ -285,8 +311,10 @@ public static class PipelineEngine
         t.Attempts = 0;
         t.BlockedReason = null;
         t.Feedback = null;
+        t.PrFeedbackJson = null;
         t.WaitingSince = null;
         t.ReviewDue = false;
+        t.EvidenceDue = false;
         t.PendingSourceStatus = null;
         t.StageStartedAt = now;
         t.UpdatedAt = now;

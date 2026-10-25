@@ -306,7 +306,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
 
     private async Task<string?> StageSummaryAsync(Ticket t, CancellationToken ct) =>
         (await store.AgentRunsAsync(t.Id, ct))
-        .Where(r => r.StageId == t.StageId && !r.IsReview)
+        .Where(r => r.StageId == t.StageId && !r.IsReview && !r.IsEvidence)
         .MaxBy(r => r.StartedAt)?.Summary;
 
     private static string Level(RiskLevel risk) => risk == RiskLevel.Low ? "low" : "high";

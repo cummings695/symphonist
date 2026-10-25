@@ -18,6 +18,7 @@ public sealed class FakeTicketStore : ITicketStore
     public List<AgentRunRecord> AgentRuns { get; } = [];
     public List<GateReview> GateReviews { get; } = [];
     public List<GateDecisionRecord> GateDecisions { get; } = [];
+    public List<EvidenceRecord> Evidence { get; } = [];
 
     /// <summary>Thrown from ResetInterruptedRunsAsync when set.</summary>
     public Exception? ResetError { get; set; }
@@ -164,8 +165,29 @@ public sealed class FakeTicketStore : ITicketStore
             AgentRuns.RemoveAll(r => r.TicketId == ticket.Id);
             GateReviews.RemoveAll(r => r.TicketId == ticket.Id);
             GateDecisions.RemoveAll(d => d.TicketId == ticket.Id);
+            Evidence.RemoveAll(x => x.TicketId == ticket.Id);
             return Task.FromResult(true);
         }
+    }
+
+    public Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        lock (sync) Evidence.Add(record);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<EvidenceRecord>>(
+                Evidence.Where(x => x.TicketId == ticketId).Reverse().OrderByDescending(x => x.At).ToList());
+    }
+
+    public Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyDictionary<Guid, bool>>(Evidence.GroupBy(x => x.TicketId)
+                .ToDictionary(g => g.Key, g => g.Reverse().OrderByDescending(x => x.At).First().HasIssues));
     }
 
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)

@@ -45,6 +45,16 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
         notifier.Notify();
     }
 
+    public async Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        await inner.AddEvidenceAsync(record, ct);
+        notifier.Notify();
+    }
+
+    public Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct) => inner.EvidenceAsync(ticketId, ct);
+
+    public Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct) => inner.EvidenceIssuesAsync(ct);
+
     public async Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct)
     {
         await inner.AddGateDecisionAsync(decision, ct);
