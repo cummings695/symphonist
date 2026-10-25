@@ -175,6 +175,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     {
         var nonce = UntrustedFence.NewNonce();
         values["pr.fence_id"] = nonce;
+        values["ticket.description"] = UntrustedFence.Wrap(nonce, values["ticket.description"] ?? "");
 
         var blocks = new List<string>();
         var code = new List<string>();

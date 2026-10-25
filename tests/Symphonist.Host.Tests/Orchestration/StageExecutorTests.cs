@@ -701,6 +701,24 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Contains("rename the method", request.Prompt);
     }
 
+    [Fact] public async Task Fix_run_prompt_has_the_ticket_context()
+    {
+        agent.Results.Enqueue(FixResult(("issue:1", "done")));
+        var t = FixTicket(Mine("issue:1"));
+        t.SpecPath = "docs/spec.md";
+        t.PlanPath = "docs/plan.md";
+
+        await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        var prompt = Assert.Single(agent.Prompts).ReplaceLineEndings("\n");
+        var fence = System.Text.RegularExpressions.Regex.Match(prompt, "<untrusted-([0-9a-f]{32})>").Groups[1].Value;
+        Assert.NotEmpty(fence);
+        Assert.Contains("https://jira.example/browse/ORD-1", prompt);
+        Assert.Contains("docs/spec.md", prompt);
+        Assert.Contains("docs/plan.md", prompt);
+        Assert.Contains($"<untrusted-{fence}>\nExport orders to CSV\n</untrusted-{fence}>", prompt);
+    }
+
     [Fact] public async Task Inline_comment_includes_code_context()
     {
         var ws = Path.Combine(home, "ws");

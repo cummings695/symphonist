@@ -120,7 +120,7 @@ public class PromptRendererTests
 
         PromptRenderer.Validate(prompt);
         foreach (var placeholder in new[] { "{{pr.fence_id}}", "{{pr.comments}}", "{{pr.code}}", "{{feedback}}", "{{branch}}",
-                     "{{ticket.key}}" })
+                     "{{ticket.key}}", "{{ticket.url}}", "{{ticket.description}}", "{{spec_path}}", "{{plan_path}}" })
             Assert.Contains(placeholder, prompt);
     }
 
