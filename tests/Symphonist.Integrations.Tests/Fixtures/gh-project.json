@@ -1,0 +1,19 @@
+{
+  "data": {
+    "repositoryOwner": {
+      "projectV2": {
+        "id": "PVT_kwDOA1",
+        "field": {
+          "id": "PVTSSF_status",
+          "options": [
+            { "id": "opt-backlog", "name": "Backlog" },
+            { "id": "opt-planned", "name": "Planned" },
+            { "id": "opt-progress", "name": "In Progress" },
+            { "id": "opt-review", "name": "In Review" },
+            { "id": "opt-done", "name": "Done" }
+          ]
+        }
+      }
+    }
+  }
+}

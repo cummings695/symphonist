@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Symphonist.Core.Integrations.Providers;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -13,7 +14,8 @@ public static partial class ProjectConfigLoader
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
 
-    public static ProjectConfig Load(string yamlPath)
+    /// <summary>Loads one project file; the tracker, repo and build sections are parsed by <paramref name="providers"/>.</summary>
+    public static ProjectConfig Load(string yamlPath, ProviderRegistry providers)
     {
         var fullPath = Path.GetFullPath(yamlPath);
         Dto dto;
@@ -29,7 +31,7 @@ public static partial class ProjectConfigLoader
 
         try
         {
-            return Map(dto, Path.GetDirectoryName(fullPath)!);
+            return Map(dto, Path.GetDirectoryName(fullPath)!, providers);
         }
         catch (ProjectConfigException ex)
         {
@@ -37,8 +39,8 @@ public static partial class ProjectConfigLoader
         }
     }
 
-    public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory) =>
-        ProjectFiles(projectsDirectory).Select(Load).ToList();
+    public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory, ProviderRegistry providers) =>
+        ProjectFiles(projectsDirectory).Select(f => Load(f, providers)).ToList();
 
     /// <summary>The project files (<c>*.yaml</c>, <c>*.yml</c>) in <paramref name="projectsDirectory"/>, in ordinal order.</summary>
     public static IReadOnlyList<string> ProjectFiles(string projectsDirectory)
@@ -51,16 +53,24 @@ public static partial class ProjectConfigLoader
             .ToList();
     }
 
-    private static ProjectConfig Map(Dto d, string dir)
+    private static ProjectConfig Map(Dto d, string dir, ProviderRegistry providers)
     {
         var id = Required(d.Id, "id");
-        var tracker = d.Tracker ?? throw Missing("tracker");
-        var repo = d.Repo ?? throw Missing("repo");
-        var build = d.Build ?? throw Missing("build");
+        var trackerValues = d.Tracker ?? throw Missing("tracker");
+        var repoValues = d.Repo ?? throw Missing("repo");
+        var buildValues = d.Build ?? throw Missing("build");
         var agent = d.Agent ?? throw Missing("agent");
 
-        Supported("tracker.type", Required(tracker.Type, "tracker.type"), "jira");
-        Supported("repo.type", Required(repo.Type, "repo.type"), "bitbucket");
+        var trackerSection = new TrackerSection(trackerValues, dir);
+        var tracker = providers.Tracker(trackerSection.Type).Parse(trackerSection);
+        var repoSection = new RepoSection(repoValues, dir);
+        var repo = providers.Repo(repoSection.Type).Parse(repoSection);
+        var buildSection = new BuildSection(buildValues, dir);
+        var buildProvider = providers.Build(buildSection.Type);
+        var build = buildProvider.Parse(buildSection);
+        if (buildProvider.RepoType != repo.Type)
+            throw new ProjectConfigException($"build.type '{build.Type}' needs repo.type '{buildProvider.RepoType}'");
+
         Supported("agent.type", Required(agent.Type, "agent.type"), "claude-code");
 
         var isolation = ParseEnum<Isolation>(agent.Isolation ?? "container", "isolation");
@@ -78,15 +88,9 @@ public static partial class ProjectConfigLoader
         return new ProjectConfig(
             id,
             d.Name ?? id,
-            new TrackerConfig(tracker.Type!, new Uri(Required(tracker.Site, "tracker.site")),
-                Required(tracker.Email, "tracker.email"), Required(tracker.TokenSecret, "tracker.tokenSecret"),
-                Required(tracker.Jql, "tracker.jql")),
-            new RepoConfig(repo.Type!, Required(repo.Workspace, "repo.workspace"), Required(repo.Slug, "repo.slug"),
-                Path.GetFullPath(Required(repo.LocalPath, "repo.localPath"), dir),
-                repo.MainBranch ?? "main", repo.ProductionBranch ?? "production",
-                Required(repo.Email, "repo.email"), Required(repo.TokenSecret, "repo.tokenSecret"),
-                repo.MergeStrategy ?? "merge_commit"),
-            new BuildConfig(Required(build.Type, "build.type"), build.TimeoutMinutes ?? 45),
+            tracker,
+            repo,
+            build,
             new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"), allowedTools,
                 agent.TimeoutMinutes ?? 60, agent.Model, agent.Image) { Packages = packages },
             d.MaxAttemptsPerStage ?? 3,
@@ -218,9 +222,10 @@ public static partial class ProjectConfigLoader
     {
         public string? Id { get; set; }
         public string? Name { get; set; }
-        public TrackerDto? Tracker { get; set; }
-        public RepoDto? Repo { get; set; }
-        public BuildDto? Build { get; set; }
+        // Provider sections stay raw: their provider binds them (see ProviderSection).
+        public Dictionary<string, object?>? Tracker { get; set; }
+        public Dictionary<string, object?>? Repo { get; set; }
+        public Dictionary<string, object?>? Build { get; set; }
         public AgentDto? Agent { get; set; }
         public int? MaxAttemptsPerStage { get; set; }
         public List<StageDto?>? Pipeline { get; set; }
@@ -241,34 +246,6 @@ public static partial class ProjectConfigLoader
         public string? Mode { get; set; }
         public string? Prompt { get; set; }
         public AgentDto? Agent { get; set; }
-    }
-
-    private sealed class TrackerDto
-    {
-        public string? Type { get; set; }
-        public string? Site { get; set; }
-        public string? Email { get; set; }
-        public string? TokenSecret { get; set; }
-        public string? Jql { get; set; }
-    }
-
-    private sealed class RepoDto
-    {
-        public string? Type { get; set; }
-        public string? Workspace { get; set; }
-        public string? Slug { get; set; }
-        public string? LocalPath { get; set; }
-        public string? MainBranch { get; set; }
-        public string? ProductionBranch { get; set; }
-        public string? Email { get; set; }
-        public string? TokenSecret { get; set; }
-        public string? MergeStrategy { get; set; }
-    }
-
-    private sealed class BuildDto
-    {
-        public string? Type { get; set; }
-        public int? TimeoutMinutes { get; set; }
     }
 
     private sealed class AgentDto

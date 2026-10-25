@@ -1,0 +1,7 @@
+{
+  "data": null,
+  "errors": [
+    { "type": "INSUFFICIENT_SCOPES", "message": "Your token has not been granted the required scopes to execute this query." },
+    { "message": "Field 'projectV2' doesn't exist on type 'User'" }
+  ]
+}

@@ -3,6 +3,7 @@ using Symphonist.Core.Config;
 using Symphonist.Core.Risk;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
+using Symphonist.Integrations.Bitbucket;
 
 namespace Symphonist.Integrations.Tests.Git;
 
@@ -35,7 +36,7 @@ public sealed class GitWorkspaceTests : IDisposable
         Run(dev, "push", "-u", "origin", "main");
         git = new GitWorkspace(new ProcessRunner(), workRoot);
         project = new ProjectConfig("proj", "Proj", null!,
-            new RepoConfig("bitbucket", "w", "s", dev, "main", "main", "e", "t", "squash"),
+            new BitbucketRepoConfig("bitbucket", dev, "main", "main", "t", "w", "s", "e", "squash"),
             null!, null!, 3, [], new Dictionary<StageKind, string>(), root);
     }
 

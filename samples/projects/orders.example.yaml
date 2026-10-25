@@ -5,7 +5,7 @@ id: orders                      # unique project id; used in CLI commands (symph
 name: Orders (Acme)             # display name (defaults to id)
 
 tracker:
-  type: jira                    # only "jira" is supported
+  type: jira                    # "jira" or "github-projects" (see orders-github.example.yaml)
   site: https://acme.atlassian.net
   email: dev@example.com        # Atlassian account email (basic auth with the API token)
   tokenSecret: jira-acme        # name of the secret holding the Atlassian API token: symphonist secret set jira-acme
@@ -13,7 +13,7 @@ tracker:
   jql: assignee = currentUser() AND labels = Claude AND statusCategory != Done
 
 repo:
-  type: bitbucket               # only "bitbucket" is supported
+  type: bitbucket               # "bitbucket" or "github" (see orders-github.example.yaml)
   workspace: acme               # Bitbucket workspace id
   slug: orders                  # repository slug
   # Existing local clone (placeholder: replace with yours). Use an absolute path: a relative path resolves against the
@@ -26,7 +26,8 @@ repo:
   # mergeStrategy: merge_commit # default: merge_commit
 
 build:
-  type: bitbucket-pipelines     # build/release status is read from Bitbucket Pipelines
+  type: bitbucket-pipelines     # build/release status is read from Bitbucket Pipelines, or "github-actions"
+                                # (needs repo.type: github)
   # timeoutMinutes: 45          # default: 45
 
 agent:

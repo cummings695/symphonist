@@ -39,7 +39,7 @@ builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Ad
 // Tracker and source-control writes are not idempotent (comments, transitions, PRs, merges): replace the default
 // resilience handler from ServiceDefaults with one that retries only safe methods. RemoveAllResilienceHandlers is the
 // documented way to drop handlers added by ConfigureHttpClientDefaults (still marked experimental).
-foreach (var client in new[] { IntegrationFactory.JiraClient, IntegrationFactory.BitbucketClient })
+foreach (var client in BuiltInProviders.Registry.HttpClientNames)
 {
 #pragma warning disable EXTEXP0001
     builder.Services.AddHttpClient(client)
@@ -53,6 +53,7 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = OrchestratorSer
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new OrchestratorOptions());
 builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
+builder.Services.AddSingleton(BuiltInProviders.Registry);
 builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
 builder.Services.AddSingleton<BoardNotifier>();
 builder.Services.AddSingleton(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));

@@ -1,0 +1,1 @@
+{ "message": "Required status check \"ci\" is expected.", "documentation_url": "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request", "status": "405" }

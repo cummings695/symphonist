@@ -1,0 +1,114 @@
+{
+  "data": {
+    "node": {
+      "items": {
+        "pageInfo": { "hasNextPage": true, "endCursor": "items-p2" },
+        "nodes": [
+      { "id": "PVTI_draft", "fieldValueByName": { "name": "Planned" }, "content": { "__typename": "DraftIssue" } },
+      { "id": "PVTI_pr", "fieldValueByName": { "name": "Planned" }, "content": { "__typename": "PullRequest" } },
+      {
+        "id": "PVTI_closed",
+        "fieldValueByName": {"name":"Planned"},
+        "content": {
+          "__typename": "Issue",
+          "id": "I_closed",
+          "number": 3,
+          "title": "Issue 3",
+          "body": "Body 3",
+          "url": "https://github.com/acme/orders/issues/3",
+          "state": "CLOSED",
+          "repository": { "name": "orders", "nameWithOwner": "acme/orders" },
+          "assignees": { "nodes": [ { "login": "octo-dev" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "Claude" } ] }
+        }
+      }
+,
+      {
+        "id": "PVTI_other",
+        "fieldValueByName": {"name":"Planned"},
+        "content": {
+          "__typename": "Issue",
+          "id": "I_other",
+          "number": 4,
+          "title": "Issue 4",
+          "body": "Body 4",
+          "url": "https://github.com/acme/orders/issues/4",
+          "state": "OPEN",
+          "repository": { "name": "orders", "nameWithOwner": "acme/orders" },
+          "assignees": { "nodes": [ { "login": "someone-else" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "Claude" } ] }
+        }
+      }
+,
+      {
+        "id": "PVTI_nolabel",
+        "fieldValueByName": {"name":"Planned"},
+        "content": {
+          "__typename": "Issue",
+          "id": "I_nolabel",
+          "number": 6,
+          "title": "Issue 6",
+          "body": "Body 6",
+          "url": "https://github.com/acme/orders/issues/6",
+          "state": "OPEN",
+          "repository": { "name": "orders", "nameWithOwner": "acme/orders" },
+          "assignees": { "nodes": [ { "login": "octo-dev" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "triage" } ] }
+        }
+      }
+,
+      {
+        "id": "PVTI_done",
+        "fieldValueByName": {"name":"Done"},
+        "content": {
+          "__typename": "Issue",
+          "id": "I_done",
+          "number": 7,
+          "title": "Issue 7",
+          "body": "Body 7",
+          "url": "https://github.com/acme/orders/issues/7",
+          "state": "OPEN",
+          "repository": { "name": "orders", "nameWithOwner": "acme/orders" },
+          "assignees": { "nodes": [ { "login": "octo-dev" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "Claude" } ] }
+        }
+      }
+,
+      {
+        "id": "PVTI_empty",
+        "fieldValueByName": null,
+        "content": {
+          "__typename": "Issue",
+          "id": "I_empty",
+          "number": 8,
+          "title": "Issue 8",
+          "body": "Body 8",
+          "url": "https://github.com/acme/orders/issues/8",
+          "state": "OPEN",
+          "repository": { "name": "orders", "nameWithOwner": "acme/orders" },
+          "assignees": { "nodes": [ { "login": "octo-dev" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "Claude" } ] }
+        }
+      }
+,
+      {
+        "id": "PVTI_otherrepo",
+        "fieldValueByName": {"name":"Planned"},
+        "content": {
+          "__typename": "Issue",
+          "id": "I_otherrepo",
+          "number": 9,
+          "title": "Issue 9",
+          "body": "Body 9",
+          "url": "https://github.com/acme/payments/issues/9",
+          "state": "OPEN",
+          "repository": { "name": "payments", "nameWithOwner": "acme/payments" },
+          "assignees": { "nodes": [ { "login": "octo-dev" } ] },
+          "labels": { "nodes": [ { "name": "bug" }, { "name": "Claude" } ] }
+        }
+      }
+        ]
+      }
+    }
+  }
+}

@@ -4,12 +4,11 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 
 namespace Symphonist.Integrations.Jira;
 
-public sealed partial class JiraTracker(HttpClient http, TrackerConfig config, string apiToken) : ITracker
+public sealed partial class JiraTracker(HttpClient http, JiraTrackerConfig config, string apiToken) : ITracker
 {
     private const int PageSize = 50;
     private readonly SemaphoreSlim _myselfLock = new(1, 1);

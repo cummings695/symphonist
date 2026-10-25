@@ -1,11 +1,10 @@
 using System.Net;
 using System.Text.Json;
-using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 
 namespace Symphonist.Integrations.Bitbucket;
 
-public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, string apiToken) : ISourceControl
+public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig config, string apiToken) : ISourceControl
 {
     private readonly BitbucketApi _api = new(http, config, apiToken);
 
@@ -94,7 +93,7 @@ public sealed class BitbucketSourceControl(HttpClient http, RepoConfig config, s
     }
 
     /// <summary>The web page of pull request <paramref name="id"/> (no API call needed).</summary>
-    public static Uri PullRequestUrl(RepoConfig repo, long id) =>
+    public static Uri PullRequestUrl(BitbucketRepoConfig repo, long id) =>
         new($"https://bitbucket.org/{Uri.EscapeDataString(repo.Workspace)}/{Uri.EscapeDataString(repo.Slug)}/pull-requests/{id}");
 
     public Uri BranchFileUrl(string branch, string path) =>
