@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -40,9 +41,9 @@ public sealed class GitHubProjectsProvider : ITrackerProvider
             List(dto.Statuses), List(dto.Repositories));
     }
 
-    public ITracker Create(ProjectConfig project, HttpClient http, string token) =>
+    public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new GitHubProjectsTracker(http, Config(project), token, PickupStatuses(project), RequiredStatuses(project),
-            Repositories(project));
+            Repositories(project), loggers.CreateLogger<GitHubProjectsTracker>());
 
     /// <summary>Key = <c>{repository name}-{issue number}</c>; the owner is that of the matching repositories entry.</summary>
     public Uri? IssueUrl(ProjectConfig project, string key)

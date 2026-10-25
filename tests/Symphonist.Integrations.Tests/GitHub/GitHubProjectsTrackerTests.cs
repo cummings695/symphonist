@@ -32,18 +32,18 @@ public class GitHubProjectsTrackerTests
         stub.Requests.Where(r => r.Body?.Contains(operation, StringComparison.Ordinal) ?? false)
             .Select(r => JsonDocument.Parse(r.Body!).RootElement.Clone()).ToList();
 
-    private static string Item(string id, string repoOwner, string repoName, int number, string status = "Planned") =>
+    internal static string Item(string id, string repoOwner, string repoName, int number, string status = "Planned") =>
         "{\"id\":\"PVTI_" + id + "\",\"fieldValueByName\":{\"name\":\"" + status + "\"},\"content\":{"
         + "\"__typename\":\"Issue\",\"id\":\"I_" + id + "\",\"number\":" + number + ",\"title\":\"T\",\"body\":\"B\","
         + "\"url\":\"https://github.com/" + repoOwner + "/" + repoName + "/issues/" + number + "\",\"state\":\"OPEN\","
         + "\"repository\":{\"name\":\"" + repoName + "\",\"nameWithOwner\":\"" + repoOwner + "/" + repoName + "\"},"
         + "\"assignees\":{\"nodes\":[{\"login\":\"octo-dev\"}]},\"labels\":{\"nodes\":[{\"name\":\"Claude\"}]}}}";
 
-    private static string ItemsPage(params string[] items) =>
+    internal static string ItemsPage(params string[] items) =>
         "{\"data\":{\"node\":{\"items\":{\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null},\"nodes\":["
         + string.Join(',', items) + "]}}}}";
 
-    private const string NoComments =
+    internal const string NoComments =
         """{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}""";
 
     [Fact]

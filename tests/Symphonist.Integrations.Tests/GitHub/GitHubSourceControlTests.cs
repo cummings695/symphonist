@@ -147,6 +147,17 @@ public class GitHubSourceControlTests
     }
 
     [Fact]
+    public async Task Secondary_rate_limit_throws_instead_of_refusing()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Put, RepoPrefix + "/pulls/12/merge", HttpStatusCode.Forbidden,
+            "{\"message\":\"secondary rate limit\"}", headers: new Dictionary<string, string> { ["Retry-After"] = "60" });
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).MergePullRequestAsync(12, CancellationToken.None));
+
+        Assert.StartsWith("GitHub PUT repos/acme/orders/pulls/12/merge failed:", ex.Message);
+    }
+
+    [Fact]
     public async Task Plain_403_is_a_refusal()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Put, RepoPrefix + "/pulls/12/merge", HttpStatusCode.Forbidden,

@@ -67,7 +67,7 @@ internal static class GitHubProjectsQueries
         }
         """;
 
-    /// <summary>Variables: <c>project</c>, <c>item</c>, <c>field</c>, <c>option</c> (all ID!).</summary>
+    /// <summary>Variables: <c>project</c>, <c>item</c>, <c>field</c> (all ID!) and <c>option</c> (String!, the option id).</summary>
     public const string SetStatus = """
         mutation SetStatus($project: ID!, $item: ID!, $field: ID!, $option: String!) {
           updateProjectV2ItemFieldValue(input: {

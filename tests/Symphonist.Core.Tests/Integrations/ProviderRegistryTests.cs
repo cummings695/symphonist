@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations.Providers;
@@ -12,7 +13,7 @@ public class ProviderRegistryTests
         public string DisplayName => type;
         public string HttpClientName => client;
         public TrackerConfig Parse(TrackerSection section) => throw new NotSupportedException();
-        public ITracker Create(ProjectConfig project, HttpClient http, string token) => throw new NotSupportedException();
+        public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) => throw new NotSupportedException();
         public Uri? IssueUrl(ProjectConfig project, string key) => null;
     }
 

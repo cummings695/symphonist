@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 
 namespace Symphonist.Core.Integrations.Providers;
@@ -13,7 +14,7 @@ public interface ITrackerProvider
 
     TrackerConfig Parse(TrackerSection section);
 
-    ITracker Create(ProjectConfig project, HttpClient http, string token);
+    ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers);
 
     Uri? IssueUrl(ProjectConfig project, string key);
 }

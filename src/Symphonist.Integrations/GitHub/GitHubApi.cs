@@ -32,11 +32,11 @@ internal sealed class GitHubApi(HttpClient http, string token)
         using var response = await http.SendAsync(request, ct);
         var text = await response.Content.ReadAsStringAsync(ct);
 
-        // A rate limit must surface as an error, never as a "the host refused" answer callers might act on.
+        // A rate limit (primary, or secondary with Retry-After) must surface as an error, never as a "the host refused" answer callers might act on.
         if (response.StatusCode == HttpStatusCode.TooManyRequests
             || (response.StatusCode == HttpStatusCode.Forbidden
-                && response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining)
-                && remaining.Contains("0")))
+                && (response.Headers.Contains("Retry-After")
+                    || (response.Headers.TryGetValues("x-ratelimit-remaining", out var remaining) && remaining.Contains("0")))))
             throw Failure(method, path, response.StatusCode, text);
 
         return (response.StatusCode, text);

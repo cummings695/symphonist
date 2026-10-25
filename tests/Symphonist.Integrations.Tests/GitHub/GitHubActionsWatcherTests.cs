@@ -16,8 +16,9 @@ public class GitHubActionsWatcherTests
     private static GitHubRepoConfig Repo() =>
         new("github", "/work/orders", "main", "production", "gh-token", "acme", "orders", "merge");
 
-    private static string Run(string file, string status, string? conclusion, string created = "2026-10-24T10:00:00Z") =>
-        $"{{\"path\":\".github/workflows/{file}\",\"status\":\"{status}\",\"conclusion\":" +
+    private static string Run(string file, string status, string? conclusion, string created = "2026-10-24T10:00:00Z",
+        string trigger = "push", int id = 1, string? path = null) =>
+        $"{{\"id\":{id},\"event\":\"{trigger}\",\"path\":\"{path ?? ".github/workflows/" + file}\",\"status\":\"{status}\",\"conclusion\":" +
         (conclusion is null ? "null" : $"\"{conclusion}\"") + $",\"created_at\":\"{created}\"}}";
 
     private static string Page(params string[] runs) =>
@@ -90,6 +91,58 @@ public class GitHubActionsWatcherTests
     public async Task Listed_pair_with_one_not_started_is_Running() =>
         Assert.Equal(BuildStatus.Running, await Status(["ci.yml", "lint.yml"], [], BuildPurpose.Build,
             Run("ci.yml", "completed", "success")));
+
+    [Theory]
+    [InlineData("issue_comment")]
+    [InlineData("issues")]
+    [InlineData("schedule")]
+    [InlineData("workflow_dispatch")]
+    [InlineData("repository_dispatch")]
+    [InlineData("discussion")]
+    [InlineData("discussion_comment")]
+    [InlineData("label")]
+    [InlineData("milestone")]
+    [InlineData("project")]
+    [InlineData("project_card")]
+    [InlineData("project_column")]
+    [InlineData("watch")]
+    [InlineData("fork")]
+    [InlineData("gollum")]
+    public async Task Runs_not_triggered_by_code_are_ignored(string trigger)
+    {
+        Assert.Equal(BuildStatus.Succeeded, await Any(Run("ci.yml", "completed", "success"),
+            Run("bot.yml", "completed", "failure", trigger: trigger)));
+        Assert.Equal(BuildStatus.Succeeded, await Any(Run("ci.yml", "completed", "success"),
+            Run("nightly.yml", "in_progress", null, trigger: trigger)));
+        Assert.Equal(BuildStatus.Succeeded, await Status(["ci.yml"], [], BuildPurpose.Build,
+            Run("ci.yml", "completed", "success"), Run("ci.yml", "completed", "failure", "2026-10-24T11:00:00Z", trigger)));
+    }
+
+    [Fact]
+    public async Task Pull_request_and_push_runs_count() =>
+        Assert.Equal(BuildStatus.Failed, await Any(Run("ci.yml", "completed", "success"),
+            Run("pr.yml", "completed", "failure", trigger: "pull_request")));
+
+    [Fact]
+    public async Task Workflow_ref_suffix_is_stripped_from_the_path() =>
+        Assert.Equal(BuildStatus.Succeeded, await Status(["ci.yml"], [], BuildPurpose.Build,
+            Run("", "completed", "success", path: ".github/workflows/ci.yml@refs/heads/main")));
+
+    [Fact]
+    public async Task Runs_without_a_path_are_kept_apart() =>
+        Assert.Equal(BuildStatus.Failed, await Any(
+            Run("", "completed", "success", id: 1, path: ""), Run("", "completed", "failure", id: 2, path: "")));
+
+    [Fact]
+    public async Task Repository_names_are_escaped_in_the_request()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get,
+            "/repos/a%2Fb/or%20ders/actions/runs?head_sha=" + Sha + "&per_page=100&page=1", HttpStatusCode.OK, Page());
+        var repo = new GitHubRepoConfig("github", "/work/orders", "main", "production", "gh-token", "a/b", "or ders", "merge");
+        var watcher = new GitHubActionsWatcher(new HttpClient(stub), repo, new GitHubActionsConfig("github-actions", 45, [], []), "t");
+
+        Assert.Equal(BuildStatus.NotFound, await watcher.GetStatusAsync(Sha, BuildPurpose.Build, CancellationToken.None));
+    }
 
     [Fact]
     public async Task Runs_read_all_pages()

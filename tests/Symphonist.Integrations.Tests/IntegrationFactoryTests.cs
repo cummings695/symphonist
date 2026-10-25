@@ -1,6 +1,9 @@
 using System.Net;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
+using Symphonist.Integrations.GitHub;
+using Symphonist.Tests.GitHub;
 using Symphonist.Core.Integrations;
 using Symphonist.Integrations.Bitbucket;
 using Symphonist.Integrations.Jira;
@@ -15,10 +18,12 @@ public class IntegrationFactoryTests
     {
         public List<string> Names { get; } = [];
         public HttpMessageHandler? Handler { get; init; }
+        public Dictionary<string, HttpMessageHandler> ByName { get; } = [];
         public HttpClient CreateClient(string name)
         {
             Names.Add(name);
-            return Handler is null ? new HttpClient() : new HttpClient(Handler, disposeHandler: false);
+            var handler = ByName.GetValueOrDefault(name) ?? Handler;
+            return handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
         }
     }
 
@@ -33,6 +38,22 @@ public class IntegrationFactoryTests
         }
         public void Set(string name, string value) => Values[name] = value;
         public void Remove(string name) => Values.Remove(name);
+    }
+
+    private sealed class ListLoggerFactory : ILoggerFactory
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = [];
+        public void AddProvider(ILoggerProvider provider) { }
+        public ILogger CreateLogger(string categoryName) => new ListLogger(Entries);
+        public void Dispose() { }
+
+        private sealed class ListLogger(List<(LogLevel Level, string Message)> entries) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter) => entries.Add((logLevel, formatter(state, exception)));
+        }
     }
 
     private readonly FakeHttpClientFactory http = new();
@@ -166,5 +187,43 @@ public class IntegrationFactoryTests
     {
         Assert.Equal(new Uri("https://bitbucket.org/acme/orders/pull-requests/42"),
             BitbucketSourceControl.PullRequestUrl((BitbucketRepoConfig)Project().Repo, 42));
+    }
+
+    private static ProjectConfig MixedProject() => GitHubProjectsProviderTests.Project(
+        repo: new BitbucketRepoConfig("bitbucket", "/src/orders", "main", "production", "bitbucket-acme", "acme", "orders",
+            "dev@example.com", "merge_commit")) with { Build = new BitbucketPipelinesConfig("bitbucket-pipelines", 45) };
+
+    private static string Fixture(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
+
+    [Fact]
+    public async Task Mixed_project_uses_each_providers_client_and_token_and_logs_through_the_factory()
+    {
+        var github = new StubHttpHandler()
+            .On(HttpMethod.Post, "/graphql", HttpStatusCode.OK, Fixture("gh-viewer.json"), "query Viewer")
+            .On(HttpMethod.Post, "/graphql", HttpStatusCode.OK, Fixture("gh-project.json"), "query Project")
+            .On(HttpMethod.Post, "/graphql", HttpStatusCode.OK, GitHubProjectsTrackerTests.ItemsPage(
+                GitHubProjectsTrackerTests.Item("a5", "acme", "orders", 5),
+                GitHubProjectsTrackerTests.Item("o5", "other", "orders", 5)), "query Items")
+            .On(HttpMethod.Post, "/graphql", HttpStatusCode.OK, GitHubProjectsTrackerTests.NoComments, "query Comments");
+        var bitbucket = new StubHttpHandler().On(HttpMethod.Get, "/2.0/repositories", HttpStatusCode.OK, "{\"values\":[]}");
+        http.ByName["github"] = github;
+        http.ByName["bitbucket"] = bitbucket;
+        secrets.Set("github-acme", "ghp");
+        secrets.Set("bitbucket-acme", "bbt");
+        var loggers = new ListLoggerFactory();
+
+        var io = new IntegrationFactory(http, secrets, BuiltInProviders.Registry, loggers).Create(MixedProject());
+        var tickets = await io.Tracker.QueryAsync(CancellationToken.None);
+        await io.BuildWatcher.GetStatusAsync("abc", BuildPurpose.Build, CancellationToken.None);
+
+        Assert.IsType<GitHubProjectsTracker>(io.Tracker);
+        Assert.IsType<BitbucketSourceControl>(io.SourceControl);
+        Assert.IsType<BitbucketPipelinesWatcher>(io.BuildWatcher);
+        Assert.Equal(["github", "bitbucket", "bitbucket"], http.Names);
+        Assert.Empty(tickets);
+        Assert.All(github.Authorizations, a => Assert.Equal("Bearer ghp", a));
+        Assert.NotEmpty(bitbucket.Authorizations);
+        Assert.All(bitbucket.Authorizations, a => Assert.Equal("Basic " + Convert.ToBase64String("dev@example.com:bbt"u8), a));
+        Assert.Contains(loggers.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("orders-5"));
     }
 }

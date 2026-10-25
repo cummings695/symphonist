@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -11,9 +13,11 @@ namespace Symphonist.Integrations;
 /// client. Cached per project id, per integration: each is rebuilt only when the configuration section it was built
 /// from or its token changes. A missing secret is reported, never cached.
 /// </summary>
-public sealed class IntegrationFactory(IHttpClientFactory http, ISecretStore secrets, ProviderRegistry providers)
-    : IIntegrationFactory
+public sealed class IntegrationFactory(IHttpClientFactory http, ISecretStore secrets, ProviderRegistry providers,
+    ILoggerFactory? loggers = null) : IIntegrationFactory
 {
+    private readonly ILoggerFactory _loggers = loggers ?? NullLoggerFactory.Instance;
+
     private sealed record Slot<T>(object[] Configs, string Token, T Value) where T : class
     {
         public bool Matches(object[] configs, string token) =>
@@ -40,7 +44,7 @@ public sealed class IntegrationFactory(IHttpClientFactory http, ISecretStore sec
         var tracker = Reuse(cached?.Tracker, [project.Tracker], trackerToken, () =>
         {
             var provider = providers.Tracker(project.Tracker.Type);
-            return provider.Create(project, http.CreateClient(provider.HttpClientName), trackerToken);
+            return provider.Create(project, http.CreateClient(provider.HttpClientName), trackerToken, _loggers);
         });
         var repo = Reuse(cached?.Repo, [project.Repo], repoToken,
             () => repoProvider.Create(project, http.CreateClient(repoProvider.HttpClientName), repoToken));

@@ -1,7 +1,7 @@
 # Symphonist
 
-A local, cross-platform (.NET 10) orchestrator for agentic development. It watches Jira tickets for your projects, runs
-Claude Code on them stage by stage (triage, plan, implement, build, release, deploy), pauses at the gates you configure
+A local, cross-platform (.NET 10) orchestrator for agentic development. It watches Jira tickets or GitHub Projects issues for your projects,
+runs Claude Code on them stage by stage (triage, plan, implement, build, release, deploy), pauses at the gates you configure
 for your approval, and drives the tracker card (Jira or GitHub Projects) and the pull requests (Bitbucket or GitHub)
 along the way. A host process does the work; the `symphonist` CLI talks to it over a local API.
 
@@ -150,7 +150,9 @@ when the host is back.
 
 ### Working from Jira instead
 
-The pipeline in the project file maps stages to Jira statuses, so you can drive everything from the board:
+The pipeline in the project file maps stages to Jira statuses, so you can drive everything from the board. On a GitHub
+Projects board the same applies with the board's Status column: move the card to another column instead of changing a
+Jira status:
 
 - `entryStatuses`: a ticket first seen in one of these statuses starts at that stage.
 - `onEnterStatus`: Symphonist moves the card to this status when the stage starts.
@@ -167,10 +169,13 @@ The pipeline in the project file maps stages to Jira statuses, so you can drive 
 
 ### Answering Symphonist from Jira
 
-Start a Jira comment with `@claude` while a ticket waits at a gate (or is blocked), and that stage reruns with the
+Start a Jira comment (or a GitHub issue comment) with `@claude` while a ticket waits at a gate (or is blocked), and
+that stage reruns with the
 comment (minus the marker) as feedback, for example to answer triage's questions. Several such comments made before the
 rerun go together into one rerun. A comment made while the stage runs applies when it reaches the gate. Other
-comments are ignored, and a card move made in the same poll takes priority.
+comments are ignored, and a card move made in the same poll takes priority. On GitHub an `@claude` comment also
+notifies the GitHub user `claude` and triggers the Claude GitHub App if you have it installed on the repository.
+Symphonist reads only the first 20 assignees and 50 labels of an issue, so keep the assignee and label within those.
 
 ### Risk reviewer
 
@@ -242,7 +247,7 @@ review:
 ## First live run checklist
 
 Do this once against a throwaway ticket (the real client Jira and Bitbucket, or a sandbox Jira project and Bitbucket
-repo with a trivial `bitbucket-pipelines.yml`).
+repo with a trivial `bitbucket-pipelines.yml`; or a throwaway GitHub Projects board and repo with a trivial workflow).
 
 1. Complete the setup above, start the host, and confirm `symphonist projects` lists the project.
 2. Pick a low-risk ticket: label `Claude`, assigned to you, status Backlog. Run `symphonist poll`; it appears in
@@ -270,6 +275,10 @@ repo with a trivial `bitbucket-pipelines.yml`).
   watches the pipeline of the current `production` head.
 - Event `no transition to '<status>' in tracker`: the Jira workflow has no transition from the card's current status to
   that status. Symphonist records it and carries on; fix the status names in the project file or the Jira workflow.
+- GitHub: an issue is `Blocked` with `no longer matches tracker query` when it was closed, unassigned from the token's
+  user, lost the label, or moved to a column outside `statuses`. Build or Deploy `Blocked` with `build failed` means a
+  workflow run on the commit failed; re-run it in GitHub Actions, then `symphonist unblock <project> <key>`. Runs
+  triggered by issue comments, schedules, manual dispatches and other non-code events are ignored.
 - Docker not running: container stages fail with a Docker error. Start Docker and restart the host (availability is
   checked at startup).
 - `Symphonist host is not running on 127.0.0.1:<port>` (exit code 2): start the host, and check that `SYMPHONIST_PORT`

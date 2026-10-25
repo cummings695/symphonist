@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -23,7 +24,7 @@ public sealed class JiraProvider : ITrackerProvider
             section.Required(dto.Email, "email"), section.Required(dto.Jql, "jql"));
     }
 
-    public ITracker Create(ProjectConfig project, HttpClient http, string token) =>
+    public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new JiraTracker(http, Config(project), token);
 
     public Uri? IssueUrl(ProjectConfig project, string key) =>
