@@ -12,7 +12,7 @@ namespace Symphonist.Core.Onboarding;
 public static class ProjectYamlWriter
 {
     public static readonly IReadOnlyList<string> SectionOrder =
-        ["id", "name", "tracker", "repo", "build", "agent", "maxAttemptsPerStage", "pipeline", "riskAreas", "review", "prompts"];
+        ["id", "name", "tracker", "repo", "build", "agent", "maxAttemptsPerStage", "pipeline", "riskAreas", "review", "evidence", "prComments", "prompts"];
 
     private static readonly string[] ProviderSlots = ["tracker", "repo", "build"];
 
@@ -40,6 +40,8 @@ public static class ProjectYamlWriter
             ["pipeline"] = Pipeline(form.Pipeline),
             ["riskAreas"] = RiskAreas(form.RiskAreas),
             ["review"] = Review(form.Review),
+            ["evidence"] = Evidence(form.Evidence),
+            ["prComments"] = form.PrCommentsFromOthers ? "prComments:\n  fromOthers: true\n" : null,
             ["prompts"] = Prompts(form.Prompts),
         };
     }
@@ -204,6 +206,39 @@ public static class ProjectYamlWriter
         return text.ToString();
     }
 
+    private static string? Evidence(EvidenceForm e)
+    {
+        var run = new StringBuilder();
+        if (e.Setup.Count > 0) run.Append($"    setup: {List(e.Setup)}\n");
+        if (!string.IsNullOrWhiteSpace(e.Start)) run.Append($"    start: {Scalar(e.Start)}\n");
+        if (!string.IsNullOrWhiteSpace(e.Url)) run.Append($"    url: {Scalar(e.Url)}\n");
+        if (!string.IsNullOrWhiteSpace(e.Ready)) run.Append($"    ready: {Scalar(e.Ready)}\n");
+        if (!string.IsNullOrWhiteSpace(e.Notes)) run.Append("    notes: ").Append(Multiline(e.Notes, "      "));
+        var agent = new List<string>();
+        if (e.TimeoutMinutes != EvidenceLimits.DefaultTimeoutMinutes)
+            agent.Add($"timeoutMinutes: {e.TimeoutMinutes.ToString(CultureInfo.InvariantCulture)}");
+        if (!string.IsNullOrWhiteSpace(e.Model)) agent.Add($"model: {FlowScalar(e.Model)}");
+        var hasPrompt = !string.IsNullOrWhiteSpace(e.PromptPath);
+        if (e.Mode == EvidenceMode.HighRisk && run.Length == 0 && e.Features.Count == 0 && agent.Count == 0 && !hasPrompt)
+            return null;
+
+        var text = new StringBuilder("evidence:\n");
+        if (e.Mode != EvidenceMode.HighRisk) text.Append($"  mode: {(e.Mode == EvidenceMode.Off ? "off" : "always")}\n");
+        if (hasPrompt) text.Append($"  prompt: {Scalar(e.PromptPath!)}\n");
+        if (run.Length > 0) text.Append("  run:\n").Append(run);
+        if (e.Features.Count > 0)
+        {
+            text.Append("  features:\n");
+            foreach (var feature in e.Features)
+            {
+                text.Append($"    - name: {Scalar(feature.Name)}\n");
+                text.Append("      steps: ").Append(Multiline(feature.Steps, "        "));
+            }
+        }
+        if (agent.Count > 0) text.Append($"  agent: {{ {string.Join(", ", agent)} }}\n");
+        return text.ToString();
+    }
+
     private static string? Prompts(Dictionary<StageKind, string> prompts)
     {
         if (prompts.Count == 0) return null;
@@ -238,6 +273,9 @@ public static class ProjectYamlWriter
         "riskAreas" => ["Areas the risk reviewer must treat as high risk. A change touching one is never auto-approved."],
         "review" => ["Risk reviewer: off (default), shadow (judges gates, approves nothing) or active (also approves",
             "gate: auto stages judged low risk)."],
+        "evidence" => ["Evidence for the developer at a gated implement round: off, high-risk (default) or always.",
+            "run says how to start the app; features are walked end to end. Nothing here approves or blocks anything."],
+        "prComments" => ["fromOthers: true lets PR comments by other people tagged @claude trigger a fix run. Default: false."],
         "prompts" => ["Prompt overrides per stage kind, as files relative to this file."],
         _ => [],
     };

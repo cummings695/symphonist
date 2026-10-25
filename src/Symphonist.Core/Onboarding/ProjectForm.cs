@@ -80,6 +80,52 @@ public sealed class ReviewForm
     };
 }
 
+public sealed class EvidenceFeatureForm
+{
+    public string Name { get; set; } = "";
+    public string Steps { get; set; } = "";
+
+    public EvidenceFeatureForm Clone() => new() { Name = Name, Steps = Steps };
+}
+
+/// <summary>The <c>evidence</c> section; empty values mean "not set" or "use the default".</summary>
+public sealed class EvidenceForm
+{
+    public EvidenceMode Mode { get; set; } = EvidenceMode.HighRisk;
+    public List<string> Setup { get; set; } = [];
+    public string? Start { get; set; }
+    public string? Url { get; set; }
+    public string? Ready { get; set; }
+    public string? Notes { get; set; }
+    public List<EvidenceFeatureForm> Features { get; set; } = [];
+    public int TimeoutMinutes { get; set; } = EvidenceLimits.DefaultTimeoutMinutes;
+    public string? Model { get; set; }
+    public string? PromptPath { get; set; }
+
+    public EvidenceForm Clone() => new()
+    {
+        Mode = Mode, Setup = [.. Setup], Start = Start, Url = Url, Ready = Ready, Notes = Notes,
+        Features = Features.Select(f => f.Clone()).ToList(), TimeoutMinutes = TimeoutMinutes, Model = Model,
+        PromptPath = PromptPath,
+    };
+
+    /// <summary>Fills only blank run fields and adds features whose name is new (ignoring case), up to the loader's limit.</summary>
+    public void Merge(EvidenceRun run, IReadOnlyList<EvidenceFeature> features)
+    {
+        if (Setup.Count == 0) Setup = [.. run.Setup];
+        if (string.IsNullOrWhiteSpace(Start)) Start = run.Start;
+        if (string.IsNullOrWhiteSpace(Url)) Url = run.Url;
+        if (string.IsNullOrWhiteSpace(Ready)) Ready = run.Ready;
+        if (string.IsNullOrWhiteSpace(Notes)) Notes = run.Notes;
+        foreach (var feature in features)
+        {
+            if (Features.Count >= EvidenceLimits.MaxFeatures) break;
+            if (Features.Any(f => string.Equals(f.Name, feature.Name, StringComparison.OrdinalIgnoreCase))) continue;
+            Features.Add(new EvidenceFeatureForm { Name = feature.Name, Steps = feature.Steps });
+        }
+    }
+}
+
 /// <summary>Mutable mirror of every field <see cref="ProjectConfigLoader"/> reads.</summary>
 public sealed class ProjectForm
 {
@@ -101,6 +147,8 @@ public sealed class ProjectForm
     public List<StageForm> Pipeline { get; set; } = [];
     public List<RiskAreaForm> RiskAreas { get; set; } = [];
     public ReviewForm Review { get; set; } = new();
+    public EvidenceForm Evidence { get; set; } = new();
+    public bool PrCommentsFromOthers { get; set; }
 
     /// <summary>Paths as written (relative to the config dir when under it).</summary>
     public Dictionary<StageKind, string> Prompts { get; set; } = [];
@@ -190,6 +238,21 @@ public sealed class ProjectForm
                 AllowedTools = review.Agent.AllowedTools.SequenceEqual(ReviewConfig.ReadOnlyTools)
                     ? [] : [.. review.Agent.AllowedTools],
             },
+            Evidence = new EvidenceForm
+            {
+                Mode = config.Evidence.Mode,
+                Setup = [.. config.Evidence.Run.Setup],
+                Start = config.Evidence.Run.Start,
+                Url = config.Evidence.Run.Url,
+                Ready = config.Evidence.Run.Ready,
+                Notes = config.Evidence.Run.Notes,
+                Features = config.Evidence.Features.Select(f => new EvidenceFeatureForm { Name = f.Name, Steps = f.Steps }).ToList(),
+                TimeoutMinutes = config.Evidence.Agent.TimeoutMinutes,
+                // The loader fills the inherited model in; keep only what the file overrides.
+                Model = config.Evidence.Agent.Model == config.Agent.Model ? null : Blank(config.Evidence.Agent.Model),
+                PromptPath = config.Evidence.PromptPath is null ? null : Relative(config.Evidence.PromptPath, dir),
+            },
+            PrCommentsFromOthers = config.PrComments.FromOthers,
             Prompts = config.PromptOverrides.ToDictionary(e => e.Key, e => Relative(e.Value, dir)),
         };
     }
@@ -231,6 +294,8 @@ public sealed class ProjectForm
         Pipeline = Pipeline.Select(s => s.Clone()).ToList(),
         RiskAreas = RiskAreas.Select(a => a.Clone()).ToList(),
         Review = Review.Clone(),
+        Evidence = Evidence.Clone(),
+        PrCommentsFromOthers = PrCommentsFromOthers,
         Prompts = new Dictionary<StageKind, string>(Prompts),
     };
 
@@ -277,8 +342,44 @@ public sealed class ProjectForm
         Line("review.prompt", Review.PromptPath, errors);
         Line("review.agent.model", Review.Model, errors);
         Items("review.agent.allowedTools", Review.AllowedTools, errors);
+        ValidateEvidence(errors);
         foreach (var (kind, path) in Prompts) Line($"prompts.{kind.ToString().ToLowerInvariant()}", path, errors);
         return errors;
+    }
+
+    /// <summary>Rules matching the loader's evidence limits, so the screen cannot save what the loader rejects.</summary>
+    private void ValidateEvidence(List<string> errors)
+    {
+        var e = Evidence;
+        Items("evidence.run.setup", e.Setup, errors);
+        if (e.Setup.Count > EvidenceLimits.MaxSetupCommands)
+            errors.Add($"evidence.run.setup has {e.Setup.Count} commands (at most {EvidenceLimits.MaxSetupCommands})");
+        foreach (var command in e.Setup) Max("evidence.run.setup", command, EvidenceLimits.MaxRunFieldChars, errors);
+        foreach (var (field, value) in new[] { ("start", e.Start), ("url", e.Url), ("ready", e.Ready) })
+        {
+            Line($"evidence.run.{field}", value, errors);
+            Max($"evidence.run.{field}", value, EvidenceLimits.MaxRunFieldChars, errors);
+        }
+        Multiline("evidence.run.notes", e.Notes, errors);
+        Max("evidence.run.notes", e.Notes, EvidenceLimits.MaxNotesChars, errors);
+        if (e.Features.Count > EvidenceLimits.MaxFeatures)
+            errors.Add($"evidence.features has {e.Features.Count} items (at most {EvidenceLimits.MaxFeatures})");
+        foreach (var feature in e.Features)
+        {
+            if (string.IsNullOrWhiteSpace(feature.Name)) errors.Add("evidence.features[].name is required");
+            Line("evidence.features[].name", feature.Name, errors);
+            Max("evidence.features[].name", feature.Name, EvidenceLimits.MaxFeatureNameChars, errors);
+            if (string.IsNullOrWhiteSpace(feature.Steps)) errors.Add($"evidence feature '{feature.Name}' needs steps");
+            Multiline($"evidence feature '{feature.Name}' steps", feature.Steps, errors);
+            Max($"evidence feature '{feature.Name}' steps", feature.Steps, EvidenceLimits.MaxFeatureStepsChars, errors);
+        }
+        Line("evidence.prompt", e.PromptPath, errors);
+        Line("evidence.agent.model", e.Model, errors);
+    }
+
+    private static void Max(string field, string? value, int max, List<string> errors)
+    {
+        if (value is not null && value.Length > max) errors.Add($"{field} is {value.Length} characters (at most {max})");
     }
 
     private static void ValidateSection(string slot, ProviderSectionForm section, IReadOnlyList<ProviderField>? fields,

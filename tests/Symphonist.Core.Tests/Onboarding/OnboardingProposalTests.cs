@@ -283,4 +283,52 @@ public class OnboardingProposalTests
             Assert.Equal(original[key], after[key]);
         Assert.NotEqual(original["pipeline"], after["pipeline"]);
     }
+
+    [Fact]
+    public void Proposal_evidence_parsed_with_limits()
+    {
+        var features = string.Join(",", Enumerable.Range(0, 30).Select(i => $$"""{"name":"feature {{i}}","steps":"do {{i}}","reason":"r"}"""));
+        var p = Parse($$"""
+            {"stages":[],"risk_areas":[],
+             "evidence":{"run":{"setup":["dotnet restore"],"start":"{{new string('x', 501)}}","url":"http://localhost:5000","ready":"up"},
+               "features":[{"name":"bad\nname","steps":"s","reason":"r"},{{features}}],"reason":"README says so"} }
+            """);
+
+        Assert.Null(p.Error);
+        var e = p.Evidence!;
+        Assert.Equal(20, e.Features.Count);
+        Assert.Equal("feature 0", e.Features[0].Name);
+        Assert.Null(e.Run.Start);
+        Assert.Equal(["dotnet restore"], e.Run.Setup);
+        Assert.Equal("http://localhost:5000", e.Run.Url);
+        Assert.Equal("README says so", e.Reason);
+        Assert.Contains(p.Notes, n => n.StartsWith("dropped evidence run.start"));
+        Assert.Contains(p.Notes, n => n.StartsWith("dropped evidence feature 'bad name'"));
+        Assert.Contains("dropped 10 evidence features: at most 20", p.Notes);
+    }
+
+    [Fact]
+    public void Missing_evidence_is_null()
+    {
+        Assert.Null(Parse("""{"stages":[],"risk_areas":[]}""").Evidence);
+    }
+
+    [Fact]
+    public void Apply_merges_evidence_without_overwriting()
+    {
+        var form = ProjectForm.NewProject("orders", BuiltInProviders.Registry);
+        form.Evidence.Start = "mine run";
+        form.Evidence.Features.Add(new EvidenceFeatureForm { Name = "Login", Steps = "kept" });
+        var proposal = new OnboardingProposal([], [], [], [], null, new EvidenceProposal(
+            new EvidenceRun(["setup"], "their run", "http://x", null, null),
+            [new EvidenceFeature("login", "replaced"), new EvidenceFeature("search", "type")], "r"));
+
+        proposal.ApplyTo(form, new HashSet<string>());
+
+        Assert.Equal("mine run", form.Evidence.Start);
+        Assert.Equal("http://x", form.Evidence.Url);
+        Assert.Equal(["setup"], form.Evidence.Setup);
+        Assert.Equal(["Login", "search"], form.Evidence.Features.Select(f => f.Name));
+        Assert.Equal("kept", form.Evidence.Features[0].Steps);
+    }
 }

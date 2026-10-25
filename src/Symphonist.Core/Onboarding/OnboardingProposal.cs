@@ -16,12 +16,15 @@ public sealed record AddedStageProposal(string Id, StageKind Kind, string After,
 
 public sealed record RiskAreaProposal(RiskArea Area, string Reason);
 
+public sealed record EvidenceProposal(EvidenceRun Run, IReadOnlyList<EvidenceFeature> Features, string Reason);
+
 /// <summary>
 /// What the onboarding agent proposes, already validated item by item (see <see cref="OnboardingProposalParser"/>).
 /// <see cref="Notes"/> holds the agent's notes and one line per dropped item.
 /// </summary>
 public sealed record OnboardingProposal(IReadOnlyList<StageMappingProposal> Stages, IReadOnlyList<AddedStageProposal> AddedStages,
-    IReadOnlyList<RiskAreaProposal> RiskAreas, IReadOnlyList<string> Notes, string? Error = null)
+    IReadOnlyList<RiskAreaProposal> RiskAreas, IReadOnlyList<string> Notes, string? Error = null,
+    EvidenceProposal? Evidence = null)
 {
     public static OnboardingProposal Failed(string error) => new([], [], [], [], error);
 
@@ -61,12 +64,14 @@ public sealed record OnboardingProposal(IReadOnlyList<StageMappingProposal> Stag
             if (form.RiskAreas.Any(a => string.Equals(a.Name, area.Name, StringComparison.OrdinalIgnoreCase))) continue;
             form.RiskAreas.Add(new RiskAreaForm { Name = area.Name, Description = area.Description, Paths = [.. area.Paths] });
         }
+
+        if (Evidence is not null) form.Evidence.Merge(Evidence.Run, Evidence.Features);
     }
 }
 
 public static class OnboardingProposalSchema
 {
-    public const string Json = """{"type":"object","properties":{"stages":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"entry_statuses":{"type":"array","items":{"type":"string"}},"on_enter_status":{"type":"string"},"on_gate_status":{"type":"string"},"approved_when_status":{"type":"string"},"reason":{"type":"string"}},"required":["id","reason"]}},"added_stages":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"kind":{"type":"string","enum":["triage","plan","implement","build","uat","release","deploy"]},"after":{"type":"string"},"reason":{"type":"string"}},"required":["id","kind","after","reason"]}},"risk_areas":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},"reason":{"type":"string"}},"required":["name","description","paths","reason"]}},"notes":{"type":"array","items":{"type":"string"}}},"required":["stages","risk_areas"]}""";
+    public const string Json = """{"type":"object","properties":{"stages":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"entry_statuses":{"type":"array","items":{"type":"string"}},"on_enter_status":{"type":"string"},"on_gate_status":{"type":"string"},"approved_when_status":{"type":"string"},"reason":{"type":"string"}},"required":["id","reason"]}},"added_stages":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"kind":{"type":"string","enum":["triage","plan","implement","build","uat","release","deploy"]},"after":{"type":"string"},"reason":{"type":"string"}},"required":["id","kind","after","reason"]}},"risk_areas":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}},"reason":{"type":"string"}},"required":["name","description","paths","reason"]}},"evidence":{"type":"object","properties":{"run":{"type":"object","properties":{"setup":{"type":"array","items":{"type":"string"}},"start":{"type":"string"},"url":{"type":"string"},"ready":{"type":"string"},"notes":{"type":"string"}}},"features":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"steps":{"type":"string"},"reason":{"type":"string"}},"required":["name","steps"]}},"reason":{"type":"string"}}},"notes":{"type":"array","items":{"type":"string"}}},"required":["stages","risk_areas"]}""";
 }
 
 /// <summary>
@@ -109,6 +114,7 @@ public static partial class OnboardingProposalParser
             .ToList();
         var stages = Mappings(root, statuses, known, dropped);
         var areas = RiskAreas(root, existingAreas, dropped);
+        var evidence = Evidence(root, dropped);
 
         var agentNotes = ReviewerText.Items(Array(root, "notes", required: false, dropped)
             .Where(e => e.ValueKind == JsonValueKind.String)
@@ -116,7 +122,7 @@ public static partial class OnboardingProposalParser
         var dropNotes = dropped.Count <= MaxDropNotes
             ? dropped
             : [.. dropped.Take(MaxDropNotes), $"(+{dropped.Count - MaxDropNotes} more dropped)"];
-        return new OnboardingProposal(stages, added, areas, [.. agentNotes, .. dropNotes]);
+        return new OnboardingProposal(stages, added, areas, [.. agentNotes, .. dropNotes], null, evidence);
     }
 
     private static List<AddedStageProposal> AddedStages(JsonElement root, IReadOnlyList<StageForm> pipeline,
@@ -284,6 +290,98 @@ public static partial class OnboardingProposalParser
         }
         if (overflow > 0) dropped.Add($"dropped {overflow} risk areas: at most {MaxRiskAreas}");
         return result;
+    }
+
+    private static EvidenceProposal? Evidence(JsonElement root, List<string> dropped)
+    {
+        if (!root.TryGetProperty("evidence", out var e) || e.ValueKind == JsonValueKind.Null) return null;
+        if (e.ValueKind != JsonValueKind.Object)
+        {
+            dropped.Add("malformed field 'evidence'");
+            return null;
+        }
+
+        var run = EvidenceRun.None;
+        if (e.TryGetProperty("run", out var r) && r.ValueKind == JsonValueKind.Object)
+        {
+            var setup = new List<string>();
+            if (r.TryGetProperty("setup", out var commands) && commands.ValueKind == JsonValueKind.Array)
+                foreach (var command in commands.EnumerateArray())
+                {
+                    var text = command.ValueKind == JsonValueKind.String ? command.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+                    if (setup.Count >= EvidenceLimits.MaxSetupCommands)
+                        dropped.Add("dropped an evidence setup command: at most " + EvidenceLimits.MaxSetupCommands);
+                    else if (RunLine(text, "setup", dropped) is { } line) setup.Add(line);
+                }
+            string? keptNotes = null;
+            if (Text(r, "notes") is { } notes && !string.IsNullOrWhiteSpace(notes))
+            {
+                keptNotes = Block(notes);
+                if (keptNotes.Length > EvidenceLimits.MaxNotesChars)
+                {
+                    dropped.Add($"dropped evidence run.notes: over {EvidenceLimits.MaxNotesChars} characters");
+                    keptNotes = null;
+                }
+            }
+            run = new EvidenceRun(setup, RunLine(Text(r, "start"), "start", dropped), RunLine(Text(r, "url"), "url", dropped),
+                RunLine(Text(r, "ready"), "ready", dropped), keptNotes);
+        }
+
+        var features = new List<EvidenceFeature>();
+        var overflow = 0;
+        foreach (var item in Array(e, "features", required: false, dropped))
+        {
+            if (Text(item, "name") is not { } rawName || Text(item, "steps") is not { } rawSteps)
+            {
+                dropped.Add("dropped malformed evidence feature");
+                continue;
+            }
+            var label = ReviewerText.Line(rawName, MaxNameChars);
+            var name = rawName.Trim();
+            var steps = Block(rawSteps);
+            var why = name.Length == 0 ? "no name"
+                : name.Any(c => char.IsControl(c) || c is '\u0085' or '\u2028' or '\u2029') ? "the name is not a single line"
+                : name.Length > EvidenceLimits.MaxFeatureNameChars ? $"the name is over {EvidenceLimits.MaxFeatureNameChars} characters"
+                : steps.Length == 0 ? "no steps"
+                : steps.Length > EvidenceLimits.MaxFeatureStepsChars ? $"the steps are over {EvidenceLimits.MaxFeatureStepsChars} characters"
+                : features.Any(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase)) ? "duplicate name"
+                : null;
+            if (why is not null) dropped.Add($"dropped evidence feature '{label}': {why}");
+            else if (features.Count == EvidenceLimits.MaxFeatures) overflow++;
+            else features.Add(new EvidenceFeature(name, steps));
+        }
+        if (overflow > 0) dropped.Add($"dropped {overflow} evidence features: at most {EvidenceLimits.MaxFeatures}");
+
+        return new EvidenceProposal(run, features, ReviewerText.Line(Text(e, "reason"), MaxReasonChars));
+    }
+
+    /// <summary>A single-line run value within the limit, or null (blank, or dropped with a note).</summary>
+    private static string? RunLine(string? text, string field, List<string> dropped)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var value = text.Trim();
+        var why = value.Any(c => char.IsControl(c) || c is '\u0085' or '\u2028' or '\u2029') ? "not a single line"
+            : value.Length > EvidenceLimits.MaxRunFieldChars ? $"over {EvidenceLimits.MaxRunFieldChars} characters"
+            : null;
+        if (why is null) return value;
+        dropped.Add($"dropped evidence run.{field}: {why}");
+        return null;
+    }
+
+    /// <summary>Multi-line text with "\n" line breaks only and no other control or invisible format characters.</summary>
+    private static string Block(string text)
+    {
+        var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n').Replace('\u0085', '\n')
+            .Replace('\u2028', '\n').Replace('\u2029', '\n');
+        var sb = new StringBuilder(normalized.Length);
+        foreach (var c in normalized)
+        {
+            if (c == '\n') sb.Append(c);
+            else if (c == '\t') sb.Append(' ');
+            else if (!char.IsControl(c) && CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.Format) sb.Append(c);
+        }
+        return sb.ToString().Trim();
     }
 
     /// <summary>Lowercase, characters outside <c>[a-z0-9-]</c> become '-', no leading or trailing '-', at most 40 characters.</summary>

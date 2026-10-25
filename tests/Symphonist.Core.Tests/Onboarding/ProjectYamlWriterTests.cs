@@ -492,4 +492,96 @@ public class ProjectYamlWriterTests
         var ex = Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
         Assert.Contains("edit this file by hand", ex.Message);
     }
+
+    [Fact]
+    public void Evidence_round_trips_through_writer_and_loader()
+    {
+        var form = Filled();
+        form.Evidence = new EvidenceForm
+        {
+            Mode = EvidenceMode.Always,
+            Setup = ["dotnet restore", "npm ci --prefix web"],
+            Start = "* dotnet run --project src/App",
+            Url = "http://localhost:5000",
+            Ready = "Now listening",
+            Notes = "Sign in as admin.\nThen open the menu.",
+            Features =
+            [
+                new() { Name = "Done: #2 checkout", Steps = "* Add an item\nPay: with card\n" },
+                new() { Name = "search", Steps = "Type a query" },
+            ],
+            TimeoutMinutes = 45,
+            Model = "sonnet",
+            PromptPath = "prompts/evidence.md",
+        };
+        form.PrCommentsFromOthers = true;
+
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+        var back = ProjectForm.From(p, Registry);
+
+        Assert.Equal(EvidenceMode.Always, p.Evidence.Mode);
+        Assert.True(p.PrComments.FromOthers);
+        Assert.Equal(form.Evidence.Setup, back.Evidence.Setup);
+        Assert.Equal(form.Evidence.Start, back.Evidence.Start);
+        Assert.Equal(form.Evidence.Url, back.Evidence.Url);
+        Assert.Equal(form.Evidence.Ready, back.Evidence.Ready);
+        Assert.Equal(form.Evidence.Notes, back.Evidence.Notes);
+        Assert.Equal(form.Evidence.Features.Select(f => (f.Name, f.Steps)), back.Evidence.Features.Select(f => (f.Name, f.Steps)));
+        Assert.Equal(45, back.Evidence.TimeoutMinutes);
+        Assert.Equal("sonnet", back.Evidence.Model);
+        Assert.Equal("prompts/evidence.md", back.Evidence.PromptPath);
+        Assert.True(back.PrCommentsFromOthers);
+        Assert.Empty(form.Validate(Registry));
+    }
+
+    [Fact]
+    public void Default_evidence_and_pr_comments_are_omitted()
+    {
+        var sections = ProjectYamlWriter.Sections(Filled(), Registry);
+
+        Assert.Null(sections["evidence"]);
+        Assert.Null(sections["prComments"]);
+        Assert.DoesNotContain("evidence:", ProjectYamlWriter.NewFile(Filled(), Registry));
+        var off = Filled();
+        off.Evidence.Mode = EvidenceMode.Off;
+        Assert.Equal("evidence:\n  mode: off\n", ProjectYamlWriter.Sections(off, Registry)["evidence"]);
+    }
+
+    [Fact]
+    public void Update_keeps_hand_written_sections_when_evidence_changes()
+    {
+        var original = Filled();
+        var text = ProjectYamlWriter.NewFile(original, Registry).ReplaceLineEndings("\n")
+            + "\n# trailing hand comment\n";
+        var edited = original.Clone();
+        edited.Evidence.Start = "dotnet run";
+        edited.Evidence.Features.Add(new EvidenceFeatureForm { Name = "login", Steps = "Sign in" });
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Contains("# trailing hand comment", result);
+        Assert.Contains("evidence:\n  run:\n    start: dotnet run\n", result);
+        Assert.Equal("login", Parse(result).Evidence.Features.Single().Name);
+        Assert.StartsWith(text[..text.IndexOf("review:", StringComparison.Ordinal)], result);
+    }
+
+    [Fact]
+    public void Validate_rejects_what_the_loader_would()
+    {
+        var form = Filled();
+        form.Evidence.Start = new string('x', 501);
+        form.Evidence.Url = "a\nb";
+        form.Evidence.Setup = [.. Enumerable.Repeat("x", 11)];
+        form.Evidence.Features = [.. Enumerable.Range(0, 21).Select(i => new EvidenceFeatureForm { Name = "f" + i, Steps = "s" })];
+        form.Evidence.Features[0] = new() { Name = new string('n', 81), Steps = "" };
+
+        var errors = form.Validate(Registry);
+
+        Assert.Contains(errors, e => e.StartsWith("evidence.run.start is 501"));
+        Assert.Contains("evidence.run.url must be a single line", errors);
+        Assert.Contains(errors, e => e.StartsWith("evidence.run.setup has 11"));
+        Assert.Contains(errors, e => e.StartsWith("evidence.features has 21"));
+        Assert.Contains(errors, e => e.StartsWith("evidence.features[].name is 81"));
+        Assert.Contains(errors, e => e.Contains("needs steps"));
+    }
 }
