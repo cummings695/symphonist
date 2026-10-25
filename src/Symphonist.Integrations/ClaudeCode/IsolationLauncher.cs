@@ -14,6 +14,8 @@ namespace Symphonist.Integrations.ClaudeCode;
 public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher container) : IAgentLauncher
 {
     public const string DockerNotAvailable = "Docker not available";
+    public const string ImageNotPrepared =
+        "agent image not prepared (Docker was not running at startup); run the container check";
 
     private readonly ConcurrentDictionary<string, string> imageProblems = new(StringComparer.Ordinal);
     private volatile string? containersProblem;

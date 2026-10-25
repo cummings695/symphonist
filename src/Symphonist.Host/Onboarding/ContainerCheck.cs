@@ -76,8 +76,9 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
             log?.LogWarning(e, "Container check of {Project}: agent image is not available", draft.Id);
-            launcher.DisableImage(TryImageFor(draft.Agent), e.Message);
-            steps[1] = steps[1] with { Status = CheckStatus.Failed, Detail = e.Message };
+            var problem = Bounded(e.Message);
+            launcher.DisableImage(TryImageFor(draft.Agent), problem);
+            steps[1] = steps[1] with { Status = CheckStatus.Failed, Detail = problem };
             SkipFrom(2, "the agent image is not available");
             return steps;
         }
@@ -98,7 +99,7 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
-            return (false, e.Message);
+            return (false, Bounded(e.Message));
         }
         finally
         {
@@ -125,7 +126,7 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
-            return (false, $"cannot prepare the repository: {e.Message}");
+            return (false, Bounded($"cannot prepare the repository: {e.Message}"));
         }
 
         var prompt = PromptRenderer.Render(PromptLibrary.GetContainerCheck(), new Dictionary<string, string?>
@@ -153,7 +154,8 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-            await File.WriteAllTextAsync(logPath, result.RawLog, ct);
+            // Not cancellable: a cancel right after the run must not lose its log.
+            await File.WriteAllTextAsync(logPath, result.RawLog, CancellationToken.None);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -165,7 +167,7 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
             result.CostUsd is { } cost ? cost.ToString("0.00##", CultureInfo.InvariantCulture) + " USD" : "unknown");
 
         // Structured output may be present on a failed run: only a successful run's output is read.
-        if (!result.Succeeded) return (false, ReviewerText.Line(result.Error ?? "container check run failed", ReviewerText.MaxSummaryChars));
+        if (!result.Succeeded) return (false, Bounded(result.Error ?? "container check run failed"));
         if (ContainerCheckParser.Parse(result.Structured) is not { } output)
             return (false, "the agent returned no usable structured output");
 
@@ -175,6 +177,9 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
         var detail = $"build: {output.BuildCommand} ({Word(output.BuildPassed)}); {tests}. {output.Summary}".TrimEnd();
         return (output.BuildPassed && output.TestsPassed != false, detail);
     }
+
+    /// <summary>Exception and error text as one bounded line for the screen.</summary>
+    private static string Bounded(string text) => ReviewerText.Line(text, ReviewerText.MaxSummaryChars);
 
     private static string Word(bool passed) => passed ? "passed" : "failed";
 

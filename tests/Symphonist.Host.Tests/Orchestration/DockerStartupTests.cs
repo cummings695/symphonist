@@ -61,6 +61,23 @@ public sealed class DockerStartupTests : IDisposable
     }
 
     [Fact]
+    public async Task Docker_unavailable_marks_each_image_not_prepared()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", image: "acme/agent:7"));
+
+        await StartAsync();
+        // A later container check switches containers back on, but not these images.
+        launcher.EnableContainers();
+
+        foreach (var request in new[] { Request(), Request("acme/agent:7") })
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), request));
+            Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        }
+    }
+
+    [Fact]
     public async Task Removes_leftover_containers_then_ensures_each_image()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));

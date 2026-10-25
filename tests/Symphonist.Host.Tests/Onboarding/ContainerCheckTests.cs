@@ -1,9 +1,11 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Onboarding;
 using Symphonist.Host.Onboarding;
+using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 using Symphonist.Integrations;
 using Symphonist.Integrations.ClaudeCode;
@@ -285,5 +287,54 @@ public sealed class ContainerCheckTests : IDisposable
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => check.RunAsync(draft, null, cts.Token));
         Assert.Equal("remove _container-check", git.Events[^1]);
+    }
+
+    [Fact]
+    public async Task After_docker_down_start_a_check_enables_only_its_own_image()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", image: "acme/agent:7"));
+        var dockerUp = processes.OnRun;
+        processes.OnRun = _ => new ProcessResult(1, "", "cannot connect", false);
+        await new DockerStartup(new ProjectRegistry(NullLogger<ProjectRegistry>.Instance), docker, launcher,
+            NullLogger<DockerStartup>.Instance).StartAsync(CancellationToken.None);
+        processes.OnRun = dockerUp;
+
+        var steps = await check.RunAsync(draft, null, CancellationToken.None);
+
+        Assert.All(steps, s => Assert.Equal(CheckStatus.Passed, s.Status));
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(draft.Agent)).FileName);
+        var billing = draft.Agent with { Image = "acme/agent:7" };
+        var ex = Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), Request(billing)));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+    }
+
+    [Fact]
+    public async Task Exception_details_are_one_bounded_line()
+    {
+        git.PrepareError = new InvalidOperationException("clone failed\n\u001b[31m" + new string('x', 2000));
+
+        var steps = await check.RunAsync(draft, null, CancellationToken.None);
+
+        Assert.Equal(CheckStatus.Failed, steps[2].Status);
+        Assert.StartsWith("cannot prepare the repository: clone failed [31m", steps[2].Detail);
+        Assert.True(steps[2].Detail.Length <= 500);
+        Assert.DoesNotContain('\n', steps[2].Detail);
+    }
+
+    [Fact]
+    public async Task Log_is_written_when_cancelled_right_after_the_run()
+    {
+        using var cts = new CancellationTokenSource();
+        agent.OnRunCancellableAsync = (_, _) =>
+        {
+            cts.Cancel();
+            return Task.FromResult(FakeAgentRunner.Fail("cancelled"));
+        };
+
+        await check.RunAsync(draft, null, cts.Token);
+
+        var log = Path.Combine(home.Path, "logs", "orders", "_onboarding", "container-check-20261025T100000Z.json");
+        Assert.Equal("""{"raw":false}""", File.ReadAllText(log));
     }
 }

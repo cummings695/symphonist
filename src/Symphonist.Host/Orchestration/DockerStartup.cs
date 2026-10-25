@@ -29,6 +29,13 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
             log.LogError("Docker is not available (is Docker running?); agent stages of container-isolated projects will fail with \"{Error}\"",
                 IsolationLauncher.DockerNotAvailable);
             launcher.DisableContainers(IsolationLauncher.DockerNotAvailable);
+            // A container check later re-enables containers for every project, but only the image it ensured: the
+            // others stay refused rather than running a stale local image (old firewall or entrypoint).
+            foreach (var settings in images)
+            {
+                try { launcher.DisableImage(DockerLauncher.ImageFor(settings), IsolationLauncher.ImageNotPrepared); }
+                catch (ArgumentException) { } // invalid image name: EnsureImage reports it once Docker is back
+            }
             return;
         }
 
