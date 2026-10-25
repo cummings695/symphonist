@@ -83,6 +83,8 @@ public class ProjectYamlWriterTests
     [InlineData("a, b")]
     [InlineData("null")]
     [InlineData("https://x.example/a#b")]
+    [InlineData("\u00A0Orders\u3000")]
+    [InlineData("...")]
     public void Awkward_scalars_round_trip(string status)
     {
         var form = Filled();
@@ -276,5 +278,134 @@ public class ProjectYamlWriterTests
     {
         var form = Filled();
         Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update("{id: orders}", form, form.Clone(), Registry));
+    }
+
+    [Theory]
+    [InlineData("a\nb")]
+    [InlineData("a\u2028b")]
+    [InlineData("a\u0085b")]
+    public void Multi_line_values_are_refused_by_the_writer(string value)
+    {
+        var form = Filled();
+        form.Name = value;
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.NewFile(form, Registry));
+        Assert.Contains("name must be a single line", form.Validate(Registry));
+    }
+
+    [Fact]
+    public void Unicode_line_separators_fail_validation_in_list_items()
+    {
+        var form = Filled();
+        form.Pipeline[0].EntryStatuses = ["a\u2029b"];
+        Assert.Contains("pipeline stage 'triage' entryStatuses must be a single line", form.Validate(Registry));
+    }
+
+    // Unmodelled keys the loader would refuse still must not be dropped or mangled by a splice.
+    private static (string Text, ProjectForm Form) WithTrackerExtras(string extras)
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        return (text.Replace(tracker, tracker + extras), form);
+    }
+
+    private static Dictionary<object, object?> RawTracker(string text) =>
+        (Dictionary<object, object?>)new YamlDotNet.Serialization.DeserializerBuilder().Build()
+            .Deserialize<Dictionary<string, object?>>(text)["tracker"]!;
+
+    [Fact]
+    public void Update_copies_list_map_and_block_scalar_unmodelled_keys_from_source()
+    {
+        var (text, form) = WithTrackerExtras(
+            "  extraList: [a, 'b: c']   # kept comment\n" +
+            "  extraMap:\n" +
+            "    k: v\n" +
+            "  notes: |\n" +
+            "    line1\n" +
+            "    # not a comment\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        Assert.Contains("  extraList: [a, 'b: c']   # kept comment\n  extraMap:\n    k: v\n  notes: |\n    line1\n    # not a comment\n", result);
+        var tracker = RawTracker(result);
+        Assert.Equal("Robot", tracker["label"]);
+        Assert.Equal(new List<object?> { "a", "b: c" }, tracker["extraList"]);
+        Assert.Equal("v", ((Dictionary<object, object?>)tracker["extraMap"]!)["k"]);
+        Assert.Equal("line1\n# not a comment\n", tracker["notes"]);
+    }
+
+    [Fact]
+    public void Update_reindents_unmodelled_keys_of_a_hand_indented_section()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        var indented = tracker.Replace("\n  ", "\n    ") + "    extraMap:\n      k: v\n    notes: >\n      folded\n";
+        text = text.Replace(tracker, indented);
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        Assert.Contains("  label: Robot\n", result);
+        Assert.Contains("  extraMap:\n    k: v\n  notes: >\n    folded\n", result);
+        Assert.Equal("v", ((Dictionary<object, object?>)RawTracker(result)["extraMap"]!)["k"]);
+    }
+
+    [Fact]
+    public void Update_renders_unmodelled_keys_of_a_flow_section()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        text = text.Replace(tracker,
+            "tracker: { type: github-projects, owner: acme, project: 7, label: Claude, tokenSecret: github-orders, extraList: [a, 'b, c'], extraMap: { k: v } }\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        var raw = RawTracker(result);
+        Assert.Equal("Robot", raw["label"]);
+        Assert.Equal(new List<object?> { "a", "b, c" }, raw["extraList"]);
+        Assert.Equal("v", ((Dictionary<object, object?>)raw["extraMap"]!)["k"]);
+    }
+
+    [Fact]
+    public void Update_refuses_a_multi_line_unmodelled_value_it_cannot_copy()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        text = text.Replace(tracker,
+            "tracker: { type: github-projects, owner: acme, project: 7, label: Claude, tokenSecret: github-orders, notes: \"a\nb\" }\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+    }
+
+    [Fact]
+    public void Update_refuses_duplicate_nested_keys()
+    {
+        var (text, form) = WithTrackerExtras("  label: twice\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+    }
+
+    [Fact]
+    public void Update_wraps_deserializer_errors()
+    {
+        // The splicer accepts the tag; the raw deserializer cannot read "abc" as an int.
+        var (text, form) = WithTrackerExtras("  extra: !!int abc\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var ex = Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+        Assert.Contains("edit this file by hand", ex.Message);
     }
 }

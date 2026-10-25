@@ -93,8 +93,28 @@ public class ProjectYamlDocumentTests
     [InlineData("- a\n- b")]
     [InlineData("id: a\nid: b")]
     [InlineData("")]
+    [InlineData("#a\r#b\nid: a\nname: b\n")]
+    [InlineData("id: a\rname: b\r")]
+    [InlineData("id: a\u0085name: b\n")]
+    [InlineData("# x\u2028y\nid: a\n")]
+    [InlineData("id: a\u2029name: b\n")]
+    [InlineData("id: a\n...\n")]
+    [InlineData("  id: a\n  name: b\n")]
     public void Unsafe_documents_are_refused(string text)
     {
         Assert.Throws<ProjectYamlEditException>(() => ProjectYamlDocument.Parse(text));
+    }
+
+    [Fact]
+    public void Entries_are_source_text_reindented_to_two_spaces()
+    {
+        const string text = "id: a\ntracker:\n    type: x   # t\n    # about notes\n    notes: |\n      kept\n\n    list:\n      - a\n# next\nname: b\n";
+
+        var entries = ProjectYamlDocument.Parse(text).Entries("tracker")!;
+
+        Assert.Equal("  type: x   # t\n", entries["type"]);
+        Assert.Equal("  notes: |\n    kept\n", entries["notes"]);
+        Assert.Equal("  list:\n    - a\n", entries["list"]);
+        Assert.Null(ProjectYamlDocument.Parse("id: a\ntracker: { type: x }\n").Entries("tracker"));
     }
 }

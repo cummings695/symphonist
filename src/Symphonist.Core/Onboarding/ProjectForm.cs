@@ -301,14 +301,15 @@ public sealed class ProjectForm
     private static void Items(string field, List<string> items, List<string> errors)
     {
         if (items.Any(string.IsNullOrWhiteSpace)) errors.Add($"{field} contains an empty item");
-        var bad = items.FirstOrDefault(i => i.Any(char.IsControl));
+        var bad = items.FirstOrDefault(i => i.Any(c => char.IsControl(c) || c is '\u2028' or '\u2029'));
         if (bad is not null) Line(field, bad, errors);
     }
 
     private static void Line(string field, string? value, List<string> errors)
     {
         if (value is null) return;
-        if (value.Contains('\n') || value.Contains('\r')) errors.Add($"{field} must be a single line");
+        // YAML also reads NEL and the Unicode line/paragraph separators as line breaks.
+        if (value.IndexOfAny(['\n', '\r', '\u0085', '\u2028', '\u2029']) >= 0) errors.Add($"{field} must be a single line");
         else if (value.Any(char.IsControl)) errors.Add($"{field} contains a control character");
     }
 

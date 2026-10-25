@@ -81,7 +81,7 @@ public static class ProjectYamlWriter
         foreach (var slot in ProviderSlots)
         {
             if (!changed.TryGetValue(slot, out var text) || text is null) continue;
-            raw ??= new DeserializerBuilder().Build().Deserialize<Dictionary<string, object?>>(existingText) ?? [];
+            raw ??= Deserialize(existingText);
             if (raw.GetValueOrDefault(slot) is not Dictionary<object, object?> existing) continue;
             var section = slot switch { "tracker" => edited.Tracker, "repo" => edited.Repo, _ => edited.Build };
             if (!Equals(existing.GetValueOrDefault("type"), section.Type)) continue;
@@ -91,17 +91,34 @@ public static class ProjectYamlWriter
                 "repo" => providers.Repo(section.Type).Fields,
                 _ => providers.Build(section.Type).Fields,
             };
+            // Unmodelled keys are copied from their source text when the section is a block mapping (keeping block
+            // scalars and comments), else rendered from their parsed value.
+            var sources = document.Entries(slot);
             var extra = new StringBuilder(text);
             foreach (var (key, value) in existing)
             {
                 var name = key as string;
                 if (name is null || name == "type" || fields.Any(f => f.Key == name)) continue;
-                extra.Append($"  {Scalar(name)}: {Value(value)}\n");
+                if (sources is not null && sources.TryGetValue(name, out var source)) extra.Append(source);
+                else extra.Append($"  {Scalar(name)}: {Value(value)}\n");
             }
             changed[slot] = extra.ToString();
         }
 
         return document.Replace(changed);
+    }
+
+    private static Dictionary<string, object?> Deserialize(string text)
+    {
+        try
+        {
+            return new DeserializerBuilder().Build().Deserialize<Dictionary<string, object?>>(text) ?? [];
+        }
+        catch (Exception ex) when (ex is not ProjectYamlEditException)
+        {
+            throw new ProjectYamlEditException(
+                $"cannot update this project file safely because it could not be read ({ex.Message}); edit this file by hand");
+        }
     }
 
     private static string ProviderSection(string slot, ProviderSectionForm section, IReadOnlyList<ProviderField> fields)
@@ -255,9 +272,13 @@ public static class ProjectYamlWriter
         if (flow) emitter.Emit(new SequenceEnd());
         emitter.Emit(new DocumentEnd(true));
         emitter.Emit(new StreamEnd());
-        // A lone document scalar may be followed by a "..." end marker line.
-        var text = writer.ToString().ReplaceLineEndings("\n").Split('\n')[0].Trim();
-        return flow ? text[1..^1] : text;
+        // Keep the text exactly (no Trim: it would also strip Unicode spaces from the value); drop only the line
+        // endings and the "..." end marker a lone document scalar may get.
+        var lines = writer.ToString().Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+        while (lines.Count > 0 && (lines[^1].Length == 0 || lines[^1] == "...")) lines.RemoveAt(lines.Count - 1);
+        if (lines.Count != 1 || lines[0].IndexOfAny(['\r', '\u0085', '\u2028', '\u2029']) >= 0)
+            throw new ProjectYamlEditException("a value contains a line break and cannot be written on one line");
+        return flow ? lines[0][1..^1] : lines[0];
     }
 
     private static string Scalar(string value) => Scalar(value, flow: false);
