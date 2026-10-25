@@ -83,11 +83,31 @@ public sealed class GitHubProjectsTracker(HttpClient http, GitHubProjectsTracker
         return tickets;
     }
 
-    public Task<bool> TransitionAsync(string key, string targetStatus, CancellationToken ct) =>
-        throw new NotImplementedException();
+    public async Task<bool> TransitionAsync(string key, string targetStatus, CancellationToken ct)
+    {
+        var (board, item) = await ResolveAsync(key, ct);
+        if (!board.OptionIds.TryGetValue(targetStatus, out var optionId)) return false;
 
-    public Task CommentAsync(string key, string markdown, CancellationToken ct) =>
-        throw new NotImplementedException();
+        using var _ = await _api.GraphQlAsync(GitHubProjectsQueries.SetStatus,
+            Vars(("project", board.ProjectId), ("item", item.ItemId), ("field", board.FieldId), ("option", optionId)), ct);
+        return true;
+    }
+
+    public async Task CommentAsync(string key, string markdown, CancellationToken ct)
+    {
+        var (_, item) = await ResolveAsync(key, ct);
+        using var __ = await _api.GraphQlAsync(GitHubProjectsQueries.AddComment,
+            Vars(("subject", item.IssueId), ("body", markdown)), ct);
+    }
+
+    /// <summary>The board and item behind a key; queries once when the key is not known yet.</summary>
+    private async Task<(Board Board, ItemRef Item)> ResolveAsync(string key, CancellationToken ct)
+    {
+        if (_snapshot is { } known && known.Items.TryGetValue(key, out var item)) return (known.Board, item);
+        await QueryAsync(ct);
+        if (_snapshot is { } fresh && fresh.Items.TryGetValue(key, out item)) return (fresh.Board, item);
+        throw new InvalidOperationException($"ticket {key} is not on GitHub project {Name}");
+    }
 
     /// <summary>The item's key and status when it passes every filter, else null.</summary>
     private (string Key, string Status)? Keep(JsonElement item, string viewer)

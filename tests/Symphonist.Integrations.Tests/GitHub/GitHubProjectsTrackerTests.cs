@@ -220,4 +220,106 @@ public class GitHubProjectsTrackerTests
 
         await Assert.ThrowsAsync<HttpRequestException>(() => Tracker(stub).QueryAsync(CancellationToken.None));
     }
+
+    private const string MutationOk = """{"data":{"ok":{"clientMutationId":null}}}""";
+
+    private static StubHttpHandler BoardWithMutations() => Board()
+        .On(HttpMethod.Post, GraphQl, HttpStatusCode.OK, MutationOk, "mutation SetStatus")
+        .On(HttpMethod.Post, GraphQl, HttpStatusCode.OK, MutationOk, "mutation AddComment");
+
+    [Fact]
+    public async Task Transition_sets_single_select_option()
+    {
+        var stub = BoardWithMutations();
+        var tracker = Tracker(stub);
+        await tracker.QueryAsync(CancellationToken.None);
+
+        Assert.True(await tracker.TransitionAsync("orders-12", "in review", CancellationToken.None));
+
+        var vars = Assert.Single(Bodies(stub, "mutation SetStatus")).GetProperty("variables");
+        Assert.Equal("PVT_kwDOA1", vars.GetProperty("project").GetString());
+        Assert.Equal("PVTI_12", vars.GetProperty("item").GetString());
+        Assert.Equal("PVTSSF_status", vars.GetProperty("field").GetString());
+        Assert.Equal("opt-review", vars.GetProperty("option").GetString());
+    }
+
+    [Fact]
+    public async Task Transition_to_unknown_option_returns_false()
+    {
+        var stub = BoardWithMutations();
+        var tracker = Tracker(stub);
+        await tracker.QueryAsync(CancellationToken.None);
+
+        Assert.False(await tracker.TransitionAsync("orders-12", "Nowhere", CancellationToken.None));
+        Assert.Empty(Bodies(stub, "mutation SetStatus"));
+    }
+
+    [Fact]
+    public async Task Transition_before_query_queries_first()
+    {
+        var stub = BoardWithMutations();
+
+        Assert.True(await Tracker(stub).TransitionAsync("orders-12", "In Review", CancellationToken.None));
+
+        Assert.Equal(2, Bodies(stub, "query Items").Count);
+        Assert.Single(Bodies(stub, "mutation SetStatus"));
+    }
+
+    [Fact]
+    public async Task Transition_of_unknown_key_requeries_once_then_throws()
+    {
+        var stub = BoardWithMutations();
+        var tracker = Tracker(stub);
+        await tracker.QueryAsync(CancellationToken.None);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => tracker.TransitionAsync("orders-99", "In Review", CancellationToken.None));
+
+        Assert.Equal("ticket orders-99 is not on GitHub project acme/7", ex.Message);
+        Assert.Equal(2, Bodies(stub, "query Project").Count);
+        Assert.Empty(Bodies(stub, "mutation SetStatus"));
+    }
+
+    [Fact]
+    public async Task Comment_posts_markdown_to_issue()
+    {
+        var stub = BoardWithMutations();
+        var tracker = Tracker(stub);
+        await tracker.QueryAsync(CancellationToken.None);
+
+        const string markdown = "## Plan\n- step *one*";
+        await tracker.CommentAsync("orders-12", markdown, CancellationToken.None);
+
+        var vars = Assert.Single(Bodies(stub, "mutation AddComment")).GetProperty("variables");
+        Assert.Equal("I_12", vars.GetProperty("subject").GetString());
+        Assert.Equal(markdown, vars.GetProperty("body").GetString());
+    }
+
+    [Fact]
+    public async Task Comment_on_unknown_key_requeries_once_then_throws()
+    {
+        var stub = BoardWithMutations();
+        var tracker = Tracker(stub);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => tracker.CommentAsync("orders-99", "hi", CancellationToken.None));
+
+        Assert.Equal("ticket orders-99 is not on GitHub project acme/7", ex.Message);
+        Assert.Single(Bodies(stub, "query Project"));
+        Assert.Empty(Bodies(stub, "mutation AddComment"));
+    }
+
+    [Fact]
+    public void Issue_url_uses_repository_owner()
+    {
+        var project = GitHubProjectsProviderTests.Project(GitHubProjectsProviderTests.TrackerConfig(repositories: ["acme/orders", "Other/Billing"]));
+        var provider = new GitHubProjectsProvider();
+
+        Assert.Equal(new Uri("https://github.com/acme/orders/issues/12"), provider.IssueUrl(project, "orders-12"));
+        Assert.Equal(new Uri("https://github.com/Other/Billing/issues/3"), provider.IssueUrl(project, "billing-3"));
+        Assert.Equal(new Uri("https://github.com/acme/misc-tool/issues/4"), provider.IssueUrl(project, "misc-tool-4"));
+        Assert.Null(provider.IssueUrl(project, "orders"));
+        Assert.Null(provider.IssueUrl(project, "orders-x"));
+        Assert.Null(provider.IssueUrl(project, "-5"));
+    }
 }

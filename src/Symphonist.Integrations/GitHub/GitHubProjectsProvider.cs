@@ -44,8 +44,21 @@ public sealed class GitHubProjectsProvider : ITrackerProvider
         new GitHubProjectsTracker(http, Config(project), token, PickupStatuses(project), RequiredStatuses(project),
             Repositories(project));
 
-    // Task 6 derives this from the key and the repositories list.
-    public Uri? IssueUrl(ProjectConfig project, string key) => throw new NotImplementedException();
+    /// <summary>Key = <c>{repository name}-{issue number}</c>; the owner is that of the matching repositories entry.</summary>
+    public Uri? IssueUrl(ProjectConfig project, string key)
+    {
+        var dash = key.LastIndexOf('-');
+        if (dash <= 0 || !int.TryParse(key.AsSpan(dash + 1), NumberStyles.None, CultureInfo.InvariantCulture, out var number)
+            || number <= 0)
+            return null;
+        var name = key[..dash];
+        var (owner, repo) = Repositories(project)?
+            .Select(r => r.Split('/'))
+            .Where(parts => parts.Length == 2 && string.Equals(parts[1], name, StringComparison.OrdinalIgnoreCase))
+            .Select(parts => (parts[0], parts[1]))
+            .FirstOrDefault() is { Item1: not null } match ? match : (Config(project).Owner, name);
+        return new Uri($"https://github.com/{owner}/{repo}/issues/{number.ToString(CultureInfo.InvariantCulture)}");
+    }
 
     /// <summary>The configured <c>statuses</c>, else every pipeline-named status except the done stage's.</summary>
     public static IReadOnlyList<string> PickupStatuses(ProjectConfig p)

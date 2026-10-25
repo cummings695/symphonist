@@ -66,4 +66,20 @@ internal static class GitHubProjectsQueries
           }
         }
         """;
+
+    /// <summary>Variables: <c>project</c>, <c>item</c>, <c>field</c>, <c>option</c> (all ID!).</summary>
+    public const string SetStatus = """
+        mutation SetStatus($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+          updateProjectV2ItemFieldValue(input: {
+            projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option }
+          }) { clientMutationId }
+        }
+        """;
+
+    /// <summary>Variables: <c>subject</c> (ID!, the issue node id), <c>body</c> (String!, Markdown).</summary>
+    public const string AddComment = """
+        mutation AddComment($subject: ID!, $body: String!) {
+          addComment(input: { subjectId: $subject, body: $body }) { clientMutationId }
+        }
+        """;
 }
