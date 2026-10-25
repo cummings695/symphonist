@@ -41,7 +41,8 @@ build:
   type: github-actions          # build/release status is read from GitHub Actions runs of the repo above
   # timeoutMinutes: 45          # default: 45
   # Optional workflow files (names under .github/workflows) that count for each stage. Each listed workflow must have
-  # a run on the commit, or the stage keeps waiting until the timeout. Default: every workflow run on the commit counts.
+  # a run on the commit: until it does the stage reads as running (other runs exist) or not found (none), and the stage
+  # timeout ends the wait either way. Default: every workflow run on the commit counts.
   # buildWorkflows: [ci.yml]      # build stage (the merge commit on mainBranch)
   # deployWorkflows: [deploy.yml] # deploy stage (the merge commit on productionBranch)
 

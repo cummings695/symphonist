@@ -26,7 +26,8 @@ repo:
   # mergeStrategy: merge_commit # default: merge_commit
 
 build:
-  type: bitbucket-pipelines     # or "github-actions" (needs repo.type: github). Build/release status is read from Bitbucket Pipelines
+  type: bitbucket-pipelines     # build/release status is read from Bitbucket Pipelines, or "github-actions"
+                                # (needs repo.type: github)
   # timeoutMinutes: 45          # default: 45
 
 agent:

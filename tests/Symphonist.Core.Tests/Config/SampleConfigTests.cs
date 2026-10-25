@@ -1,7 +1,7 @@
 using System.Text.RegularExpressions;
-using Symphonist.Integrations.GitHub;
-using Symphonist.Integrations;
 using Symphonist.Core.Config;
+using Symphonist.Integrations;
+using Symphonist.Integrations.GitHub;
 
 namespace Symphonist.Core.Tests.Config;
 

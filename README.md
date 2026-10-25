@@ -2,18 +2,18 @@
 
 A local, cross-platform (.NET 10) orchestrator for agentic development. It watches Jira tickets for your projects, runs
 Claude Code on them stage by stage (triage, plan, implement, build, release, deploy), pauses at the gates you configure
-for your approval, and drives the Jira card and the Bitbucket pull requests along the way. A host process does the work;
-the `symphonist` CLI talks to it over a local API.
+for your approval, and drives the tracker card (Jira or GitHub Projects) and the pull requests (Bitbucket or GitHub)
+along the way. A host process does the work; the `symphonist` CLI talks to it over a local API.
 
 ## Prerequisites
 
 - .NET 10 SDK.
 - A Docker-compatible engine, running (needed for the default `container` isolation).
 - The `claude` CLI, logged in (used once to create a long-lived token).
-- git, with credentials for Bitbucket already working on this machine. Symphonist pushes from the host with your git
+- git, with credentials for Bitbucket or GitHub already working on this machine. Symphonist pushes from the host with your git
   credentials; they are never given to the agent.
 - A Jira Cloud account and a Bitbucket Cloud account for the project you want to automate, or a GitHub account (github.com)
-  if the project uses GitHub Projects, a GitHub repository and GitHub Actions. The slots can be mixed, see step 4.
+  if the project uses GitHub Projects, a GitHub repository and GitHub Actions. The slots can be mixed, see step 5.
 
 ## One-time setup
 
