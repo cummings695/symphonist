@@ -571,17 +571,23 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
-    public async Task Desktop_width_renders_plain_headings()
+    public async Task Desktop_width_folds_every_stage_including_empty_ones()
     {
-        await SeedDefault();
+        await Seed("ORD-1", "plan", StageStatus.Pending);
         var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
         module.Setup<Dictionary<string, bool>?>("load", _ => true).SetResult(null);
         module.Setup<bool>("watchPhone", _ => true).SetResult(false);
+        module.Setup<bool>("save", _ => true).SetResult(true);
 
         var cut = RenderBoard();
 
-        cut.WaitForAssertion(() => Assert.Empty(cut.FindAll(".column-header button")));
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-column='Triage'] .column-header button")));
         Assert.Equal("Plan", cut.Find("[data-column='Plan'] .column-title").TextContent.Trim());
+
+        Toggle(cut, "Triage").Click(); // empty, but still a lane's width on a desktop
+        Assert.Contains("collapsed", Column(cut, "Triage").ClassList);
+        Assert.Equal(new Dictionary<string, bool> { ["Triage"] = true },
+            module.Invocations["save"][^1].Arguments[0] as Dictionary<string, bool>);
     }
 
     [Fact]

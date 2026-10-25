@@ -1,4 +1,5 @@
-// Folded board stages at phone width: remembers the stages the developer folded or unfolded, per browser.
+// Folded board stages (a header line at phone width, an upright strip on a desktop): remembers the stages the
+// developer folded or unfolded, per browser.
 // Nothing here throws: storage may be unavailable (private windows, blocked site data).
 
 const key = "symphonist.board.folded";
