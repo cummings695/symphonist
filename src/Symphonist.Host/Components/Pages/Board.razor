@@ -24,7 +24,10 @@
     {
         <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
     }
-    <button type="button" class="button button-quiet page-head-action" disabled="@reloading" @onclick="ReloadProjectsAsync">Reload projects</button>
+    <div class="page-head-action">
+        <a class="button button-quiet" href="/projects/new">Add project</a>
+        <button type="button" class="button button-quiet" disabled="@reloading" @onclick="ReloadProjectsAsync">Reload projects</button>
+    </div>
 </div>
 
 @if (Registry.LoadErrors.Count > 0)
@@ -51,7 +54,7 @@ else
         {
             <section class="setup-hint">
                 <h2>No projects configured</h2>
-                <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>, then use Reload projects.</p>
+                <p>Use <a href="/projects/new">Add project</a>, or add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code> and use Reload projects.</p>
             </section>
         }
         else if (filtered is null && model.Projects.Any(p => p.Problem is { Length: > 0 }))

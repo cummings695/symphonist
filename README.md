@@ -63,7 +63,8 @@ is never taken from arguments.
    GitHub's docs on these gaps say they are not permanent, so re-check them if you want a fine-grained token for a
    personal board.
 
-5. Project file: copy `samples/projects/orders.example.yaml` (Jira and Bitbucket) or
+5. Project: add it on the dashboard's setup screen (see [Adding a project](#adding-a-project)), which also stores its
+   secrets. Or, by hand, copy `samples/projects/orders.example.yaml` (Jira and Bitbucket) or
    `samples/projects/orders-github.example.yaml` (all GitHub) to `~/.symphonist/projects/<name>.yaml` and edit it. The
    example documents every field. The host reads `*.yaml` / `*.yml` from the `projects` folder of `$SYMPHONIST_HOME`
    (default `~/.symphonist`). An invalid file is logged and skipped, as are all files declaring the same project `id`;
@@ -118,6 +119,36 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
   container sandbox and `allowedDomains`. A passing Docker step switches container runs back on, and a ready image
   clears that image's startup error, so no restart is needed. It can be cancelled, and a failing check does not stop
   you saving. Host-isolated projects skip it. Its log is written to `logs/<id>/_onboarding/container-check-<time>.json`.
+
+## Adding a project
+
+The dashboard's setup screen adds a project, or edits one, without touching YAML:
+
+1. Run `symphonist dashboard` and choose **Add project** on the board. To edit an existing project, open its board and
+   choose **Setup**.
+2. Pick the tracker, repository and build providers. The fields shown are the ones that provider's section of the
+   project file takes; required ones say "(required)". For Jira, entering a project key fills a blank JQL with
+   `project = KEY AND assignee = currentUser() AND labels = Claude AND statusCategory != Done`.
+3. Fill in the connections, and enter each secret in its password field with **Save secret**. The value goes straight to
+   the OS credential store; it is never shown again, kept by the page or written to the project file. The default
+   names follow the project id (`jira-<id>`, `bitbucket-<id>`, `github-<id>`). GitHub token scopes are as in
+   [One-time setup](#one-time-setup) step 4.
+4. **Check connections**. Each check says Passed, Failed or Skipped, with the reason. Nothing is written to the tracker or
+   the repository.
+5. **Propose mapping and risk areas**. An agent reads the tracker's statuses and a read-only clone of the repository and
+   proposes the statuses for each stage, extra stages and risk areas, each with its reason.
+6. Review the proposal, edit it, and **Apply proposal**. Applying changes only the form: stages it changes show
+   "(changed)", proposed stages are added only if you tick them, and a status your tracker does not have says so next to
+   the field.
+7. Optionally **Run container check** (container projects): it builds the agent image and lets an agent build and test
+   the repository in a throwaway clone.
+8. **Save project**. Nothing reaches the projects folder or the orchestrator before this. The file is checked by the
+   same loader the host uses before it is written, a new project is saved as `<id>.yaml`, and the projects reload.
+
+Editing an existing project rewrites only the sections you changed: comments and formatting elsewhere in the file stay,
+comments inside a changed section are lost, and the previous file is kept as `<file>.bak`. A save is refused (and
+nothing written) when the file changed on disk since you opened the screen, or when the pipeline drops a stage that
+active tickets sit at. The project id cannot be changed.
 
 ## Daily use
 

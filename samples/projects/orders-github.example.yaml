@@ -1,8 +1,9 @@
 # Example Symphonist project that uses GitHub for everything: a GitHub Projects board, a GitHub repository and GitHub
 # Actions. Copy to ~/.symphonist/projects/<anything>.yaml (or $SYMPHONIST_HOME/projects/) and replace the placeholder
-# values. Field names are camelCase. Invalid files are logged and skipped by the host. See orders.example.yaml for the
-# Jira + Bitbucket version and for the fields not repeated here (review, prompts, ...). The three slots can be mixed
-# (for example Jira with a GitHub repo); build.type: github-actions needs repo.type: github.
+# values, or use the dashboard's Add project. Field names are camelCase. Invalid files are logged and skipped by the
+# host. See orders.example.yaml for the Jira + Bitbucket version and for the fields not repeated here (review,
+# prompts, ...). The three slots can be mixed (for example Jira with a GitHub repo); build.type: github-actions needs
+# repo.type: github.
 
 id: orders-github               # unique project id; used in CLI commands (symphonist show orders-github orders-123)
 name: Orders (Acme, GitHub)     # display name (defaults to id)

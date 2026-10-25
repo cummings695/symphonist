@@ -1,0 +1,672 @@
+@page "/projects/new"
+@page "/projects/{Id}/setup"
+@using Symphonist.Core.Integrations.Providers
+@using Symphonist.Core.Onboarding
+@using Symphonist.Core.Risk
+@using Symphonist.Host.Onboarding
+@implements IDisposable
+@inject OnboardingService Service
+@inject ProviderRegistry Providers
+@inject DashboardChrome Chrome
+@inject NavigationManager Navigation
+@inject ILogger<ProjectSetup> Log
+
+@* Adds a project or edits one. Everything typed here stays in the setup session (see OnboardingService) until Save
+   project; secret values go straight to the secret store and are never kept or shown. All tracker-, agent- and
+   file-derived text is rendered as plain text. *@
+<div class="setup">
+    <nav class="setup-crumbs" aria-label="Breadcrumb">
+        <a href="@BoardLink">Board</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">@(Id is null ? "Add project" : "Setup")</span>
+    </nav>
+    <h1 class="page-title">@Heading</h1>
+
+    @if (notFound)
+    {
+        <p>No project '@Id'. <a href="/">Back to the board</a></p>
+    }
+    else if (openError is not null)
+    {
+        <p class="setup-alert" role="alert">@openError</p>
+    }
+    else if (savedFile is not null)
+    {
+        <section class="setup-saved" data-saved role="status">
+            <p>Saved @savedFile</p>
+            <p><a href="@($"/?project={Uri.EscapeDataString(savedId!)}")">Back to the board</a></p>
+        </section>
+    }
+    else if (session is not null)
+    {
+        @if (ended is not null)
+        {
+            <p class="setup-alert" role="alert">@ended <a href="@Navigation.Uri" data-reload @onclick="Reload" @onclick:preventDefault>Reload the page</a></p>
+        }
+
+        <section class="setup-section" aria-labelledby="setup-connections">
+            <h2 id="setup-connections">Connections</h2>
+            <div class="setup-fields">
+                <div class="setup-field">
+                    <label for="project-id">Project id (required)</label>
+                    @if (IsNew)
+                    {
+                        <input id="project-id" type="text" value="@Form.Id" autocomplete="off" spellcheck="false"
+                               aria-describedby="project-id-hint" @onchange="SetId" />
+                        <span class="hint" id="project-id-hint">Lowercase letters, digits and '-'; the file is saved as {id}.yaml</span>
+                    }
+                    else
+                    {
+                        <input id="project-id" type="text" value="@Form.Id" readonly aria-describedby="project-id-hint" />
+                        <span class="hint" id="project-id-hint">Fixed: every stored ticket is keyed by it</span>
+                    }
+                </div>
+                <div class="setup-field">
+                    <label for="project-name">Name</label>
+                    <input id="project-name" type="text" autocomplete="off" placeholder="@Form.Id" @bind="Form.Name" @bind:after="Edited" />
+                </div>
+            </div>
+
+            <ProviderSectionEditor Title="Tracker" IdPrefix="tracker" Section="Form.Tracker" Providers="TrackerChoices"
+                                   OnTypeChanged="ChangeTrackerType" OnChanged="TrackerEdited" />
+            <ProviderSectionEditor Title="Repository" IdPrefix="repo" Section="Form.Repo" Providers="RepoChoices"
+                                   OnTypeChanged="ChangeRepoType" OnChanged="Edited" />
+            <ProviderSectionEditor Title="Build" IdPrefix="build" Section="Form.Build" Providers="BuildChoices"
+                                   OnTypeChanged="ChangeBuildType" OnChanged="Edited"
+                                   Suggestions="@(session.Connections?.Build?.Workflows ?? [])" />
+
+            <div class="setup-secrets">
+                <h3>Secrets</h3>
+                @if (IsNew && Form.Id.Length == 0)
+                {
+                    <p class="hint">Enter the project id first: it names the secrets.</p>
+                }
+                else
+                {
+                    <p class="hint">Stored in this machine's credential store, never in the project file. Saving a value here replaces the stored one.</p>
+                    @foreach (var name in SecretsInUse())
+                    {
+                        <SecretField @key="name" Name="@name" State="@SecretState(name)" OnSave="SaveSecret" />
+                    }
+                }
+            </div>
+
+            <div class="setup-actions">
+                <button type="button" class="button" disabled="@Running" @onclick="CheckConnectionsAsync">Check connections</button>
+            </div>
+            @if (session.Connections is { } report)
+            {
+                <CheckList Steps="report.Steps" Name="connections" Label="Connection checks" />
+            }
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-mapping">
+            <h2 id="setup-mapping">Pipeline and state mapping</h2>
+            <p class="hint">
+                Each stage starts from its entry statuses and moves the ticket to "on enter" and "on gate" statuses; a gated
+                stage is approved when the ticket reaches "approved when".
+            </p>
+            <MappingTable Stages="Form.Pipeline" Baseline="@(session.Original?.Pipeline ?? baseline)"
+                          Statuses="@(session.Connections?.Tracker?.Statuses.Select(s => s.Name).ToList() ?? [])"
+                          StatusSource="@session.Connections?.Tracker?.StatusSource"
+                          MissingStatusEffect="@SetupHints.MissingStatusEffect(Form.Tracker.Type)" OnChanged="Edited" />
+
+            <div class="setup-actions">
+                <button type="button" class="button" disabled="@Running" @onclick="ProposeAsync">Propose mapping and risk areas</button>
+                <span class="hint">An agent reads the tracker statuses and a read-only clone of the repository. Needs the connection check.</span>
+            </div>
+            @if (VisibleProposal is { } proposal)
+            {
+                <div class="proposal" data-proposal aria-labelledby="proposal-heading">
+                    <h3 id="proposal-heading">Proposal</h3>
+                    @if (proposal.Error is { } error)
+                    {
+                        <p class="setup-alert" role="alert">Proposal failed: @error. Fill the mapping by hand, or try again.</p>
+                    }
+                    @if (proposal.Stages.Count > 0)
+                    {
+                        <ul class="proposal-list">
+                            @foreach (var mapping in proposal.Stages)
+                            {
+                                <li data-proposed-stage="@mapping.StageId"><span class="badge">Proposed</span> <strong>@mapping.StageId</strong>: @Describe(mapping)<span class="reason"> — @mapping.Reason</span></li>
+                            }
+                        </ul>
+                    }
+                    @if (proposal.AddedStages.Count > 0)
+                    {
+                        <ul class="proposal-list">
+                            @foreach (var added in proposal.AddedStages)
+                            {
+                                var addId = $"add-stage-{added.Id}";
+                                <li>
+                                    <input id="@addId" type="checkbox" checked="@IsAccepted(proposal, added.Id)" @onchange="e => Accept(proposal, added.Id, e)" />
+                                    <label for="@addId">Add stage @added.Id (@added.Kind.ToString().ToLowerInvariant()) after @added.After</label><span class="reason"> — @added.Reason</span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                    @if (proposal.RiskAreas.Count > 0)
+                    {
+                        <p class="hint">@proposal.RiskAreas.Count proposed risk area(s), listed under Risk areas.</p>
+                    }
+                    @if (proposal.Notes.Count > 0)
+                    {
+                        <h4>Notes</h4>
+                        <ul class="proposal-notes">
+                            @foreach (var note in proposal.Notes)
+                            {
+                                <li>@note</li>
+                            }
+                        </ul>
+                    }
+                    @if (proposal.Error is null)
+                    {
+                        <button type="button" class="button button-primary" @onclick="ApplyProposal">Apply proposal</button>
+                        <span class="hint">Changes only the form: the stages named, ticked stages and new risk areas. Nothing is saved yet.</span>
+                    }
+                </div>
+            }
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-risk">
+            <h2 id="setup-risk">Risk areas</h2>
+            <p class="hint">Parts of the code that always need you; the risk reviewer rates changes there high.</p>
+            <RiskAreaEditor Areas="Form.RiskAreas" OnChanged="Edited" />
+            @if (VisibleProposal is { RiskAreas.Count: > 0 } withAreas)
+            {
+                <div class="proposal" data-proposal-risks>
+                    <h3>Proposed risk areas</h3>
+                    <ul class="proposal-list">
+                        @foreach (var proposed in withAreas.RiskAreas)
+                        {
+                            <li><span class="badge">Proposed</span> <strong>@proposed.Area.Name</strong>: @proposed.Area.Description (@string.Join(", ", proposed.Area.Paths))<span class="reason"> — @proposed.Reason</span></li>
+                        }
+                    </ul>
+                    <p class="hint">Apply proposal adds the ones whose names are new.</p>
+                </div>
+            }
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-review">
+            <h2 id="setup-review">Review and guardrails</h2>
+            <fieldset class="setup-choice">
+                <legend>Risk reviewer mode</legend>
+                @foreach (var (mode, help) in ReviewModes)
+                {
+                    var modeId = $"review-{mode.ToString().ToLowerInvariant()}";
+                    <div class="choice">
+                        <input id="@modeId" type="radio" name="review-mode" checked="@(Form.Review.Mode == mode)"
+                               aria-describedby="@($"{modeId}-hint")" @onchange="() => SetReviewMode(mode)" />
+                        <label for="@modeId">@mode.ToString().ToLowerInvariant()</label>
+                        <span class="hint" id="@($"{modeId}-hint")">@help</span>
+                    </div>
+                }
+            </fieldset>
+            <div class="setup-fields">
+                <div class="setup-field">
+                    <label for="max-attempts">Max attempts per stage</label>
+                    <input id="max-attempts" type="number" min="1" inputmode="numeric" @bind="Form.MaxAttemptsPerStage" @bind:after="Edited" />
+                </div>
+                <div class="setup-field">
+                    <label for="agent-timeout">Agent timeout (minutes)</label>
+                    <input id="agent-timeout" type="number" min="1" inputmode="numeric" @bind="Form.Agent.TimeoutMinutes" @bind:after="Edited" />
+                </div>
+            </div>
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-agent">
+            <h2 id="setup-agent">Agent and container</h2>
+            <div class="setup-fields">
+                <div class="setup-field">
+                    <label for="agent-isolation">Isolation</label>
+                    <select id="agent-isolation" value="@Form.Agent.Isolation" aria-describedby="agent-isolation-hint" @onchange="SetIsolation">
+                        <option value="@Isolation.Container" selected="@(Form.Agent.Isolation == Isolation.Container)">container</option>
+                        <option value="@Isolation.Host" selected="@(Form.Agent.Isolation == Isolation.Host)">host</option>
+                    </select>
+                    <span class="hint" id="agent-isolation-hint">container: Docker with a network allowlist; host: no sandbox, only for projects you trust</span>
+                </div>
+                <div class="setup-field">
+                    <label for="agent-image">Image</label>
+                    <input id="agent-image" type="text" autocomplete="off" spellcheck="false" placeholder="the default agent image"
+                           value="@Form.Agent.Image" @onchange="e => SetText(e, v => Form.Agent.Image = v)" />
+                </div>
+                <div class="setup-field">
+                    <label for="agent-model">Model</label>
+                    <input id="agent-model" type="text" autocomplete="off" spellcheck="false" placeholder="Claude Code's default"
+                           value="@Form.Agent.Model" @onchange="e => SetText(e, v => Form.Agent.Model = v)" />
+                </div>
+                @ListField("agent-domains", "Allowed domains", "Container mode: hosts the agent may reach besides Claude Code's own", Form.Agent.AllowedDomains, v => Form.Agent.AllowedDomains = v)
+                @ListField("agent-tools", "Allowed tools", "Host mode: the only tools the agent may use (required there)", Form.Agent.AllowedTools, v => Form.Agent.AllowedTools = v)
+                @ListField("agent-apt", "apt packages", "Installed into the agent image", Form.Agent.PackagesApt, v => Form.Agent.PackagesApt = v)
+                @ListField("agent-pip", "pip packages", "Installed into the agent image", Form.Agent.PackagesPip, v => Form.Agent.PackagesPip = v)
+                @ListField("agent-npm", "npm packages", "Installed into the agent image", Form.Agent.PackagesNpm, v => Form.Agent.PackagesNpm = v)
+            </div>
+            <div class="setup-actions">
+                <button type="button" class="button" disabled="@Running" @onclick="CheckContainerAsync">Run container check</button>
+                <span class="hint">Optional: builds the agent image, then an agent builds and tests the repository in a throwaway clone.</span>
+            </div>
+            @if (session.ContainerSteps.Count > 0)
+            {
+                <CheckList Steps="session.ContainerSteps" Name="container" Label="Container check" />
+            }
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-templates">
+            <h2 id="setup-templates">Templates</h2>
+            <p class="hint">Optional prompt overrides, as files relative to the projects folder (@SymphonistPaths.Resolve("projects")). Empty uses the built-in template.</p>
+            <div class="setup-fields">
+                @foreach (var kind in TemplateKinds)
+                {
+                    var promptId = $"prompt-{kind.ToString().ToLowerInvariant()}";
+                    <div class="setup-field">
+                        <label for="@promptId">@kind.ToString().ToLowerInvariant() stage</label>
+                        <input id="@promptId" type="text" autocomplete="off" spellcheck="false" value="@Form.Prompts.GetValueOrDefault(kind)"
+                               @onchange="e => SetPrompt(kind, e)" />
+                    </div>
+                }
+                <div class="setup-field">
+                    <label for="prompt-review">risk reviewer</label>
+                    <input id="prompt-review" type="text" autocomplete="off" spellcheck="false" value="@Form.Review.PromptPath"
+                           @onchange="e => SetText(e, v => Form.Review.PromptPath = v)" />
+                </div>
+            </div>
+        </section>
+
+        <div class="save-bar" role="region" aria-label="Save">
+            <div class="save-status" role="status">
+                @if (session.RunningStep is { } step)
+                {
+                    <p class="save-running">Running: @StepName(step)…</p>
+                }
+                @if (session.LastError is { } lastError)
+                {
+                    <p class="setup-alert">Last step stopped: @lastError</p>
+                }
+                @if (actionError is not null)
+                {
+                    <p class="setup-alert">@actionError</p>
+                }
+                @if (saveErrors.Count > 0)
+                {
+                    <ul class="save-errors" data-save-errors>
+                        @foreach (var saveError in saveErrors)
+                        {
+                            <li>@saveError</li>
+                        }
+                    </ul>
+                }
+            </div>
+            <div class="save-buttons">
+                @if (Running)
+                {
+                    <button type="button" class="button" @onclick="CancelStep">Cancel step</button>
+                }
+                <button type="button" class="button button-primary" disabled="@saving" @onclick="SaveAsync">Save project</button>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly (ReviewMode Mode, string Help)[] ReviewModes =
+    [
+        (ReviewMode.Off, "No reviewer runs; auto gates behave like human ones."),
+        (ReviewMode.Shadow, "Every gate is reviewed and the verdict shown, but nothing is approved for you."),
+        (ReviewMode.Active, "Auto gates approve themselves when the verdict is low risk."),
+    ];
+
+    private static readonly Dictionary<string, string> StepNames = new()
+    {
+        ["connections"] = "Check connections",
+        ["proposal"] = "Propose mapping and risk areas",
+        ["container"] = "Run container check",
+    };
+
+    private readonly Dictionary<string, string> secretStates = new(StringComparer.Ordinal);
+    private readonly HashSet<string> accepted = new(StringComparer.Ordinal);
+    private OnboardingSession? session;
+    private bool opened;
+    private string? openedFor;
+    private bool notFound;
+    private string? openError;
+    private string? ended;
+    private string? actionError;
+    private List<string> saveErrors = [];
+    private bool saving;
+    private string? savedFile;
+    private string? savedId;
+    private OnboardingProposal? applied;
+    private OnboardingProposal? acceptedFor;
+    private List<StageForm>? baseline; // a new project's stages before the first applied proposal
+
+    /// <summary>The project being edited; null adds a project.</summary>
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsNew => session?.ProjectId is null;
+
+    private ProjectForm Form => session!.Form;
+
+    private bool Running => session?.RunningStep is not null;
+
+    private string Heading => notFound ? "Not found"
+        : Id is null ? "Add project"
+        : $"Set up {session?.Original?.Name ?? Id}";
+
+    private string BoardLink => Id is null || notFound ? "/" : $"/?project={Uri.EscapeDataString(Id)}";
+
+    private OnboardingProposal? VisibleProposal =>
+        session?.Proposal is { } proposal && !ReferenceEquals(proposal, applied) ? proposal : null;
+
+    private IReadOnlyList<ProviderSectionEditor.Choice> TrackerChoices =>
+        Providers.AllTrackers.Select(p => new ProviderSectionEditor.Choice(p.Type, p.DisplayName, p.Fields)).ToList();
+
+    private IReadOnlyList<ProviderSectionEditor.Choice> RepoChoices =>
+        Providers.AllRepos.Select(p => new ProviderSectionEditor.Choice(p.Type, p.DisplayName, p.Fields)).ToList();
+
+    private IReadOnlyList<ProviderSectionEditor.Choice> BuildChoices =>
+        Providers.BuildsFor(Form.Repo.Type).Select(p => new ProviderSectionEditor.Choice(p.Type, p.DisplayName, p.Fields)).ToList();
+
+    /// <summary>The agent stage kinds, plus any other kind the file already overrides.</summary>
+    private IEnumerable<StageKind> TemplateKinds =>
+        Enum.GetValues<StageKind>().Where(k => StageExecutor.IsAgentStage(k) || Form.Prompts.ContainsKey(k));
+
+    protected override void OnInitialized() => Service.Changed += OnServiceChanged;
+
+    protected override void OnParametersSet()
+    {
+        if (opened && openedFor == Id) return;
+        opened = true;
+        openedFor = Id;
+        session = null;
+        notFound = false;
+        openError = ended = actionError = savedFile = savedId = null;
+        saveErrors = [];
+        applied = acceptedFor = null;
+        accepted.Clear();
+        baseline = null;
+        secretStates.Clear();
+        Chrome.ClearForNavigation(); // the previous page's message and errors
+        Chrome.SetPage(Id is null ? "Add project" : $"Set up {Id}", Id);
+        try
+        {
+            session = Service.Open(Id);
+        }
+        catch (KeyNotFoundException)
+        {
+            notFound = true;
+        }
+        catch (Exception e)
+        {
+            // Another setup step is running, or the file no longer loads or cannot be read.
+            Log.LogWarning(e, "Opening the setup of {Project} failed", Id ?? "a new project");
+            openError = $"Cannot open the setup: {Bounded(e.Message)}";
+        }
+    }
+
+    /// <summary>Raised by the service on any thread: re-render on the circuit, and adopt the host's repository name there.</summary>
+    private void OnServiceChanged() => _ = InvokeAsync(() =>
+    {
+        try
+        {
+            if (session is null || savedFile is not null) return;
+            secretStates.Clear();
+            // Replaced by another tab, or expired: Touch throws with the reason.
+            if (ended is null && !ReferenceEquals(Service.Current, session)) Service.Touch(session);
+            else Service.ApplyPendingAdoption(session);
+        }
+        catch (OnboardingSessionEndedException e)
+        {
+            ended = e.Message;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Refreshing the setup screen failed");
+        }
+        StateHasChanged();
+    });
+
+    /// <summary>After any form edit: keeps the session from expiring while the developer types.</summary>
+    private void Edited()
+    {
+        if (session is null) return;
+        try
+        {
+            Service.Touch(session);
+        }
+        catch (OnboardingSessionEndedException e)
+        {
+            ended = e.Message;
+        }
+    }
+
+    private void TrackerEdited()
+    {
+        SetupHints.PrefillTracker(Form.Tracker);
+        Edited();
+    }
+
+    /// <summary>A new project's id; default secret names (and a name still equal to the id) follow it.</summary>
+    private void SetId(ChangeEventArgs e)
+    {
+        var id = (e.Value as string ?? "").Trim();
+        var previous = Form.Id;
+        Rename(Form.Tracker, Providers.AllTrackers.FirstOrDefault(p => p.Type == Form.Tracker.Type)?.HttpClientName);
+        Rename(Form.Repo, Providers.AllRepos.FirstOrDefault(p => p.Type == Form.Repo.Type)?.HttpClientName);
+        if (Form.Name == previous) Form.Name = id;
+        Form.Id = id;
+        Edited();
+
+        void Rename(ProviderSectionForm section, string? client)
+        {
+            if (client is not null && section.Values.GetValueOrDefault("tokenSecret") == SecretNames.Default(client, previous))
+                section.Values["tokenSecret"] = SecretNames.Default(client, id);
+        }
+    }
+
+    private void ChangeTrackerType(string type) => Act("change the tracker type", () =>
+    {
+        Form.ChangeTrackerType(type, Providers);
+        TrackerEdited();
+    });
+
+    private void ChangeRepoType(string type) => Act("change the repository type", () =>
+    {
+        Form.ChangeRepoType(type, Providers);
+        Edited();
+    });
+
+    private void ChangeBuildType(string type) => Act("change the build type", () =>
+    {
+        Form.ChangeBuildType(type, Providers);
+        Edited();
+    });
+
+    private void SetReviewMode(ReviewMode mode)
+    {
+        Form.Review.Mode = mode;
+        Edited();
+    }
+
+    private void SetIsolation(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<Isolation>(e.Value as string, out var isolation)) Form.Agent.Isolation = isolation;
+        Edited();
+    }
+
+    /// <summary>Blank text is stored as null (the default).</summary>
+    private void SetText(ChangeEventArgs e, Action<string?> set)
+    {
+        set(e.Value is string text && !string.IsNullOrWhiteSpace(text) ? text : null);
+        Edited();
+    }
+
+    private void SetPrompt(StageKind kind, ChangeEventArgs e)
+    {
+        if (e.Value is string path && !string.IsNullOrWhiteSpace(path)) Form.Prompts[kind] = path;
+        else Form.Prompts.Remove(kind);
+        Edited();
+    }
+
+    private RenderFragment ListField(string id, string label, string help, List<string> items, Action<List<string>> set) => __builder =>
+    {
+        <div class="setup-field setup-field-wide">
+            <label for="@id">@label</label>
+            <textarea id="@id" rows="2" spellcheck="false" placeholder="One per line" aria-describedby="@($"{id}-hint")"
+                      value="@string.Join("\n", items)"
+                      @onchange="e => { set(ProviderSectionEditor.Lines(e.Value as string)); Edited(); }"></textarea>
+            <span class="hint" id="@($"{id}-hint")">@help</span>
+        </div>
+    };
+
+    /// <summary>The valid secret names the form uses; a name that is not valid is reported by Save instead.</summary>
+    private IEnumerable<string> SecretsInUse() =>
+        Service.SecretNamesInUse(session!).Where(SecretNames.IsValid);
+
+    private string SecretState(string name)
+    {
+        if (!secretStates.TryGetValue(name, out var state)) secretStates[name] = state = Service.SecretState(name);
+        return state;
+    }
+
+    /// <summary>Writes the value straight to the secret store; returns why it failed, without the value.</summary>
+    private string? SaveSecret(string name, string value)
+    {
+        try
+        {
+            Service.SetSecret(name, value);
+            secretStates.Remove(name);
+            Edited();
+            return null;
+        }
+        catch (ArgumentException e)
+        {
+            return e.ParamName is null ? e.Message : e.Message.Replace($" (Parameter '{e.ParamName}')", "");
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Saving secret {Name} from the setup screen failed", name);
+            return Bounded(e.Message);
+        }
+    }
+
+    private Task CheckConnectionsAsync() => StepAsync("check the connections", () => Service.CheckConnectionsAsync(session!));
+
+    private Task ProposeAsync() => StepAsync("propose a mapping", () => Service.ProposeAsync(session!));
+
+    private Task CheckContainerAsync() => StepAsync("run the container check", () => Service.CheckContainerAsync(session!));
+
+    /// <summary>Runs a setup step; the service reports its own failures in LastError, so only the unexpected land here.</summary>
+    private async Task StepAsync(string what, Func<Task> step)
+    {
+        if (session is null) return;
+        actionError = null;
+        try
+        {
+            await step();
+            Service.ApplyPendingAdoption(session);
+        }
+        catch (OnboardingSessionEndedException e)
+        {
+            ended = e.Message;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Setup step '{Step}' from the dashboard failed", what);
+            actionError = $"Could not {what}: {Bounded(e.Message)}";
+        }
+    }
+
+    private void CancelStep() => Act("cancel the step", () => Service.Cancel(session!));
+
+    private bool IsAccepted(OnboardingProposal proposal, string id) =>
+        ReferenceEquals(acceptedFor, proposal) && accepted.Contains(id);
+
+    private void Accept(OnboardingProposal proposal, string id, ChangeEventArgs e)
+    {
+        if (!ReferenceEquals(acceptedFor, proposal))
+        {
+            accepted.Clear();
+            acceptedFor = proposal;
+        }
+        if (e.Value is true) accepted.Add(id);
+        else accepted.Remove(id);
+    }
+
+    /// <summary>Changes only the form; a new project's stages as they were become the "(changed)" baseline.</summary>
+    private void ApplyProposal() => Act("apply the proposal", () =>
+    {
+        if (VisibleProposal is not { Error: null } proposal) return;
+        if (session!.Original is null) baseline ??= Form.Pipeline.Select(s => s.Clone()).ToList();
+        proposal.ApplyTo(Form, ReferenceEquals(acceptedFor, proposal) ? accepted : new HashSet<string>());
+        applied = proposal;
+        Edited();
+    });
+
+    private async Task SaveAsync()
+    {
+        if (session is null || saving) return;
+        saving = true;
+        saveErrors = [];
+        actionError = null;
+        try
+        {
+            var id = Form.Id;
+            var result = await Service.SaveAsync(session);
+            if (result.Saved)
+            {
+                savedFile = result.File;
+                savedId = id;
+            }
+            else
+            {
+                saveErrors = result.Errors.Select(Bounded).ToList();
+            }
+        }
+        catch (OnboardingSessionEndedException e)
+        {
+            ended = e.Message;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Saving project {Project} from the setup screen failed", Form.Id);
+            actionError = $"Could not save: {Bounded(e.Message)}";
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private void Reload() => Navigation.NavigateTo(Navigation.Uri, forceLoad: true);
+
+    /// <summary>Board.razor's rule: an exception is logged and reported, never allowed to end the circuit.</summary>
+    private void Act(string what, Action action)
+    {
+        actionError = null;
+        try
+        {
+            action();
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Setup screen: could not {Action}", what);
+            actionError = $"Could not {what}: {Bounded(e.Message)}";
+        }
+    }
+
+    private static string StepName(string step) => StepNames.GetValueOrDefault(step, step);
+
+    private static string Describe(StageMappingProposal m)
+    {
+        var parts = new List<string>();
+        if (m.EntryStatuses.Count > 0) parts.Add($"entry {string.Join(", ", m.EntryStatuses)}");
+        if (m.OnEnterStatus is not null) parts.Add($"on enter {m.OnEnterStatus}");
+        if (m.OnGateStatus is not null) parts.Add($"on gate {m.OnGateStatus}");
+        if (m.ApprovedWhenStatus is not null) parts.Add($"approved when {m.ApprovedWhenStatus}");
+        return parts.Count == 0 ? "no statuses" : string.Join("; ", parts);
+    }
+
+    private static string Bounded(string text) => ReviewerText.Line(text, ReviewerText.MaxSummaryChars);
+
+    public void Dispose() => Service.Changed -= OnServiceChanged;
+}

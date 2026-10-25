@@ -21,6 +21,7 @@
                 }
             </p>
         }
+        <a class="button button-quiet" href="@($"/projects/{Uri.EscapeDataString(Project.Id)}/setup")" aria-label="@($"Set up {Project.Name}")">Setup</a>
         @if (Project.Paused)
         {
             <button type="button" class="button" aria-label="@($"Resume {Project.Name}")" @onclick="OnTogglePause">Resume</button>

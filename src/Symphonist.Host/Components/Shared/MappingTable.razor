@@ -1,0 +1,174 @@
+@using Symphonist.Core.Onboarding
+@* The pipeline: one row per stage with its gate and the tracker statuses it reads and writes. Status inputs offer the
+   statuses the connection check found, and a value the tracker lacks says so in words. *@
+@if (Statuses.Count > 0)
+{
+    <datalist id="pipeline-statuses">
+        @foreach (var status in Statuses)
+        {
+            <option value="@status"></option>
+        }
+    </datalist>
+}
+<ol class="stage-list">
+    @for (var i = 0; i < Stages.Count; i++)
+    {
+        var index = i;
+        var stage = Stages[i];
+        var prefix = $"stage-{index}";
+        <li class="stage-row" data-stage-row @key="stage">
+            <fieldset>
+                <legend>@($"Stage {index + 1}")<span class="stage-change">@(Change(stage) is { } change ? $" {change}" : "")</span></legend>
+                <div class="stage-fields">
+                    <div class="setup-field">
+                        <label for="@($"{prefix}-id")">Id</label>
+                        <input id="@($"{prefix}-id")" type="text" value="@stage.Id" autocomplete="off" spellcheck="false"
+                               @onchange="e => EditAsync(() => stage.Id = Text(e) ?? string.Empty)" />
+                    </div>
+                    <div class="setup-field">
+                        <label for="@($"{prefix}-kind")">Kind</label>
+                        <select id="@($"{prefix}-kind")" value="@stage.Kind" @onchange="e => EditAsync(() => stage.Kind = Enum.Parse<StageKind>(Text(e) ?? stage.Kind.ToString()))">
+                            @foreach (var kind in Enum.GetValues<StageKind>())
+                            {
+                                <option value="@kind" selected="@(stage.Kind == kind)">@kind.ToString().ToLowerInvariant()</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="setup-field">
+                        <label for="@($"{prefix}-gate")">Gate</label>
+                        <select id="@($"{prefix}-gate")" value="@stage.Gate" @onchange="e => EditAsync(() => stage.Gate = Enum.Parse<GatePolicy>(Text(e) ?? stage.Gate.ToString()))">
+                            @foreach (var (gate, word) in Gates)
+                            {
+                                <option value="@gate" selected="@(stage.Gate == gate)">@word</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="setup-field setup-field-wide">
+                        <span class="field-label" id="@($"{prefix}-entry-label")">Entry statuses</span>
+                        <div class="entry-statuses" role="group" aria-labelledby="@($"{prefix}-entry-label")">
+                            @for (var j = 0; j < stage.EntryStatuses.Count; j++)
+                            {
+                                var at = j;
+                                var id = $"{prefix}-entry-{at}";
+                                <div class="status-input">
+                                    <input id="@id" type="text" value="@stage.EntryStatuses[at]" list="@StatusList" autocomplete="off"
+                                           aria-label="@($"Entry status {at + 1} of stage {stage.Id}")"
+                                           @onchange="e => EditAsync(() => SetEntry(stage, at, Text(e)))" />
+                                    @Flag(stage.EntryStatuses[at])
+                                </div>
+                            }
+                            <input @key="addGeneration" id="@($"{prefix}-entry-new")" type="text" list="@StatusList" autocomplete="off"
+                                   placeholder="Add a status" aria-label="@($"Add an entry status to stage {stage.Id}")"
+                                   @onchange="e => EditAsync(() => AddEntry(stage, Text(e)))" />
+                        </div>
+                    </div>
+                    @StatusField(prefix, "enter", "On enter", stage.OnEnterStatus, v => stage.OnEnterStatus = v)
+                    @StatusField(prefix, "gate-status", "On gate", stage.OnGateStatus, v => stage.OnGateStatus = v)
+                    @StatusField(prefix, "approved", "Approved when", stage.ApprovedWhenStatus, v => stage.ApprovedWhenStatus = v)
+                </div>
+                <div class="stage-actions">
+                    <button type="button" class="button button-quiet" disabled="@(index == 0)" aria-label="@($"Move stage {stage.Id} up")"
+                            @onclick="() => EditAsync(() => Move(index, -1))">Move up</button>
+                    <button type="button" class="button button-quiet" disabled="@(index == Stages.Count - 1)" aria-label="@($"Move stage {stage.Id} down")"
+                            @onclick="() => EditAsync(() => Move(index, 1))">Move down</button>
+                    <button type="button" class="button button-quiet" aria-label="@($"Remove stage {stage.Id}")"
+                            @onclick="() => EditAsync(() => Stages.RemoveAt(index))">Remove</button>
+                </div>
+            </fieldset>
+        </li>
+    }
+</ol>
+<button type="button" class="button" @onclick="() => EditAsync(AddStage)">Add stage</button>
+
+@code {
+    private static readonly (GatePolicy Gate, string Word)[] Gates =
+        [(GatePolicy.None, "none"), (GatePolicy.Human, "human"), (GatePolicy.AutoWhenLowRisk, "auto")];
+
+    private int addGeneration;
+
+    [Parameter, EditorRequired] public List<StageForm> Stages { get; set; } = [];
+
+    /// <summary>The stages to compare with for "(changed)"; null shows no marks.</summary>
+    [Parameter] public IReadOnlyList<StageForm>? Baseline { get; set; }
+
+    /// <summary>The tracker's status names from the last connection check; empty when none were read.</summary>
+    [Parameter] public IReadOnlyList<string> Statuses { get; set; } = [];
+
+    /// <summary>Where <see cref="Statuses"/> came from, e.g. "Jira project ACME".</summary>
+    [Parameter] public string? StatusSource { get; set; }
+
+    /// <summary>What a status the tracker lacks also breaks (see <see cref="SetupHints.MissingStatusEffect"/>).</summary>
+    [Parameter] public string? MissingStatusEffect { get; set; }
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string? StatusList => Statuses.Count > 0 ? "pipeline-statuses" : null;
+
+    private RenderFragment StatusField(string prefix, string key, string label, string? value, Action<string?> set) => __builder =>
+    {
+        var id = $"{prefix}-{key}";
+        <div class="setup-field status-input">
+            <label for="@id">@label</label>
+            <input id="@id" type="text" value="@value" list="@StatusList" autocomplete="off"
+                   @onchange="e => EditAsync(() => set(Text(e)))" />
+            @Flag(value)
+        </div>
+    };
+
+    private RenderFragment Flag(string? status) => __builder =>
+    {
+        if (string.IsNullOrWhiteSpace(status) || Statuses.Count == 0 || StatusSource is null
+            || Statuses.Any(s => string.Equals(s.Trim(), status.Trim(), StringComparison.OrdinalIgnoreCase)))
+            return;
+        <span class="status-flag">@($"not a status of {StatusSource}" + (MissingStatusEffect is null ? "" : $" — {MissingStatusEffect}"))</span>
+    };
+
+    private string? Change(StageForm stage)
+    {
+        if (Baseline is null) return null;
+        var before = Baseline.FirstOrDefault(s => s.Id == stage.Id);
+        if (before is null) return "(added)";
+        var same = before.Kind == stage.Kind && before.Gate == stage.Gate
+            && before.EntryStatuses.SequenceEqual(stage.EntryStatuses, StringComparer.Ordinal)
+            && before.OnEnterStatus == stage.OnEnterStatus && before.OnGateStatus == stage.OnGateStatus
+            && before.ApprovedWhenStatus == stage.ApprovedWhenStatus;
+        return same ? null : "(changed)";
+    }
+
+    private Task EditAsync(Action edit)
+    {
+        edit();
+        return OnChanged.InvokeAsync();
+    }
+
+    /// <summary>The typed text, or null when blank.</summary>
+    private static string? Text(ChangeEventArgs e) => e.Value is string text && !string.IsNullOrWhiteSpace(text) ? text : null;
+
+    private static void SetEntry(StageForm stage, int at, string? value)
+    {
+        if (value is null) stage.EntryStatuses.RemoveAt(at);
+        else stage.EntryStatuses[at] = value;
+    }
+
+    private void AddEntry(StageForm stage, string? value)
+    {
+        addGeneration++; // an empty input again
+        if (value is not null) stage.EntryStatuses.Add(value);
+    }
+
+    private void Move(int index, int by)
+    {
+        var to = index + by;
+        if (to < 0 || to >= Stages.Count) return;
+        (Stages[index], Stages[to]) = (Stages[to], Stages[index]);
+    }
+
+    /// <summary>A human-gated implement stage with a free id, before a final done stage.</summary>
+    private void AddStage()
+    {
+        var id = "stage";
+        for (var n = 2; Stages.Any(s => s.Id == id); n++) id = $"stage-{n}";
+        var at = Stages.Count > 0 && Stages[^1].Kind == StageKind.Done ? Stages.Count - 1 : Stages.Count;
+        Stages.Insert(at, new StageForm { Id = id, Kind = StageKind.Implement, Gate = GatePolicy.Human });
+    }
+}

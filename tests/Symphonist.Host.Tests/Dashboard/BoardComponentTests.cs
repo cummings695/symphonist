@@ -520,6 +520,19 @@ public sealed class BoardComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.Contains("missing required", cut.Find("[data-load-error='bad.yaml']").TextContent));
     }
 
+    [Fact]
+    public void Board_links_to_add_project_and_project_setup()
+    {
+        var cut = RenderBoard();
+        Assert.Contains(cut.FindAll("a"), a => a.GetAttribute("href") == "/projects/new" && a.TextContent.Trim() == "Add project");
+        Assert.Empty(cut.FindAll("a[aria-label^='Set up']"));
+
+        cut = RenderBoard("/?project=orders");
+        var setup = cut.Find("a[aria-label='Set up Project orders']");
+        Assert.Equal("/projects/orders/setup", setup.GetAttribute("href"));
+        Assert.Equal("Setup", setup.TextContent.Trim());
+    }
+
     /// <summary>The browser side of folding: at phone width, with <paramref name="stored"/> in localStorage.</summary>
     private BunitJSModuleInterop SetupFolds(Dictionary<string, bool>? stored = null)
     {

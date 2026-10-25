@@ -128,6 +128,30 @@ public sealed class DashboardAuthTests : IDisposable
         Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
     }
 
+    [Theory]
+    [InlineData("/projects/new")]
+    [InlineData("/projects/orders/setup")]
+    public async Task Setup_pages_require_sign_in(string path)
+    {
+        var response = await Client().GetAsync(path);
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
+    }
+
+    [Fact]
+    public async Task Setup_page_forbids_framing()
+    {
+        var client = Client();
+        await SignInAsync(client);
+
+        foreach (var path in new[] { "/projects/new", "/projects/orders/setup" })
+        {
+            var response = await client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            AssertNotFramable(response);
+        }
+    }
+
     [Fact]
     public async Task Document_page_with_unknown_kind_is_404()
     {

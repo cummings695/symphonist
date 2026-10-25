@@ -1,0 +1,131 @@
+@using Symphonist.Core.Integrations.Providers
+@using Symphonist.Core.Onboarding
+@* A tracker, repo or build section: the provider type, then one labelled input per field the provider declares. Nothing
+   here knows a provider; secret fields hold the secret's name (the value goes through SecretField). *@
+<fieldset class="provider-section" data-section="@IdPrefix">
+    <legend>@Title</legend>
+    <div class="setup-fields">
+        <div class="setup-field">
+            <label for="@($"{IdPrefix}-type")">Type</label>
+            <select id="@($"{IdPrefix}-type")" value="@Section.Type" @onchange="ChangeTypeAsync">
+                @foreach (var p in Providers)
+                {
+                    <option value="@p.Type" selected="@(p.Type == Section.Type)">@p.DisplayName (@p.Type)</option>
+                }
+            </select>
+        </div>
+        @foreach (var field in Fields)
+        {
+            var id = $"{IdPrefix}-{field.Key}";
+            var hint = field.Help.Length > 0 ? $"{id}-hint" : null;
+            <div class="setup-field @(field.Kind == ProviderFieldKind.List ? "setup-field-wide" : null)">
+                <label for="@id">@(field.Required ? $"{field.Label} (required)" : field.Label)</label>
+                @switch (field.Kind)
+                {
+                    case ProviderFieldKind.Choice:
+                        <select id="@id" value="@Value(field.Key)" aria-describedby="@hint" @onchange="e => SetValueAsync(field.Key, e)">
+                            @if (!field.Required && field.Default is null)
+                            {
+                                <option value="" selected="@(Value(field.Key) == "")">(none)</option>
+                            }
+                            @foreach (var option in field.Options ?? [])
+                            {
+                                <option value="@option" selected="@(Value(field.Key) == option)">@option</option>
+                            }
+                        </select>
+                        break;
+                    case ProviderFieldKind.List:
+                        <textarea id="@id" rows="3" spellcheck="false" placeholder="One per line" aria-describedby="@hint"
+                                  value="@string.Join("\n", Section.Lists.GetValueOrDefault(field.Key) ?? [])"
+                                  @onchange="e => SetListAsync(field.Key, e)"></textarea>
+                        @if (Suggestions.Count > 0)
+                        {
+                            <datalist id="@($"{id}-options")">
+                                @foreach (var suggestion in Suggestions)
+                                {
+                                    <option value="@suggestion"></option>
+                                }
+                            </datalist>
+                            <input @key="addGeneration" type="text" class="list-add" list="@($"{id}-options")" autocomplete="off"
+                                   aria-label="@($"Add to {field.Label}")" placeholder="Add one found on the host"
+                                   @onchange="e => AddToListAsync(field.Key, e)" />
+                        }
+                        break;
+                    default:
+                        <input id="@id" type="text" value="@Value(field.Key)" autocomplete="off" spellcheck="false"
+                               inputmode="@(field.Kind switch { ProviderFieldKind.Number => "numeric", ProviderFieldKind.Url => "url", _ => null })"
+                               placeholder="@(field.Required ? null : field.Default)" aria-describedby="@hint"
+                               @onchange="e => SetValueAsync(field.Key, e)" />
+                        break;
+                }
+                @if (hint is not null)
+                {
+                    <span class="hint" id="@hint">@field.Help</span>
+                }
+            </div>
+        }
+    </div>
+</fieldset>
+
+@code {
+    private int addGeneration;
+
+    /// <summary>A provider the section can use.</summary>
+    public sealed record Choice(string Type, string DisplayName, IReadOnlyList<ProviderField> Fields);
+
+    [Parameter, EditorRequired] public string Title { get; set; } = "";
+
+    /// <summary>Prefix of the input ids ("tracker", "repo", "build").</summary>
+    [Parameter, EditorRequired] public string IdPrefix { get; set; } = "";
+
+    [Parameter, EditorRequired] public ProviderSectionForm Section { get; set; } = default!;
+
+    /// <summary>The providers the type select offers.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<Choice> Providers { get; set; } = [];
+
+    /// <summary>The picked type; the page changes the form (which replaces <see cref="Section"/>).</summary>
+    [Parameter] public EventCallback<string> OnTypeChanged { get; set; }
+
+    /// <summary>After any field edit.</summary>
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    /// <summary>Values found on the host, offered for the List fields (e.g. workflow file names).</summary>
+    [Parameter] public IReadOnlyList<string> Suggestions { get; set; } = [];
+
+    private IReadOnlyList<ProviderField> Fields => Providers.FirstOrDefault(p => p.Type == Section.Type)?.Fields ?? [];
+
+    private string Value(string key) => Section.Values.GetValueOrDefault(key) ?? "";
+
+    private Task ChangeTypeAsync(ChangeEventArgs e) =>
+        e.Value is string type && type != Section.Type ? OnTypeChanged.InvokeAsync(type) : Task.CompletedTask;
+
+    private Task SetValueAsync(string key, ChangeEventArgs e)
+    {
+        var value = e.Value as string ?? "";
+        if (value.Length == 0) Section.Values.Remove(key);
+        else Section.Values[key] = value;
+        return OnChanged.InvokeAsync();
+    }
+
+    private Task SetListAsync(string key, ChangeEventArgs e)
+    {
+        var items = Lines(e.Value as string);
+        if (items.Count == 0) Section.Lists.Remove(key);
+        else Section.Lists[key] = items;
+        return OnChanged.InvokeAsync();
+    }
+
+    private Task AddToListAsync(string key, ChangeEventArgs e)
+    {
+        addGeneration++; // an empty input again
+        if (e.Value is not string item || string.IsNullOrWhiteSpace(item)) return Task.CompletedTask;
+        var items = Section.Lists.GetValueOrDefault(key) ?? [];
+        if (!items.Contains(item, StringComparer.Ordinal)) items.Add(item);
+        Section.Lists[key] = items;
+        return OnChanged.InvokeAsync();
+    }
+
+    /// <summary>One item per non-blank line, as typed (line ends only removed).</summary>
+    public static List<string> Lines(string? text) =>
+        (text ?? "").Split('\n').Select(l => l.TrimEnd('\r')).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+}
