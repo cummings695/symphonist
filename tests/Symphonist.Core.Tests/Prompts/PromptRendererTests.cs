@@ -1,3 +1,4 @@
+using Symphonist.Integrations;
 using Symphonist.Core.Config;
 using Symphonist.Core.Prompts;
 
@@ -6,7 +7,7 @@ namespace Symphonist.Core.Tests.Prompts;
 public class PromptRendererTests
 {
     private static ProjectConfig ConfigWithoutOverrides() =>
-        ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml"))
+        ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml"), BuiltInProviders.Registry)
             with { PromptOverrides = new Dictionary<StageKind, string>() };
 
     [Fact]
@@ -69,7 +70,7 @@ public class PromptRendererTests
     [InlineData(StageKind.Implement)]
     public void Default_prompts_say_git_is_read_only_and_Symphonist_commits(StageKind kind)
     {
-        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml")) with
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml"), BuiltInProviders.Registry) with
         {
             PromptOverrides = new Dictionary<StageKind, string>(),
         };

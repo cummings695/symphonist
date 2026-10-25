@@ -12,8 +12,8 @@ public class BitbucketTests
 {
     private static string Fixture(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
 
-    private static readonly RepoConfig Repo = new("bitbucket", "acme", "orders", "/work/orders", "main", "production",
-        "dev@example.com", "bb-token", "squash");
+    private static readonly BitbucketRepoConfig Repo = new("bitbucket", "/work/orders", "main", "production",
+        "bb-token", "acme", "orders", "dev@example.com", "squash");
 
     private const string Token = "secret-token";
     private const string RepoPrefix = "/2.0/repositories/acme/orders";
@@ -297,7 +297,7 @@ public class BitbucketTests
         var stub = new StubHttpHandler().On(HttpMethod.Get, RepoPrefix + "/pipelines/", HttpStatusCode.OK, Fixture("bb-pipelines.json"));
         var watcher = new BitbucketPipelinesWatcher(new HttpClient(stub), Repo, Token);
 
-        Assert.Equal(expected, await watcher.GetStatusAsync(hash, CancellationToken.None));
+        Assert.Equal(expected, await watcher.GetStatusAsync(hash, BuildPurpose.Build, CancellationToken.None));
         Assert.Contains("sort=-created_on", stub.Requests[0].PathAndQuery);
         Assert.Contains("pagelen=50", stub.Requests[0].PathAndQuery);
     }

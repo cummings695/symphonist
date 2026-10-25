@@ -11,8 +11,8 @@ public class JiraTrackerTests
 {
     private static string Fixture(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
 
-    private static readonly TrackerConfig Config = new("jira", new Uri("https://example.atlassian.net"),
-        "dev@example.com", "jira-token", "assignee = currentUser()");
+    private static readonly JiraTrackerConfig Config = new("jira", "jira-token", new Uri("https://example.atlassian.net"),
+        "dev@example.com", "assignee = currentUser()");
 
     private static (JiraTracker Tracker, StubHttpHandler Stub) Create(StubHttpHandler? stub = null)
     {

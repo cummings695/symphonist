@@ -3,12 +3,11 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using Symphonist.Core.Config;
 
 namespace Symphonist.Integrations.Bitbucket;
 
 /// <summary>Shared Bitbucket Cloud 2.0 request plumbing: per-request basic auth, base address, error excerpts.</summary>
-internal sealed class BitbucketApi(HttpClient http, RepoConfig config, string apiToken)
+internal sealed class BitbucketApi(HttpClient http, BitbucketRepoConfig config, string apiToken)
 {
     private static readonly Uri Base = new("https://api.bitbucket.org/2.0/");
 

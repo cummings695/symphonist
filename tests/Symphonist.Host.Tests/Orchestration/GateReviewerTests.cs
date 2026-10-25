@@ -9,6 +9,8 @@ using Symphonist.Core.Storage;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 using Symphonist.Integrations.Git;
+using Symphonist.Integrations.Bitbucket;
+using Symphonist.Integrations.Jira;
 
 namespace Symphonist.Host.Tests.Orchestration;
 
@@ -52,9 +54,9 @@ public sealed class GateReviewerTests : IDisposable
     {
         StageDefinition S(string id, StageKind kind, GatePolicy gate = GatePolicy.Human) => new(id, kind, gate, [], null, null, null);
         return new ProjectConfig("orders", "Orders",
-            new TrackerConfig("jira", new Uri("https://jira.example"), "me@example.com", "jira-token", "assignee = currentUser()"),
-            new RepoConfig("bitbucket", "w", "orders", "/src/orders", "main", "production", "me@example.com", "bb-token", "squash"),
-            new BuildConfig("bitbucket-pipelines", 45),
+            new JiraTrackerConfig("jira", "jira-token", new Uri("https://jira.example"), "me@example.com", "assignee = currentUser()"),
+            new BitbucketRepoConfig("bitbucket", "/src/orders", "main", "production", "bb-token", "w", "orders", "me@example.com", "squash"),
+            new BitbucketPipelinesConfig("bitbucket-pipelines", 45),
             new AgentSettings("claude-code", Isolation.Container, [], [], 30, null, null),
             3,
             [

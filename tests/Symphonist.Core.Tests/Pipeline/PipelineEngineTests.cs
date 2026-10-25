@@ -1,3 +1,4 @@
+using Symphonist.Integrations;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
@@ -7,7 +8,7 @@ namespace Symphonist.Core.Tests.Pipeline;
 public class PipelineEngineTests
 {
     private static readonly ProjectConfig P =
-        ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml"));
+        ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.yaml"), BuiltInProviders.Registry);
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-21T10:00Z");
 
     private static Ticket At(string stageId, StageStatus status = StageStatus.Pending) =>

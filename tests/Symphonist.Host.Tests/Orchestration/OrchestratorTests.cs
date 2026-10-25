@@ -1003,7 +1003,7 @@ public sealed class OrchestratorTests : IDisposable
         await TickIdle(o); // deploy sees the production head's pipeline
 
         Assert.Equal(StageStatus.Done, store.Single("ORD-1").Status);
-        Assert.Equal(["prod-head"], builds.Calls);
+        Assert.Equal([("prod-head", BuildPurpose.Deploy)], builds.Calls);
         Assert.Empty(scm.MergeCalls);
     }
 

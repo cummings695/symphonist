@@ -1,3 +1,4 @@
+using Symphonist.Integrations;
 using Symphonist.Core.Config;
 
 namespace Symphonist.Core.Tests.Config;
@@ -7,7 +8,7 @@ public class SampleConfigTests
     [Fact]
     public void Example_project_in_samples_loads()
     {
-        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"));
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"), BuiltInProviders.Registry);
         Assert.Equal("orders", p.Id);
         Assert.Equal(Isolation.Container, p.Agent.Isolation);
         Assert.Equal(7, p.Pipeline.Count);
@@ -18,7 +19,7 @@ public class SampleConfigTests
     [Fact]
     public void Sample_config_loads_with_review_and_risk_areas()
     {
-        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"));
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"), BuiltInProviders.Registry);
         Assert.True(p.RiskAreas.Count >= 1);
         Assert.Equal(ReviewMode.Off, p.Review.Mode);
         Assert.All(p.Pipeline, s => Assert.True(s.Gate is GatePolicy.None or GatePolicy.Human));

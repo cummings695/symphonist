@@ -2,6 +2,7 @@ using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Orchestration;
+using Symphonist.Integrations;
 
 namespace Symphonist.Host.Dashboard;
 
@@ -156,6 +157,5 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         _ => t.UpdatedAt,
     };
 
-    private static string SourceName(ProjectConfig p) =>
-        p.Tracker.Type.Length == 0 ? UnknownSource : char.ToUpperInvariant(p.Tracker.Type[0]) + p.Tracker.Type[1..];
+    private static string SourceName(ProjectConfig p) => BuiltInProviders.Registry.Tracker(p.Tracker.Type).DisplayName;
 }

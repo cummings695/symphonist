@@ -8,16 +8,20 @@ public enum Isolation { Container, Host }
 public sealed record StageDefinition(string Id, StageKind Kind, GatePolicy Gate,
     IReadOnlyList<string> EntryStatuses, string? OnEnterStatus, string? OnGateStatus, string? ApprovedWhenStatus);
 
-public sealed record TrackerConfig(string Type, Uri Site, string Email, string TokenSecret, string Jql);
+/// <summary>The settings every tracker provider shares; each provider subclasses it with its own fields.</summary>
+public abstract record TrackerConfig(string Type, string TokenSecret);
 
-public sealed record RepoConfig(string Type, string Workspace, string Slug, string LocalPath,
-    string MainBranch, string ProductionBranch, string Email, string TokenSecret, string MergeStrategy)
+/// <summary>The settings every repository provider shares; each provider subclasses it with its own fields.</summary>
+/// <param name="LocalPath">Absolute path of the local clone.</param>
+public abstract record RepoConfig(string Type, string LocalPath, string MainBranch, string ProductionBranch,
+    string TokenSecret)
 {
-    /// <summary>"workspace/slug", as the host names the repository (compared ignoring case).</summary>
-    public string FullName => $"{Workspace}/{Slug}";
+    /// <summary>"owner/name", as the host names the repository (compared ignoring case).</summary>
+    public abstract string FullName { get; }
 }
 
-public sealed record BuildConfig(string Type, int TimeoutMinutes);
+/// <summary>The settings every build provider shares; each provider subclasses it with its own fields.</summary>
+public abstract record BuildConfig(string Type, int TimeoutMinutes);
 
 public sealed record AgentSettings(string Type, Isolation Isolation, IReadOnlyList<string> AllowedDomains,
     IReadOnlyList<string> AllowedTools, int TimeoutMinutes, string? Model, string? Image)

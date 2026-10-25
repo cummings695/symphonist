@@ -36,9 +36,9 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
                 StageKind.Triage => await TriageAsync(p, io, t, source, ct),
                 StageKind.Plan => await PlanAsync(p, io, t, source, ct),
                 StageKind.Implement => await ImplementAsync(p, io, t, source, ct),
-                StageKind.Build => await WatchBuildAsync(p, io, t, t.MergeCommit, ct),
+                StageKind.Build => await WatchBuildAsync(p, io, t, t.MergeCommit, BuildPurpose.Build, ct),
                 StageKind.Release => await ReleaseAsync(p, io, t, ct),
-                StageKind.Deploy => await WatchBuildAsync(p, io, t, t.ReleaseMergeCommit, ct),
+                StageKind.Deploy => await WatchBuildAsync(p, io, t, t.ReleaseMergeCommit, BuildPurpose.Deploy, ct),
                 _ => Completed, // Uat, Done
             };
         }
@@ -139,10 +139,10 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         || await git.HasCommitsAheadAsync(workspace, p.Repo.MainBranch, ct);
 
     private async Task<ExecutionResult> WatchBuildAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, string? commit,
-        CancellationToken ct)
+        BuildPurpose purpose, CancellationToken ct)
     {
         if (commit is null) return Failed("no merge commit");
-        return await io.BuildWatcher.GetStatusAsync(commit, ct) switch
+        return await io.BuildWatcher.GetStatusAsync(commit, purpose, ct) switch
         {
             BuildStatus.Succeeded => Completed,
             BuildStatus.Failed => Failed("build failed"),

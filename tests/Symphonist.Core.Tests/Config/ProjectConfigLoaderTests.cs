@@ -1,4 +1,9 @@
 using Symphonist.Core.Config;
+using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
+using Symphonist.Integrations;
+using Symphonist.Integrations.Bitbucket;
+using Symphonist.Integrations.Jira;
 
 namespace Symphonist.Core.Tests.Config;
 
@@ -9,12 +14,12 @@ public class ProjectConfigLoaderTests
     [Fact]
     public void Loads_fixture_with_defaults()
     {
-        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
         Assert.Equal("orders", p.Id);
         Assert.Equal(Isolation.Container, p.Agent.Isolation);
         Assert.Equal(60, p.Agent.TimeoutMinutes);
         Assert.Equal(3, p.MaxAttemptsPerStage);
-        Assert.Equal("merge_commit", p.Repo.MergeStrategy);
+        Assert.Equal("merge_commit", ((BitbucketRepoConfig)p.Repo).MergeStrategy);
         Assert.Equal(7, p.Pipeline.Count);
         Assert.Equal(GatePolicy.None, p.Stage("build").Gate);
         Assert.Equal("In Progress", p.Stage("plan").ApprovedWhenStatus);
@@ -25,9 +30,56 @@ public class ProjectConfigLoaderTests
     }
 
     [Fact]
+    public void Orders_fixture_maps_to_jira_and_bitbucket_subtypes()
+    {
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
+        var tracker = Assert.IsType<JiraTrackerConfig>(p.Tracker);
+        var repo = Assert.IsType<BitbucketRepoConfig>(p.Repo);
+        Assert.IsType<BitbucketPipelinesConfig>(p.Build);
+        Assert.Equal(new Uri("https://acme.atlassian.net"), tracker.Site);
+        Assert.Equal("jira-acme", tracker.TokenSecret);
+        Assert.Equal("acme/orders", repo.FullName);
+        Assert.Equal("bitbucket-acme", repo.TokenSecret);
+        Assert.Equal(45, p.Build.TimeoutMinutes);
+    }
+
+    [Fact]
+    public void Unknown_field_in_provider_section_is_rejected()
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml().Replace("  tokenSecret: jira-acme\n", "  tokenSecret: jira-acme\n  jqll: x\n")));
+        Assert.Contains("unknown field 'tracker.jqll'", ex.Message);
+    }
+
+    private sealed class FakeActionsProvider : IBuildProvider
+    {
+        public string Type => "github-actions";
+        public string RepoType => "github";
+        public BuildConfig Parse(BuildSection section) => new BitbucketPipelinesConfig(section.Type, section.TimeoutMinutes);
+        public IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken) =>
+            throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void Build_type_must_match_repo_type()
+    {
+        var registry = new ProviderRegistry([new JiraProvider()], [new BitbucketProvider()],
+            [new BitbucketPipelinesProvider(), new FakeActionsProvider()]);
+        var dir = Directory.CreateTempSubdirectory("symphonist-cfg").FullName;
+        try
+        {
+            var path = Path.Combine(dir, "p.yaml");
+            File.WriteAllText(path, FixtureYaml().Replace("type: bitbucket-pipelines", "type: github-actions"));
+            var ex = Assert.Throws<ProjectConfigException>(() => ProjectConfigLoader.Load(path, registry));
+            Assert.Contains("build.type 'github-actions' needs repo.type 'github'", ex.Message);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void LoadAll_reads_yaml_files()
     {
-        var all = ProjectConfigLoader.LoadAll(Path.GetDirectoryName(Fixture("orders.yaml"))!);
+        var all = ProjectConfigLoader.LoadAll(Path.GetDirectoryName(Fixture("orders.yaml"))!, BuiltInProviders.Registry);
         Assert.Contains(all, c => c.Id == "orders");
     }
 
@@ -62,7 +114,7 @@ public class ProjectConfigLoaderTests
         {
             var path = Path.Combine(dir, "bad.yaml");
             File.WriteAllText(path, yaml);
-            var ex = Assert.Throws<ProjectConfigException>(() => ProjectConfigLoader.Load(path));
+            var ex = Assert.Throws<ProjectConfigException>(() => ProjectConfigLoader.Load(path, BuiltInProviders.Registry));
             Assert.Contains(expectedMessage, ex.Message);
         }
         finally { Directory.Delete(dir, true); }
@@ -80,7 +132,7 @@ public class ProjectConfigLoaderTests
         {
             var path = Path.Combine(dir, "bad.yaml");
             File.WriteAllText(path, yaml);
-            var ex = Assert.Throws<ProjectConfigException>(() => ProjectConfigLoader.Load(path));
+            var ex = Assert.Throws<ProjectConfigException>(() => ProjectConfigLoader.Load(path, BuiltInProviders.Registry));
             Assert.Contains(expectedMessage, ex.Message);
         }
         finally { Directory.Delete(dir, true); }
@@ -93,7 +145,7 @@ public class ProjectConfigLoaderTests
         {
             var path = Path.Combine(dir, "p.yaml");
             File.WriteAllText(path, yaml);
-            return ProjectConfigLoader.Load(path);
+            return ProjectConfigLoader.Load(path, BuiltInProviders.Registry);
         }
         finally { Directory.Delete(dir, true); }
     }
@@ -149,7 +201,7 @@ public class ProjectConfigLoaderTests
     [Fact]
     public void Agent_packages_default_to_none()
     {
-        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
         Assert.True(p.Agent.Packages.IsEmpty);
         Assert.True(p.Review.Agent.Packages.IsEmpty);
     }
@@ -174,7 +226,7 @@ public class ProjectConfigLoaderTests
     [Fact]
     public void Review_defaults_to_off_with_read_only_tools()
     {
-        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
         Assert.Empty(p.RiskAreas);
         Assert.Equal(ReviewMode.Off, p.Review.Mode);
         Assert.Equal(ReviewConfig.ReadOnlyTools, p.Review.Agent.AllowedTools);
@@ -233,7 +285,7 @@ public class ProjectConfigLoaderTests
         Assert.True(shadow.Reviews(shadow.Stage("release")));
         Assert.False(shadow.Reviews(shadow.Stage("deploy")));
 
-        var off = ProjectConfigLoader.Load(Fixture("orders.yaml"));
+        var off = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
         Assert.All(off.Pipeline, s => Assert.False(off.Reviews(s)));
     }
 }

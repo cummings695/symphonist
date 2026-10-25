@@ -7,6 +7,8 @@ using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
+using Symphonist.Integrations.Bitbucket;
+using Symphonist.Integrations.Jira;
 
 namespace Symphonist.Host.Tests.Orchestration;
 
@@ -47,9 +49,9 @@ public sealed class GateReviewerGitTests : IDisposable
             new FakeTicketStore(), new FakeTimeProvider(DateTimeOffset.Parse("2026-10-24T10:00:00Z")));
         StageDefinition S(string id, StageKind kind) => new(id, kind, GatePolicy.Human, [], null, null, null);
         project = new ProjectConfig("orders", "Orders",
-            new TrackerConfig("jira", new Uri("https://jira.example"), "me@example.com", "jira-token", "jql"),
-            new RepoConfig("bitbucket", "w", "orders", dev, "main", "main", "me@example.com", "bb-token", "squash"),
-            new BuildConfig("bitbucket-pipelines", 45),
+            new JiraTrackerConfig("jira", "jira-token", new Uri("https://jira.example"), "me@example.com", "jql"),
+            new BitbucketRepoConfig("bitbucket", dev, "main", "main", "bb-token", "w", "orders", "me@example.com", "squash"),
+            new BitbucketPipelinesConfig("bitbucket-pipelines", 45),
             new AgentSettings("claude-code", Isolation.Container, [], [], 30, null, null),
             3, [S("implement", StageKind.Implement)], new Dictionary<StageKind, string>(), root)
         {

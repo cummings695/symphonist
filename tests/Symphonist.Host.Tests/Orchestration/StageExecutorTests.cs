@@ -5,6 +5,8 @@ using Symphonist.Core.Pipeline;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 using Symphonist.Integrations.Git;
+using Symphonist.Integrations.Bitbucket;
+using Symphonist.Integrations.Jira;
 
 namespace Symphonist.Host.Tests.Orchestration;
 
@@ -49,9 +51,9 @@ public sealed class StageExecutorTests : IDisposable
     {
         StageDefinition S(string id, StageKind kind) => new(id, kind, GatePolicy.None, [], null, null, null);
         return new ProjectConfig("orders", "Orders",
-            new TrackerConfig("jira", new Uri("https://jira.example"), "me@example.com", "jira-token", "assignee = currentUser()"),
-            new RepoConfig("bitbucket", "w", "orders", "/src/orders", "main", "production", "me@example.com", "bb-token", "squash"),
-            new BuildConfig("bitbucket-pipelines", 45),
+            new JiraTrackerConfig("jira", "jira-token", new Uri("https://jira.example"), "me@example.com", "assignee = currentUser()"),
+            new BitbucketRepoConfig("bitbucket", "/src/orders", "main", "production", "bb-token", "w", "orders", "me@example.com", "squash"),
+            new BitbucketPipelinesConfig("bitbucket-pipelines", 45),
             new AgentSettings("claude-code", Isolation.Container, [], [], 30, null, null),
             3,
             [
@@ -379,7 +381,7 @@ public sealed class StageExecutorTests : IDisposable
         var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
 
         Assert.Equal(new ExecutionResult(expected, error), r);
-        Assert.Equal(["abc123"], builds.Calls);
+        Assert.Equal([("abc123", BuildPurpose.Build)], builds.Calls);
     }
 
     [Fact] public async Task Build_not_found_times_out()
@@ -406,7 +408,18 @@ public sealed class StageExecutorTests : IDisposable
         var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Completed, r.Status);
-        Assert.Equal(["rel456"], builds.Calls);
+        Assert.Equal([("rel456", BuildPurpose.Deploy)], builds.Calls);
+    }
+
+    [Fact] public async Task Deploy_stage_watches_with_deploy_purpose()
+    {
+        var t = At("deploy");
+        t.MergeCommit = "feature";
+        t.ReleaseMergeCommit = "releaseMerge";
+
+        await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Contains(("releaseMerge", BuildPurpose.Deploy), builds.Calls);
     }
 
     [Fact] public async Task Deploy_without_release_merge_commit_fails()

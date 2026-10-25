@@ -1,14 +1,13 @@
 using System.Text.Json;
-using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 
 namespace Symphonist.Integrations.Bitbucket;
 
-public sealed class BitbucketPipelinesWatcher(HttpClient http, RepoConfig config, string apiToken) : IBuildWatcher
+public sealed class BitbucketPipelinesWatcher(HttpClient http, BitbucketRepoConfig config, string apiToken) : IBuildWatcher
 {
     private readonly BitbucketApi _api = new(http, config, apiToken);
 
-    public async Task<BuildStatus> GetStatusAsync(string commitHash, CancellationToken ct)
+    public async Task<BuildStatus> GetStatusAsync(string commitHash, BuildPurpose purpose, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(commitHash)) return BuildStatus.NotFound;
 

@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Symphonist.Core\Symphonist.Core.csproj" />
+    <ProjectReference Include="..\..\src\Symphonist.Integrations\Symphonist.Integrations.csproj" />
   </ItemGroup>
 
   <ItemGroup>

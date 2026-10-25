@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Symphonist.Core;
 using Symphonist.Core.Config;
+using Symphonist.Integrations;
 
 namespace Symphonist.Host.Orchestration;
 
@@ -46,7 +47,7 @@ public sealed class ProjectRegistry
         {
             try
             {
-                loaded.Add(ProjectConfigLoader.Load(file));
+                loaded.Add(ProjectConfigLoader.Load(file, BuiltInProviders.Registry));
             }
             catch (Exception e) when (e is not OutOfMemoryException) // one bad file must never stop the host
             {
