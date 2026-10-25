@@ -83,6 +83,7 @@ public static class PipelineEngine
 
     public static TransitionOutcome Approve(ProjectConfig p, Ticket t, DateTimeOffset now)
     {
+        if (StageRemoved(p, t) is { } removed) return removed;
         if (t.Status != StageStatus.AwaitingApproval) return NoChange($"{t.StageId} is not awaiting approval");
         var stage = p.Stage(t.StageId);
         var decision = DecisionOn(t, GateDecision.Approved);
@@ -151,6 +152,7 @@ public static class PipelineEngine
     public static TransitionOutcome MergeHeld(ProjectConfig p, Ticket t, string reason, DateTimeOffset now)
     {
         if (t.Status != StageStatus.Approved) return NoChange($"{t.StageId} is not approved");
+        if (StageRemoved(p, t) is { } removed) return removed;
         var stage = p.Stage(t.StageId);
         var branch = t.ApprovedBranch ?? (stage.Kind == StageKind.Release ? p.Repo.MainBranch : t.Branch);
         var since = ToStoredPrecision(now);
@@ -172,13 +174,14 @@ public static class PipelineEngine
     public static TransitionOutcome PostApprovalCompleted(ProjectConfig p, Ticket t, DateTimeOffset now)
     {
         if (t.Status != StageStatus.Approved) return NoChange($"{t.StageId} is not approved");
-        return Advance(p, t, p.Stage(t.StageId), now);
+        return StageRemoved(p, t) ?? Advance(p, t, p.Stage(t.StageId), now);
     }
 
     public static TransitionOutcome SendBack(ProjectConfig p, Ticket t, string? feedback, string? toStageId, DateTimeOffset now)
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked))
             return NoChange($"cannot send back from {t.Status}");
+        if (toStageId is null && StageRemoved(p, t) is { } removed) return removed;
         // Only a send-back from the waiting gate decides a round; one from Approved or Blocked does not.
         var decision = t.Status == StageStatus.AwaitingApproval ? DecisionOn(t, GateDecision.SentBack) : null;
         return SendBackTo(t, p.Stage(toStageId ?? t.StageId), feedback, now) with { Decision = decision };
@@ -299,6 +302,14 @@ public static class PipelineEngine
         t.ApprovedBaseHead = null;
         t.MergeAcceptedAt = null;
     }
+
+    /// <summary>
+    /// A NoChange naming the way out when the ticket's stage was removed from the pipeline (hand edit), else null.
+    /// </summary>
+    private static TransitionOutcome? StageRemoved(ProjectConfig p, Ticket t) =>
+        p.Pipeline.Any(s => s.Id == t.StageId)
+            ? null
+            : NoChange($"stage '{t.StageId}' is no longer in the pipeline; send it back to an existing stage (--to)");
 
     private static int IndexOf(ProjectConfig p, string stageId)
     {

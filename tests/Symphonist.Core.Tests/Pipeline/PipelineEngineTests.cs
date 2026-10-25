@@ -22,6 +22,28 @@ public class PipelineEngineTests
         Assert.Equal("triage", PipelineEngine.Create(P, "ORD-2", "t", "Selected", Now).StageId);
     }
 
+    [Theory]
+    [InlineData(StageStatus.AwaitingApproval)]
+    [InlineData(StageStatus.Blocked)]
+    [InlineData(StageStatus.Approved)]
+    public void Ticket_at_a_removed_stage_names_the_way_out(StageStatus status)
+    {
+        const string message = "stage 'qa' is no longer in the pipeline; send it back to an existing stage (--to)";
+        var t = At("qa", status);
+
+        var approve = PipelineEngine.Approve(P, t, Now);
+        var sendBack = PipelineEngine.SendBack(P, t, "fix", null, Now);
+
+        Assert.False(approve.Changed);
+        Assert.Equal(message, approve.Message);
+        Assert.False(sendBack.Changed);
+        Assert.Equal(message, sendBack.Message);
+        if (status == StageStatus.Approved)
+            Assert.Equal(message, PipelineEngine.PostApprovalCompleted(P, t, Now).Message);
+        Assert.True(PipelineEngine.SendBack(P, t, "fix", "plan", Now).Changed);
+        Assert.Equal("plan", t.StageId);
+    }
+
     [Fact] public void Create_sets_initial_fields()
     {
         var t = PipelineEngine.Create(P, "ORD-1", "t", "Backlog", Now);

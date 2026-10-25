@@ -263,14 +263,18 @@ public sealed class BoardQueryTests : IDisposable
     }
 
     [Fact]
-    public async Task Unknown_stage_in_known_project_detail_is_read_only()
+    public async Task Unknown_stage_in_known_project_detail_offers_only_send_back_to_any_stage()
     {
-        await Seed("ORD-1", "renamed", StageStatus.AwaitingApproval);
+        await Seed("ORD-1", "renamed", StageStatus.Blocked);
+        await Seed("ORD-2", "renamed", StageStatus.Running);
 
         var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+        var running = (await query.LoadTicketAsync("orders", "ORD-2", default))!;
 
-        Assert.False(detail.CanApprove || detail.CanSendBack || detail.CanUnblock);
-        Assert.Empty(detail.SendBackTargets);
+        Assert.False(detail.CanApprove || detail.CanUnblock);
+        Assert.True(detail.CanSendBack);
+        Assert.Equal(["triage", "plan", "implement"], detail.SendBackTargets);
+        Assert.False(running.CanSendBack);
     }
 
     private static GateVerdict Verdict(RiskLevel risk) => new(risk, "summary", ["why"], ["c"], []);

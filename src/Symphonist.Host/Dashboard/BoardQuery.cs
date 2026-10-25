@@ -94,12 +94,16 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             ? new Dictionary<Guid, decimal>()
             : new Dictionary<Guid, decimal> { [t.Id] = costs.Sum(r => r.CostUsd!.Value) });
 
-        // Without its project or stage in the configuration the page is read-only (like the card on the board).
+        // Without its project in the configuration the page is read-only (like the card on the board). A ticket whose
+        // stage was removed (hand edit) can only be sent back, to any stage but done.
         var known = card.Known;
+        var stageRemoved = !known && project is not null;
         var targets = known
             ? project!.Pipeline.Take(project.Pipeline.ToList().FindIndex(s => s.Id == t.StageId) + 1).Reverse().Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
+            : stageRemoved ? project!.Pipeline.Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
             : [];
-        var sendBack = known && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
+        var sendBack = (known || (stageRemoved && targets.Count > 0))
+            && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
         return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
             known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews,

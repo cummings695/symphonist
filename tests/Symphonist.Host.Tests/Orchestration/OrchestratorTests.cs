@@ -1953,6 +1953,10 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal("plan", t.StageId);
         Assert.Contains("no longer in the pipeline", t.BlockedReason);
         Assert.Single(store.EventMessages("ORD-1"), m => m.Contains("no longer in the pipeline"));
+        const string wayOut = "stage 'plan' is no longer in the pipeline; send it back to an existing stage (--to)";
+        Assert.Equal(wayOut, (await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Message);
+        var noTarget = await o.SendBackAsync("orders", "ORD-1", "again", null, CancellationToken.None);
+        Assert.Equal((false, wayOut), (noTarget.Changed, noTarget.Message));
 
         var outcome = await o.SendBackAsync("orders", "ORD-1", "plan it again", "triage", CancellationToken.None);
 
