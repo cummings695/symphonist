@@ -12,6 +12,7 @@ public static partial class PromptRenderer
         "project.name", "branch", "feedback", "spec_path", "plan_path", "risk.areas",
         "gate.stage", "gate.kind", "review.diff_range", "review.changed_files", "review.diff", "review.history",
         "review.stage_summary", "review.fence_id",
+        "onboarding.tracker", "onboarding.statuses", "onboarding.pipeline", "onboarding.fence_id",
     };
 
     [GeneratedRegex(@"\{\{([a-z_.]+)\}\}")]

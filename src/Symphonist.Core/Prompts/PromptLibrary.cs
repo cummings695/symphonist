@@ -13,6 +13,9 @@ public static class PromptLibrary
     public static string GetReview(ProjectConfig project) =>
         Load(project.Review.PromptPath, "review", "no review prompt template");
 
+    /// <summary>The embedded onboarding (proposal) prompt; there is no override. The result is validated.</summary>
+    public static string GetOnboarding() => Load(null, "onboarding", "no onboarding prompt template");
+
     private static string Load(string? overridePath, string defaultName, string missing)
     {
         string template;
