@@ -44,6 +44,17 @@ public class ProjectConfigLoaderTests
     }
 
     [Fact]
+    public void Empty_shared_fields_in_yaml_use_defaults()
+    {
+        var p = LoadYaml(FixtureYaml().Replace("  mainBranch: main\n", "  mainBranch:\n")
+            .Replace("  productionBranch: production\n", "  productionBranch: ~\n")
+            .Replace("  type: bitbucket-pipelines\n", "  type: bitbucket-pipelines\n  timeoutMinutes:\n"));
+        Assert.Equal("main", p.Repo.MainBranch);
+        Assert.Equal("production", p.Repo.ProductionBranch);
+        Assert.Equal(45, p.Build.TimeoutMinutes);
+    }
+
+    [Fact]
     public void Unknown_field_in_provider_section_is_rejected()
     {
         var ex = Assert.Throws<ProjectConfigException>(() =>

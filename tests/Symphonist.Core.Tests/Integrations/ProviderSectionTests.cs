@@ -76,4 +76,45 @@ public class ProviderSectionTests
             ("workflows", new List<object> { "ci.yml", "deploy.yml" })), Dir, ["type"]);
         Assert.Equal(["ci.yml", "deploy.yml"], section.Bind<Dto>().Workflows);
     }
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void Empty_branches_fall_back_to_defaults(string? value)
+    {
+        var section = new RepoSection(Values(("type", "x"), ("tokenSecret", "t"), ("localPath", "src/x"),
+            ("mainBranch", value), ("productionBranch", value)), Dir);
+        Assert.Equal("main", section.MainBranch);
+        Assert.Equal("production", section.ProductionBranch);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Empty_timeout_defaults_to_45(string? value)
+    {
+        Assert.Equal(45, new BuildSection(Values(("type", "x"), ("timeoutMinutes", value)), Dir).TimeoutMinutes);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Empty_token_secret_is_missing(string? value)
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            new TrackerSection(Values(("type", "x"), ("tokenSecret", value)), Dir));
+        Assert.Equal("missing required 'tracker.tokenSecret'", ex.Message);
+    }
+
+    [Fact]
+    public void Non_scalar_shared_key_is_rejected()
+    {
+        var list = Assert.Throws<ProjectConfigException>(() =>
+            new TrackerSection(Values(("type", new List<object> { "a" }), ("tokenSecret", "t")), Dir));
+        Assert.Equal("invalid 'tracker.type'", list.Message);
+
+        var map = Assert.Throws<ProjectConfigException>(() => new RepoSection(Values(("type", "x"), ("tokenSecret", "t"),
+            ("localPath", "src/x"), ("mainBranch", new Dictionary<object, object> { ["a"] = "b" })), Dir));
+        Assert.Equal("invalid 'repo.mainBranch'", map.Message);
+    }
 }

@@ -71,9 +71,18 @@ public class ProviderSection
     public string Required(string? value, string field) =>
         string.IsNullOrWhiteSpace(value) ? throw new ProjectConfigException($"missing required '{Path}.{field}'") : value;
 
-    /// <summary>The scalar under <paramref name="key"/> as text, or null when absent or empty.</summary>
-    protected string? Text(string key) =>
-        _values.TryGetValue(key, out var v) ? Convert.ToString(v, CultureInfo.InvariantCulture) : null;
+    /// <summary>
+    /// The scalar under <paramref name="key"/> as text, or null when absent, null or blank (so defaults apply and
+    /// <see cref="Required"/> reports it missing). A list or map is "invalid '{Path}.{key}'".
+    /// </summary>
+    protected string? Text(string key)
+    {
+        if (!_values.TryGetValue(key, out var v) || v is null) return null;
+        if (v is System.Collections.IEnumerable and not string)
+            throw new ProjectConfigException($"invalid '{Path}.{key}'");
+        var text = Convert.ToString(v, CultureInfo.InvariantCulture);
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
 }
 
 public sealed class TrackerSection : ProviderSection
