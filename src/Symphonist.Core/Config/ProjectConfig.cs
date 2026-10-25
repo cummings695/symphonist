@@ -59,6 +59,7 @@ public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker
     IReadOnlyDictionary<StageKind, string> PromptOverrides, string ConfigDirectory)
 {
     private readonly ReviewConfig? _review;
+    private readonly EvidenceConfig? _evidence;
 
     public IReadOnlyList<RiskArea> RiskAreas { get; init; } = [];
 
@@ -69,12 +70,26 @@ public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker
         init => _review = value;
     }
 
+    /// <summary>Defaults to <see cref="EvidenceMode.HighRisk"/> with the project's own <see cref="Agent"/> and a 30 minute timeout.</summary>
+    public EvidenceConfig Evidence
+    {
+        get => _evidence ?? new EvidenceConfig(EvidenceMode.HighRisk, EvidenceRun.None, [],
+            Agent with { TimeoutMinutes = EvidenceLimits.DefaultTimeoutMinutes }, null);
+        init => _evidence = value;
+    }
+
+    public PrCommentsConfig PrComments { get; init; } = PrCommentsConfig.Default;
+
     /// <summary>Only these stage kinds have agent-readable output for a reviewer to judge.</summary>
     public static bool IsReviewable(StageKind kind) =>
         kind is StageKind.Triage or StageKind.Plan or StageKind.Implement or StageKind.Release;
 
     public bool Reviews(StageDefinition stage) =>
         Review.Mode != ReviewMode.Off && stage.Gate != GatePolicy.None && IsReviewable(stage.Kind);
+
+    /// <summary>Evidence applies to this stage's gate rounds: mode not off, implement kind, a gate.</summary>
+    public bool WantsEvidence(StageDefinition stage) =>
+        Evidence.Mode != EvidenceMode.Off && stage.Gate != GatePolicy.None && stage.Kind == StageKind.Implement;
 
     public StageDefinition Stage(string id) =>
         Pipeline.FirstOrDefault(s => s.Id == id)

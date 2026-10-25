@@ -93,6 +93,29 @@ review:
   # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # inherits the rest from agent
   #   host mode: allowedTools defaults to [Read, Grep, Glob], and a review refuses to run with any other tool
 
+# Optional: after a gated implement round is pushed, an agent runs the app and reports what it saw (tests, screenshots)
+# on the PR and the dashboard. Evidence is advice for you; it never approves or blocks anything and never pushes.
+#   mode: off       = never
+#         high-risk = when the reviewer says high or a risk-area path is touched (the default)
+#         always    = every gated implement round
+# evidence:
+#   mode: high-risk
+#   # prompt: prompts/evidence.md   # optional prompt override, relative to this file
+#   run:                            # how to start the app; every field is optional and single-line except notes
+#     setup: [npm ci]               # at most 10 commands, run in order
+#     start: npm start
+#     url: http://localhost:3000
+#     ready: /health                # what to wait for before using the app
+#     notes: Sign in as demo@example.com   # free text for the agent
+#   features:                       # at most 20; things to exercise, in your own words
+#     - { name: Checkout, steps: Add an item to the basket and pay with the test card }
+#   agent: { timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from agent
+
+# Optional: comments on the pull request that tag @claude (from you) are applied as a fix run.
+# prComments:
+#   fromOthers: false   # default. true also acts on teammates' comments. Trust note: they then direct an agent
+#                       # that pushes under your account, so enable it only for a team you trust
+
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
 # prompts:
 #   plan: prompts/plan.md

@@ -123,6 +123,8 @@ public static partial class ProjectConfigLoader
         {
             RiskAreas = MapRiskAreas(d.RiskAreas),
             Review = MapReview(d.Review, agent, isolation, packages, dir),
+            Evidence = MapEvidence(d.Evidence, agent, isolation, packages, dir),
+            PrComments = new PrCommentsConfig(d.PrComments?.FromOthers ?? false),
         };
     }
 
@@ -181,6 +183,65 @@ public static partial class ProjectConfigLoader
         var prompt = r?.Prompt is null ? null : Path.GetFullPath(Required(r.Prompt, "review.prompt"), dir);
         return new ReviewConfig(mode, settings, prompt);
     }
+
+    private static EvidenceConfig MapEvidence(EvidenceDto? e, AgentDto agent, Isolation isolation, AgentPackages packages,
+        string dir)
+    {
+        var mode = (e?.Mode ?? "high-risk").ToLowerInvariant() switch
+        {
+            "off" => EvidenceMode.Off,
+            "high-risk" => EvidenceMode.HighRisk,
+            "always" => EvidenceMode.Always,
+            _ => throw new ProjectConfigException($"unknown evidence.mode '{e!.Mode}'"),
+        };
+
+        var run = e?.Run is null ? EvidenceRun.None : MapEvidenceRun(e.Run);
+
+        var features = new List<EvidenceFeature>();
+        var dtos = e?.Features ?? [];
+        if (dtos.Count > EvidenceLimits.MaxFeatures)
+            throw new ProjectConfigException($"evidence.features has {dtos.Count} items (at most {EvidenceLimits.MaxFeatures})");
+        for (var i = 0; i < dtos.Count; i++)
+        {
+            var f = dtos[i] ?? throw new ProjectConfigException($"evidence.features[{i}] is empty");
+            features.Add(new EvidenceFeature(
+                SingleLine(Required(f.Name, "evidence.features[].name"), "evidence.features[].name", EvidenceLimits.MaxFeatureNameChars),
+                Limited(Required(f.Steps, "evidence.features[].steps"), "evidence.features[].steps", EvidenceLimits.MaxFeatureStepsChars)));
+        }
+
+        var settings = new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
+            Items(agent.AllowedTools, "agent.allowedTools"), e?.Agent?.TimeoutMinutes ?? EvidenceLimits.DefaultTimeoutMinutes,
+            e?.Agent?.Model ?? agent.Model, agent.Image) { Packages = packages };
+        var prompt = e?.Prompt is null ? null : Path.GetFullPath(Required(e.Prompt, "evidence.prompt"), dir);
+        return new EvidenceConfig(mode, run, features, settings, prompt);
+    }
+
+    private static EvidenceRun MapEvidenceRun(EvidenceRunDto r)
+    {
+        var setup = Items(r.Setup, "evidence.run.setup");
+        if (setup.Count > EvidenceLimits.MaxSetupCommands)
+            throw new ProjectConfigException(
+                $"evidence.run.setup has {setup.Count} commands (at most {EvidenceLimits.MaxSetupCommands})");
+        foreach (var command in setup)
+            SingleLine(command, "evidence.run.setup", EvidenceLimits.MaxRunFieldChars);
+        return new EvidenceRun(setup,
+            OptionalLine(r.Start, "evidence.run.start"), OptionalLine(r.Url, "evidence.run.url"),
+            OptionalLine(r.Ready, "evidence.run.ready"),
+            string.IsNullOrWhiteSpace(r.Notes) ? null : Limited(r.Notes, "evidence.run.notes", EvidenceLimits.MaxNotesChars));
+    }
+
+    private static string? OptionalLine(string? value, string field) =>
+        string.IsNullOrWhiteSpace(value) ? null : SingleLine(value, field, EvidenceLimits.MaxRunFieldChars);
+
+    private static string SingleLine(string value, string field, int max)
+    {
+        if (value.Contains('\r') || value.Contains('\n'))
+            throw new ProjectConfigException($"{field} must be a single line");
+        return Limited(value, field, max);
+    }
+
+    private static string Limited(string value, string field, int max) =>
+        value.Length > max ? throw new ProjectConfigException($"{field} is {value.Length} characters (at most {max})") : value;
 
     private static List<StageDefinition> MapPipeline(List<StageDto?>? stages)
     {
@@ -255,6 +316,44 @@ public static partial class ProjectConfigLoader
         public Dictionary<string, string?>? Prompts { get; set; }
         public List<RiskAreaDto?>? RiskAreas { get; set; }
         public ReviewDto? Review { get; set; }
+        public EvidenceDto? Evidence { get; set; }
+        public PrCommentsDto? PrComments { get; set; }
+    }
+
+    private sealed class EvidenceDto
+    {
+        public string? Mode { get; set; }
+        public string? Prompt { get; set; }
+        public EvidenceRunDto? Run { get; set; }
+        public List<EvidenceFeatureDto?>? Features { get; set; }
+        public EvidenceAgentDto? Agent { get; set; }
+    }
+
+    private sealed class EvidenceRunDto
+    {
+        public List<string>? Setup { get; set; }
+        public string? Start { get; set; }
+        public string? Url { get; set; }
+        public string? Ready { get; set; }
+        public string? Notes { get; set; }
+    }
+
+    private sealed class EvidenceFeatureDto
+    {
+        public string? Name { get; set; }
+        public string? Steps { get; set; }
+    }
+
+    /// <summary>Only these two keys may differ from the project agent.</summary>
+    private sealed class EvidenceAgentDto
+    {
+        public int? TimeoutMinutes { get; set; }
+        public string? Model { get; set; }
+    }
+
+    private sealed class PrCommentsDto
+    {
+        public bool? FromOthers { get; set; }
     }
 
     private sealed class RiskAreaDto

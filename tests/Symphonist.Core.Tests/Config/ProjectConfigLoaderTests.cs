@@ -392,4 +392,108 @@ public class ProjectConfigLoaderTests
         var off = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
         Assert.All(off.Pipeline, s => Assert.False(off.Reviews(s)));
     }
+
+    [Fact]
+    public void Evidence_defaults_when_absent()
+    {
+        var p = LoadYaml(FixtureYaml());
+        Assert.Equal(EvidenceMode.HighRisk, p.Evidence.Mode);
+        Assert.True(p.Evidence.Run.IsEmpty);
+        Assert.Empty(p.Evidence.Features);
+        Assert.Equal(30, p.Evidence.Agent.TimeoutMinutes);
+        Assert.Equal(p.Agent.Model, p.Evidence.Agent.Model);
+        Assert.Equal(p.Agent.Isolation, p.Evidence.Agent.Isolation);
+        Assert.Equal(p.Agent.Image, p.Evidence.Agent.Image);
+        Assert.Equal(p.Agent.AllowedDomains, p.Evidence.Agent.AllowedDomains);
+        Assert.Equal(p.Agent.AllowedTools, p.Evidence.Agent.AllowedTools);
+        Assert.Equal(p.Agent.Packages, p.Evidence.Agent.Packages);
+        Assert.Null(p.Evidence.PromptPath);
+        Assert.False(p.PrComments.FromOthers);
+    }
+
+    [Fact]
+    public void Evidence_section_parses()
+    {
+        var p = LoadYaml(FixtureYaml() + string.Join("\n",
+            "evidence:",
+            "  mode: always",
+            "  prompt: prompts/e.md",
+            "  run:",
+            "    setup: [a, b]",
+            "    start: npm start",
+            "    url: http://localhost:3000",
+            "    ready: /health",
+            "    notes: needs a seeded db",
+            "  features:",
+            "    - { name: Checkout, steps: Add an item and pay }",
+            "  agent: { timeoutMinutes: 45, model: m }",
+            ""));
+        Assert.Equal(EvidenceMode.Always, p.Evidence.Mode);
+        Assert.Equal(["a", "b"], p.Evidence.Run.Setup);
+        Assert.Equal("npm start", p.Evidence.Run.Start);
+        Assert.Equal("http://localhost:3000", p.Evidence.Run.Url);
+        Assert.Equal("/health", p.Evidence.Run.Ready);
+        Assert.Equal("needs a seeded db", p.Evidence.Run.Notes);
+        Assert.False(p.Evidence.Run.IsEmpty);
+        Assert.Equal(new EvidenceFeature("Checkout", "Add an item and pay"), Assert.Single(p.Evidence.Features));
+        Assert.Equal(45, p.Evidence.Agent.TimeoutMinutes);
+        Assert.Equal("m", p.Evidence.Agent.Model);
+        Assert.Equal(Path.Combine(p.ConfigDirectory, "prompts", "e.md"), p.Evidence.PromptPath);
+    }
+
+    [Theory]
+    [InlineData("off", EvidenceMode.Off)]
+    [InlineData("high-risk", EvidenceMode.HighRisk)]
+    [InlineData("always", EvidenceMode.Always)]
+    public void Evidence_modes(string yaml, EvidenceMode mode) =>
+        Assert.Equal(mode, LoadYaml(FixtureYaml() + $"evidence:\n  mode: {yaml}\n").Evidence.Mode);
+
+    [Fact]
+    public void Unknown_evidence_mode_is_error()
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(FixtureYaml() + "evidence:\n  mode: sometimes\n"));
+        Assert.Contains("unknown evidence.mode 'sometimes'", ex.Message);
+    }
+
+    [Fact]
+    public void Evidence_agent_rejects_other_keys() =>
+        Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + "evidence:\n  agent: { isolation: host }\n"));
+
+    [Fact]
+    public void Evidence_limits_are_enforced()
+    {
+        var features = string.Concat(Enumerable.Range(0, 21).Select(i => $"    - {{ name: f{i}, steps: s }}\n"));
+        var tooMany = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + "evidence:\n  features:\n" + features));
+        Assert.Contains("evidence.features", tooMany.Message);
+
+        var longName = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + $"evidence:\n  features:\n    - {{ name: {new string('n', 81)}, steps: s }}\n"));
+        Assert.Contains("evidence.features[].name", longName.Message);
+
+        var noSteps = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + "evidence:\n  features:\n    - { name: x }\n"));
+        Assert.Contains("evidence.features[].steps", noSteps.Message);
+
+        var lineBreak = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + "evidence:\n  run:\n    start: \"a\\nb\"\n"));
+        Assert.Contains("evidence.run.start", lineBreak.Message);
+    }
+
+    [Fact]
+    public void Pr_comments_from_others_parses() =>
+        Assert.True(LoadYaml(FixtureYaml() + "prComments: { fromOthers: true }\n").PrComments.FromOthers);
+
+    [Fact]
+    public void Wants_evidence_only_for_gated_implement()
+    {
+        var p = LoadYaml(FixtureYaml());
+        var implement = p.Stage("implement");
+        Assert.True(p.WantsEvidence(implement));
+        Assert.False(p.WantsEvidence(implement with { Gate = GatePolicy.None }));
+        Assert.False(p.WantsEvidence(p.Stage("plan")));
+        var off = LoadYaml(FixtureYaml() + "evidence:\n  mode: off\n");
+        Assert.False(off.WantsEvidence(off.Stage("implement")));
+    }
 }
