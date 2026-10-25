@@ -367,6 +367,11 @@ select {
     letter-spacing: -0.01em;
 }
 
+/* Reload projects: the line's last item, at its right end. */
+.page-head-action {
+    margin-left: auto;
+}
+
 /* Waiting on you, in a folded stage's header */
 .count-waiting {
     color: var(--waiting);

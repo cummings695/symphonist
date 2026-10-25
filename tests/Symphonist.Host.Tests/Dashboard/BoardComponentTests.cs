@@ -486,6 +486,40 @@ public sealed class BoardComponentTests : IDisposable
         Assert.Contains(SymphonistPaths.Resolve("projects"), cut.Find(".setup-hint").TextContent);
         Assert.Equal("All projects", cut.Find("h1").TextContent.Trim()); // the focus target stays
     }
+
+    [Fact]
+    public void Load_errors_show_as_banner_text()
+    {
+        home.WriteProject("bad.yaml", "id: <b>x</b>\n");
+        registry.Reload();
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-load-error='bad.yaml']");
+        Assert.StartsWith("bad.yaml skipped: ", banner.TextContent.Trim());
+        Assert.Contains("invalid id '<b>x</b>'", banner.TextContent);
+        Assert.Empty(banner.QuerySelectorAll("b"));
+    }
+
+    [Fact]
+    public void Reload_button_reloads_projects_and_reports_skipped_files()
+    {
+        var cut = RenderBoard();
+        Assert.Empty(cut.FindAll("[data-load-error]"));
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Reload projects").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("Reloaded 3 project(s)", StatusLine()));
+        Assert.Contains("shop", registry.Projects.Select(p => p.Id));
+
+        home.WriteProject("bad.yaml", "id: bad\n");
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Reload projects").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("1 project file(s) skipped", StatusLine()));
+        cut.WaitForAssertion(() => Assert.Contains("missing required", cut.Find("[data-load-error='bad.yaml']").TextContent));
+    }
+
     /// <summary>The browser side of folding: at phone width, with <paramref name="stored"/> in localStorage.</summary>
     private BunitJSModuleInterop SetupFolds(Dictionary<string, bool>? stored = null)
     {

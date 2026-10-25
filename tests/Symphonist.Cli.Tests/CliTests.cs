@@ -503,4 +503,20 @@ public sealed class CliTests
     [InlineData(60 * 24 * 2 + 5, "2d")]
     public void Age_is_humanized(int minutes, string expected) =>
         Assert.Equal(expected, StatusTable.Age(Now - TimeSpan.FromMinutes(minutes), Now));
+
+    [Fact]
+    public async Task Projects_reload_prints_count_and_errors()
+    {
+        var ok = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/projects/reload", HttpStatusCode.OK,
+            """{"projects":["orders","web"],"errors":{}}"""), "", "projects", "reload");
+        var failed = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/projects/reload", HttpStatusCode.OK,
+            """{"projects":["orders"],"errors":{"bad.yaml":"missing required 'tracker'","a.yaml":"project id 'x' is declared by 2 files"}}"""),
+            "", "projects", "reload");
+
+        Assert.Equal((0, "Reloaded 2 project(s)" + Environment.NewLine, ""), (ok.Exit, ok.Out, ok.Err));
+        Assert.Equal(1, failed.Exit);
+        Assert.Equal("Reloaded 1 project(s)" + Environment.NewLine, failed.Out);
+        Assert.Equal("skipped a.yaml: project id 'x' is declared by 2 files" + Environment.NewLine
+            + "skipped bad.yaml: missing required 'tracker'" + Environment.NewLine, failed.Err);
+    }
 }

@@ -67,7 +67,10 @@ is never taken from arguments.
    `samples/projects/orders-github.example.yaml` (all GitHub) to `~/.symphonist/projects/<name>.yaml` and edit it. The
    example documents every field. The host reads `*.yaml` / `*.yml` from the `projects` folder of `$SYMPHONIST_HOME`
    (default `~/.symphonist`). An invalid file is logged and skipped, as are all files declaring the same project `id`;
-   other projects still load. Projects are loaded when the host starts, so restart it after editing.
+   other projects still load. After editing a file by hand, run `symphonist projects reload` (or use Reload projects on
+   the board); the setup screen reloads by itself. A ticket whose stage you removed is blocked until you send it back
+   to an existing stage. Docker images are prepared when the host starts, so after adding a container project or
+   changing its `agent` image or packages by hand, restart the host before its first agent run.
 
    Each of `tracker`, `repo` and `build` picks its provider with `type`, and you can mix them: for example a Jira
    tracker with a GitHub repository, or a GitHub Projects board with a Bitbucket repository. The one rule is that the
@@ -122,6 +125,7 @@ symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
 symphonist projects resume <id>
+symphonist projects reload                  reload the project files after editing them by hand (lists skipped files)
 symphonist dashboard [--no-browser]         open the dashboard in your browser
 ```
 
@@ -283,7 +287,8 @@ repo with a trivial `bitbucket-pipelines.yml`; or a throwaway GitHub Projects bo
   checked at startup).
 - `Symphonist host is not running on 127.0.0.1:<port>` (exit code 2): start the host, and check that `SYMPHONIST_PORT`
   matches for host and CLI. The same message appears if `~/.symphonist/api-token` does not exist yet.
-- A project is missing from `symphonist projects`: check the host log for `Skipping project file ...`.
+- A project is missing from `symphonist projects`: run `symphonist projects reload`; it names each skipped file and
+  why (the board shows the same as banners, and the host log as `Skipping project file ...`).
 - A project's tickets never move and `symphonist projects` shows a `PROBLEM` (for example `secret 'jira-acme' not set;
   run: symphonist secret set jira-acme`, or `tracker query failed: ...`): fix the cause (store the secret, check the
   token or JQL). The problem clears on the next poll that succeeds; run `symphonist poll` to retry now.

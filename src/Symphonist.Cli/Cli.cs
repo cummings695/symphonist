@@ -89,7 +89,7 @@ public static class Cli
         });
         root.Add(dashboard);
 
-        var projects = new Command("projects", "List projects, or pause/resume one");
+        var projects = new Command("projects", "List projects, pause/resume one, or reload the project files");
         Run(projects, async (_, ct) => stdout.Write(StatusTable.RenderProjects(await client.ListProjectsAsync(ct))));
         foreach (var (name, paused, done) in new[] { ("pause", true, "Paused"), ("resume", false, "Resumed") })
         {
@@ -104,6 +104,16 @@ public static class Cli
             projects.Add(sub);
         }
 
+        var reload = new Command("reload", "Reload the project files after editing them by hand");
+        RunWithExitCode(reload, async (_, ct) =>
+        {
+            var result = await client.ReloadProjectsAsync(ct);
+            stdout.WriteLine($"Reloaded {result.Projects.Count} project(s)");
+            foreach (var (file, error) in result.Errors.OrderBy(e => e.Key, StringComparer.Ordinal))
+                stderr.WriteLine($"skipped {file}: {error}");
+            return result.Errors.Count > 0 ? ApiError : Ok;
+        });
+        projects.Add(reload);
         root.Add(projects);
 
         var secret = new Command("secret", "Manage secrets in the OS credential store");
@@ -134,12 +144,19 @@ public static class Cli
 
         // Wraps an action: maps client failures to exit codes and messages.
         void Run(Command command, Func<ParseResult, CancellationToken, Task> action) =>
+            RunWithExitCode(command, async (r, ct) =>
+            {
+                await action(r, ct);
+                return Ok;
+            });
+
+        // The same, for an action that decides its own exit code.
+        void RunWithExitCode(Command command, Func<ParseResult, CancellationToken, Task<int>> action) =>
             command.SetAction(async (r, ct) =>
             {
                 try
                 {
-                    await action(r, ct);
-                    return Ok;
+                    return await action(r, ct);
                 }
                 catch (HostNotRunningException e)
                 {

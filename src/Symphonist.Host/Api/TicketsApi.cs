@@ -28,6 +28,10 @@ public sealed record SendBackRequest(string? Feedback, string? ToStage);
 public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation Isolation, string? Problem,
     ReviewMode Review, IReadOnlyList<StageAgreement> Agreement);
 
+/// <param name="Projects">The projects loaded after the reload.</param>
+/// <param name="Errors">Each skipped project file (by file name) and why.</param>
+public sealed record ProjectReloadDto(IReadOnlyList<string> Projects, IReadOnlyDictionary<string, string> Errors);
+
 /// <param name="Url">Single-use sign-in link for the dashboard (see <see cref="DashboardLogin"/>).</param>
 public sealed record DashboardLinkDto(Uri Url);
 
@@ -102,6 +106,12 @@ public static class TicketsApi
             return projects.Projects.OrderBy(p => p.Id, StringComparer.Ordinal)
                 .Select(p => new ProjectDto(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation, o.ProblemOf(p.Id),
                     p.Review.Mode, agreements[p.Id].ToList()));
+        });
+
+        api.MapPost("/projects/reload", async (Orchestrator o, CancellationToken ct) =>
+        {
+            var reload = await o.ReloadProjectsAsync(ct);
+            return new ProjectReloadDto(reload.ProjectIds, reload.Errors);
         });
 
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));

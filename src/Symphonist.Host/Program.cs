@@ -10,6 +10,7 @@ using Symphonist.Core.Integrations;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Api;
 using Symphonist.Host.Dashboard;
+using Symphonist.Host.Onboarding;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations;
 using Symphonist.Integrations.ClaudeCode;
@@ -77,6 +78,7 @@ builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<GateReviewer>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
+builder.Services.AddSingleton<ProjectFileStore>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
@@ -86,7 +88,9 @@ var app = builder.Build();
 
 var notifier = app.Services.GetRequiredService<BoardNotifier>();
 app.Services.GetRequiredService<Orchestrator>().ProblemsChanged += notifier.Notify;
-app.Services.GetRequiredService<ProjectRegistry>().PausedChanged += notifier.Notify;
+var registry = app.Services.GetRequiredService<ProjectRegistry>();
+registry.PausedChanged += notifier.Notify;
+registry.ProjectsChanged += notifier.Notify;
 
 app.UseMiddleware<ApiTokenMiddleware>(apiToken);
 app.MapDefaultEndpoints();

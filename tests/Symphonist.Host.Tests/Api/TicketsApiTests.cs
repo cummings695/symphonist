@@ -432,4 +432,32 @@ public sealed class TicketsApiTests : IDisposable
         await Authorized().GetAsync("/api/projects");
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(SymphonistPaths.Resolve("api-token")));
     }
+
+    [Fact]
+    public async Task Reload_endpoint_returns_projects_and_errors()
+    {
+        var before = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(2, before.GetArrayLength());
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+        home.WriteProject("bad.yaml", "id: bad\n");
+
+        var reload = await Json(await Authorized().PostAsync("/api/projects/reload", null));
+
+        Assert.Equal(["billing", "orders", "shop"],
+            reload.GetProperty("projects").EnumerateArray().Select(p => p.GetString()).Order(StringComparer.Ordinal));
+        var errors = reload.GetProperty("errors");
+        Assert.Contains("missing required", errors.GetProperty("bad.yaml").GetString());
+        var after = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(["billing", "orders", "shop"], after.EnumerateArray().Select(p => p.GetProperty("id").GetString()));
+    }
+
+    [Fact]
+    public async Task Reload_endpoint_requires_api_token()
+    {
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/projects/reload", null)).StatusCode);
+        var projects = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(2, projects.GetArrayLength()); // not reloaded
+    }
 }

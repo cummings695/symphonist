@@ -24,6 +24,9 @@ public sealed record StageAgreementDto(string StageId, int Decided, int Agreed, 
 public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation, string? Problem = null,
     string Review = "Off", IReadOnlyList<StageAgreementDto>? Agreement = null);
 
+/// <param name="Errors">Each skipped project file (by file name) and why.</param>
+public sealed record ProjectReloadDto(IReadOnlyList<string> Projects, IReadOnlyDictionary<string, string> Errors);
+
 public sealed record OutcomeDto(bool Changed, string Message);
 
 public sealed record DashboardLinkDto(Uri Url);
@@ -82,6 +85,10 @@ public sealed class SymphonistClient : IDisposable
 
     public Task SetPausedAsync(string id, bool paused, CancellationToken ct) =>
         SendAsync<object>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(id)}/{(paused ? "pause" : "resume")}", null, ct);
+
+    /// <summary>Asks the host to reload the project files (after a hand edit).</summary>
+    public Task<ProjectReloadDto> ReloadProjectsAsync(CancellationToken ct) =>
+        SendAsync<ProjectReloadDto>(HttpMethod.Post, "/api/projects/reload", null, ct);
 
     /// <summary>A single-use sign-in link for the dashboard, valid for two minutes.</summary>
     public async Task<Uri> CreateDashboardLinkAsync(CancellationToken ct) =>

@@ -1926,4 +1926,112 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(0, ReviewRequests);
         Assert.Empty(store.GateReviews);
     }
+
+    private const string PlanLine =
+        "  - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }\n";
+
+    /// <summary>A hand edit that drops the plan stage, then a reload.</summary>
+    private void RemovePlanStage()
+    {
+        var yaml = OrdersYaml.ReplaceLineEndings("\n");
+        Assert.Contains(PlanLine, yaml);
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), yaml.Replace(PlanLine, ""));
+        Assert.Empty(registry.Reload().Errors);
+    }
+
+    [Fact] public async Task Ticket_at_removed_stage_is_blocked_and_can_be_sent_back()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create();
+        RemovePlanStage();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Blocked, t.Status);
+        Assert.Equal("plan", t.StageId);
+        Assert.Contains("no longer in the pipeline", t.BlockedReason);
+        Assert.Single(store.EventMessages("ORD-1"), m => m.Contains("no longer in the pipeline"));
+
+        var outcome = await o.SendBackAsync("orders", "ORD-1", "plan it again", "triage", CancellationToken.None);
+
+        Assert.True(outcome.Changed, outcome.Message);
+        t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Equal("plan it again", t.Feedback);
+    }
+
+    [Fact] public async Task Card_move_of_ticket_at_removed_stage_does_not_stop_the_tick()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        Source("ORD-2", "Backlog");
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task; // keep ORD-2's run in flight
+        RemovePlanStage();
+        tracker.Move("ORD-1", "Backlog");
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("ORD-1").Status);
+        Assert.Equal(("triage", StageStatus.Running), (store.Single("ORD-2").StageId, store.Single("ORD-2").Status));
+    }
+
+    [Fact] public async Task Run_in_flight_when_its_stage_is_removed_finishes_then_is_blocked()
+    {
+        Source("ORD-1", "Planned");
+        var run = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => run.Task;
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(("plan", StageStatus.Running), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+
+        RemovePlanStage();
+        await o.TickAsync(CancellationToken.None); // in flight: left alone
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+        run.SetResult(StageResult);
+        await o.WhenIdleAsync(); // applied with the configuration the run started with
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("ORD-1").Status);
+    }
+
+    [Fact] public async Task Reloaded_project_is_ticked_without_restart()
+    {
+        var o = Create();
+        await TickIdle(o);
+        Assert.Equal(1, tracker.QueryCount);
+
+        File.WriteAllText(Path.Combine(home, "projects", "billing.yaml"), OrdersYaml.Replace("id: orders", "id: billing"));
+        var reload = await o.ReloadProjectsAsync(CancellationToken.None);
+        await TickIdle(o);
+
+        Assert.Equal(["billing", "orders"], reload.ProjectIds.Order(StringComparer.Ordinal));
+        Assert.Equal(3, tracker.QueryCount);
+    }
+
+    [Fact] public async Task Reload_waits_for_a_running_tick()
+    {
+        var querying = new TaskCompletionSource();
+        using var release = new ManualResetEventSlim();
+        tracker.OnQuery = () =>
+        {
+            querying.TrySetResult();
+            release.Wait();
+            return tracker.Tickets.ToList();
+        };
+        var o = Create();
+        var tick = Task.Run(() => o.TickAsync(CancellationToken.None));
+        await querying.Task;
+
+        var reload = o.ReloadProjectsAsync(CancellationToken.None);
+        await Task.Delay(100);
+        Assert.False(reload.IsCompleted);
+
+        release.Set();
+        await tick;
+        await reload;
+    }
 }

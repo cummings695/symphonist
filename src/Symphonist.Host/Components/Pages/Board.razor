@@ -24,7 +24,18 @@
     {
         <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
     }
+    <button type="button" class="button button-quiet page-head-action" disabled="@reloading" @onclick="ReloadProjectsAsync">Reload projects</button>
 </div>
+
+@if (Registry.LoadErrors.Count > 0)
+{
+    <div class="board-problems" role="status">
+        @foreach (var (file, message) in Registry.LoadErrors.OrderBy(e => e.Key, StringComparer.Ordinal))
+        {
+            <p class="project-problem" data-load-error="@file">@file skipped: @message</p>
+        }
+    </div>
+}
 
 @if (model is null)
 {
@@ -40,7 +51,7 @@ else
         {
             <section class="setup-hint">
                 <h2>No projects configured</h2>
-                <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>; the host picks it up on restart.</p>
+                <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>, then use Reload projects.</p>
             </section>
         }
         else if (filtered is null && model.Projects.Any(p => p.Problem is { Length: > 0 }))
@@ -129,6 +140,7 @@ else
     private IJSObjectReference? folds;
     private DotNetObjectReference<Board>? self;
     private bool? phone; // unknown until the browser says; the CSS decides meanwhile
+    private bool reloading;
 
     [SupplyParameterFromQuery(Name = "project")]
     public string? Project { get; set; }
@@ -264,6 +276,35 @@ else
             // E.g. paused.json cannot be written: report it rather than kill the circuit.
             Log.LogError(e, "{Action} {Project} from the dashboard failed", p.Paused ? "Resuming" : "Pausing", p.Id);
             Chrome.ShowMessage($"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}");
+        }
+        await ReloadAsync();
+    }
+
+    /// <summary>Reloads the project files (after a hand edit); the skipped files show as banners above the board.</summary>
+    private async Task ReloadProjectsAsync()
+    {
+        if (reloading) return;
+        reloading = true;
+        try
+        {
+            var reload = await Orchestrator.ReloadProjectsAsync(disposed.Token);
+            if (disposed.IsCancellationRequested) return;
+            Chrome.ShowMessage(reload.Errors.Count == 0
+                ? $"Reloaded {reload.ProjectIds.Count} project(s)"
+                : $"{reload.Errors.Count} project file(s) skipped");
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Reloading the projects from the dashboard failed");
+            Chrome.ShowMessage($"Could not reload the projects: {e.Message}");
+        }
+        finally
+        {
+            reloading = false;
         }
         await ReloadAsync();
     }

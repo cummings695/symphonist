@@ -27,6 +27,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 {
     private const string LeftQuery = "no longer matches tracker query";
 
+    private static string StageRemoved(string stageId) =>
+        $"stage '{stageId}' is no longer in the pipeline; send it back to an existing stage";
+
     /// <summary>
     /// How long a merge the host accepted (and performs asynchronously) is given to land before it is requested again,
     /// through the usual head check.
@@ -83,6 +86,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(ct);
         try
         {
+            ForgetRemovedProjects();
             foreach (var p in projects.Projects)
             {
                 if (projects.IsPaused(p.Id)) continue;
@@ -100,6 +104,44 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Reloads the project files between ticks and commands, never during one, then starts a tick (when commands do) so
+    /// added projects are polled right away. Agent runs in flight finish with the configuration they started with.
+    /// </summary>
+    public async Task<ProjectReload> ReloadProjectsAsync(CancellationToken ct)
+    {
+        var reload = await WithProjectsLockedAsync(() => Task.FromResult(projects.Reload()), ct);
+        if (options.TickAfterCommands) RequestTick();
+        return reload;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> under the lock ticks and commands hold, so the projects and tickets it checks (e.g.
+    /// before saving a project file and reloading) cannot change under it.
+    /// </summary>
+    public async Task<T> WithProjectsLockedAsync<T>(Func<Task<T>> action, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            return await action();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Drops the problems and query results of projects no longer loaded; under gate only.</summary>
+    private void ForgetRemovedProjects()
+    {
+        var loaded = projects.Projects.Select(p => p.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in latestSources.Keys.Where(id => !loaded.Contains(id)).ToList()) latestSources.Remove(id);
+        var removed = false;
+        foreach (var id in problems.Keys.Where(id => !loaded.Contains(id)).ToList()) removed |= problems.TryRemove(id, out _);
+        if (removed) ProblemsChanged?.Invoke();
     }
 
     /// <summary>
@@ -169,11 +211,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private async Task<TransitionOutcome> CommandAsync(string projectId, string key,
         Func<ProjectConfig, Ticket, DateTimeOffset, TransitionOutcome> apply, CancellationToken ct)
     {
-        var p = projects.Get(projectId);
         TransitionOutcome outcome;
         await gate.WaitAsync(ct);
         try
         {
+            var p = projects.Get(projectId); // under the lock: a reload never changes the project during a command
             var t = await store.FindAsync(projectId, key, ct)
                     ?? throw new KeyNotFoundException($"Ticket '{key}' not found in project '{projectId}'");
             var fromStageId = t.StageId;
@@ -235,6 +277,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (!IsActive(t) || inFlight.ContainsKey(t.Id)) continue;
             try
             {
+                if (!HasStage(p, t))
+                {
+                    // A config edit removed its stage: nothing can run it; the developer sends it back to a stage.
+                    var outcome = PipelineEngine.Block(t, StageRemoved(t.StageId), time.GetUtcNow());
+                    await store.SaveAsync(t, ct);
+                    await ApplyAsync(io, t, t.StageId, outcome, ct);
+                    continue;
+                }
                 await AdvanceAsync(p, io, t, sources.GetValueOrDefault(t.Key), ct);
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
@@ -259,6 +309,18 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 t = PipelineEngine.Create(p, s.Key, s.Title, s.Status, now);
                 await store.SaveAsync(t, ct);
                 await AddEventAsync(t, $"picked up at {t.StageId}", ct);
+                continue;
+            }
+            if (t.Status != StageStatus.Done && !HasStage(p, t))
+            {
+                // Its stage was removed by a config edit (the ticket is blocked for it): a card move or @claude comment
+                // cannot be mapped from a stage that no longer exists, so it is noted as seen and ignored.
+                if (!Same(t.LastSourceStatus, s.Status))
+                {
+                    t.LastSourceStatus = s.Status;
+                    t.TrackerRetryStatus = null;
+                    await store.SaveAsync(t, ct);
+                }
                 continue;
             }
             if (Same(t.LastSourceStatus, s.Status))
@@ -834,6 +896,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
             .MaxBy(c => c.Created)?.Body;
     }
+
+    private static bool HasStage(ProjectConfig p, Ticket t) => p.Pipeline.Any(s => s.Id == t.StageId);
 
     private static bool IsActive(Ticket t) => t.Status is not (StageStatus.Done or StageStatus.Blocked);
 
