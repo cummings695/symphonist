@@ -54,7 +54,8 @@ foreach (var client in BuiltInProviders.Registry.HttpClientNames)
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = OrchestratorService.RunDrainTimeout + TimeSpan.FromSeconds(15));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new OrchestratorOptions());
-builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
+// SYMPHONIST_SECRET_STORE: os (default), memory or file.
+builder.Services.AddSingleton(SecretStores.FromEnvironment());
 builder.Services.AddSingleton(BuiltInProviders.Registry);
 builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
 builder.Services.AddSingleton<IProjectDiscovery, ProjectDiscovery>();

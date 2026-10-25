@@ -96,7 +96,16 @@ Setting `SYMPHONIST_SECRET_<NAME>` overrides the credential store (name in upper
 `SYMPHONIST_SECRET_CLAUDE_CODE_TOKEN` or `SYMPHONIST_SECRET_JIRA_ACME`. When set, the OS store is not touched. On Linux
 the credential store needs Git Credential Manager's `GCM_CREDENTIAL_STORE` configured (`secretservice`, `gpg`, ...); on a
 headless Linux machine use the environment overrides instead. The overrides are read by the host, so set them in the
-environment that starts it. (`symphonist secret set` always writes to the OS store.)
+environment that starts it. (`symphonist secret set` writes to the store `SYMPHONIST_SECRET_STORE` picks.)
+
+`SYMPHONIST_SECRET_STORE` picks where secrets are kept, for the host and the CLI alike:
+
+- unset or `os`: the OS credential store (default).
+- `file`: `secrets.json` in `SYMPHONIST_HOME`, for machines without a usable credential store. It is readable by your
+  user only: mode 0600 on macOS and Linux, encrypted for your Windows account (DPAPI) on Windows. Anyone who can log in
+  as you can read it.
+- `memory`: kept by the running process only and lost when it stops; nothing is written. For development and manual
+  testing, together with a throwaway `SYMPHONIST_HOME`, so trying the setup screen never touches your real secrets.
 
 ## Starting the host
 
