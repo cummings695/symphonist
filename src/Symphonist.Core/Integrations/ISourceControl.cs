@@ -24,6 +24,12 @@ public sealed record MergeResult(bool Merged, string? MergeCommitHash, string? E
 /// <summary>The host refused to open a pull request because the source branch has nothing the destination lacks.</summary>
 public sealed class NoChangesToPullException(string message) : Exception(message);
 
+/// <param name="Id">Host comment id (GitHub: "issue:{id}" or "review:{id}").</param>
+/// <param name="IsMine">Written by the token's user.</param>
+/// <param name="Path">Repo-relative file of an inline comment; null otherwise. Line likewise.</param>
+public sealed record PullRequestComment(string Id, string Author, bool IsMine, DateTimeOffset Created, string Body,
+    string? Path = null, int? Line = null, string? ParentId = null);
+
 public interface ISourceControl
 {
     /// <exception cref="NoChangesToPullException">The destination already contains the source branch.</exception>
@@ -42,4 +48,13 @@ public interface ISourceControl
     Task<string> GetBranchHeadAsync(string branch, CancellationToken ct);
 
     Uri BranchFileUrl(string branch, string path);
+
+    /// <summary>Every comment on the PR (top-level, inline and replies), oldest first; deleted comments left out.</summary>
+    Task<IReadOnlyList<PullRequestComment>> ListPullRequestCommentsAsync(long id, CancellationToken ct);
+
+    /// <summary>A new top-level comment.</summary>
+    Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct);
+
+    /// <summary>A reply in the comment's thread where the host has threads; otherwise a top-level comment quoting it.</summary>
+    Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct);
 }

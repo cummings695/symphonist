@@ -234,4 +234,94 @@ public class GitHubSourceControlTests
     public void Branch_file_url_points_at_blob() =>
         Assert.Equal(new Uri("https://github.com/acme/orders/blob/symphonist/orders-1/docs/spec.md"),
             Scm(new StubHttpHandler()).BranchFileUrl("symphonist/orders-1", "docs/spec.md"));
+
+    private const string GhUser = "/user";
+    private const string GhMe = "{\"login\":\"Symphonist-Bot\"}";
+
+    private static string GhComment(long id, string login, string body, string extra = "") =>
+        "{\"id\":" + id + ",\"created_at\":\"2026-10-01T10:00:00Z\",\"body\":" + JsonSerializer.Serialize(body)
+        + ",\"user\":{\"login\":\"" + login + "\"}" + extra + "}";
+
+    private static StubHttpHandler GhStub(string issues, string reviews) => new StubHttpHandler()
+        .On(HttpMethod.Get, GhUser, HttpStatusCode.OK, GhMe)
+        .On(HttpMethod.Get, RepoPrefix + "/issues/7/comments?per_page=100&page=1", HttpStatusCode.OK, issues)
+        .On(HttpMethod.Get, RepoPrefix + "/pulls/7/comments?per_page=100&page=1", HttpStatusCode.OK, reviews);
+
+    [Fact]
+    public async Task Lists_comments_with_inline_and_reply_fields()
+    {
+        var stub = GhStub("[" + GhComment(10, "ann", "top") + "]",
+            "[" + GhComment(20, "symphonist-bot", "inline", ",\"path\":\"src/a.cs\",\"line\":null,\"original_line\":9,\"in_reply_to_id\":5") + "]");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(2, comments.Count);
+        Assert.Equal(new PullRequestComment("issue:10", "ann", false, DateTimeOffset.Parse("2026-10-01T10:00:00Z"), "top"), comments[0]);
+        Assert.Equal(("review:20", "symphonist-bot", true, "src/a.cs", 9, "review:5"),
+            (comments[1].Id, comments[1].Author, comments[1].IsMine, comments[1].Path, comments[1].Line, comments[1].ParentId));
+    }
+
+    [Fact]
+    public async Task Follows_pagination()
+    {
+        var full = "[" + string.Join(",", Enumerable.Range(1, 100).Select(i => GhComment(i, "ann", "c" + i))) + "]";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, GhUser, HttpStatusCode.OK, GhMe)
+            .On(HttpMethod.Get, RepoPrefix + "/issues/7/comments?per_page=100&page=1", HttpStatusCode.OK, full)
+            .On(HttpMethod.Get, RepoPrefix + "/issues/7/comments?per_page=100&page=2", HttpStatusCode.OK, "[" + GhComment(101, "ann", "last") + "]")
+            .On(HttpMethod.Get, RepoPrefix + "/pulls/7/comments?per_page=100&page=1", HttpStatusCode.OK, "[]");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(101, comments.Count);
+        Assert.Equal("last", comments[^1].Body);
+        Assert.DoesNotContain(stub.Requests, r => r.PathAndQuery.Contains("page=3"));
+    }
+
+    [Fact]
+    public async Task Marks_own_comments_mine()
+    {
+        var stub = GhStub("[" + GhComment(1, "SYMPHONIST-BOT", "mine") + "," + GhComment(2, "ann", "theirs") + "]", "[]");
+        var scm = Scm(stub);
+
+        var first = await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+        await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal([true, false], first.Select(c => c.IsMine));
+        Assert.Single(stub.Requests, r => r.PathAndQuery == GhUser);
+    }
+
+    [Fact]
+    public async Task Reply_is_threaded()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pulls/7/comments/20/replies", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("review:20", "ann", false, DateTimeOffset.UnixEpoch, "x", "a.cs", 3);
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("done", body.RootElement.GetProperty("body").GetString());
+    }
+
+    [Fact]
+    public async Task Reply_to_issue_comment_quotes_it()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/issues/7/comments", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("issue:10", "ann", false, DateTimeOffset.UnixEpoch, new string('a', 300) + "\nsecond line");
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("> " + new string('a', 200) + "\n\ndone", body.RootElement.GetProperty("body").GetString());
+    }
+
+    [Fact]
+    public async Task Comment_on_pull_request_posts_markdown()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/issues/7/comments", HttpStatusCode.Created, "{}");
+
+        await Scm(stub).CommentOnPullRequestAsync(7, "**hi**", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("**hi**", body.RootElement.GetProperty("body").GetString());
+    }
 }

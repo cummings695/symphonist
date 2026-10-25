@@ -86,6 +86,80 @@ public sealed class GitHubSourceControl(HttpClient http, GitHubRepoConfig config
             : throw new HttpRequestException($"GitHub GET {path} returned no commit sha");
     }
 
+    private string? _myLogin;
+
+    private async Task<string> MyLoginAsync(CancellationToken ct)
+    {
+        if (_myLogin is not null) return _myLogin;
+        using var doc = await _api.SendAsync(HttpMethod.Get, "user", null, ct);
+        return _myLogin = String(doc.RootElement, "login") ?? "";
+    }
+
+    public async Task<IReadOnlyList<PullRequestComment>> ListPullRequestCommentsAsync(long id, CancellationToken ct)
+    {
+        var me = await MyLoginAsync(ct);
+        var comments = new List<PullRequestComment>();
+        await ReadPagesAsync($"{RepoPath}/issues/{id}/comments", comments, me, "issue", review: false, ct);
+        await ReadPagesAsync($"{RepoPath}/pulls/{id}/comments", comments, me, "review", review: true, ct);
+        return [.. comments.OrderBy(c => c.Created)];
+    }
+
+    private async Task ReadPagesAsync(string path, List<PullRequestComment> into, string me, string prefix, bool review,
+        CancellationToken ct)
+    {
+        for (var page = 1; ; page++)
+        {
+            using var doc = await _api.SendAsync(HttpMethod.Get, $"{path}?per_page=100&page={page}", null, ct);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
+            foreach (var c in doc.RootElement.EnumerateArray())
+            {
+                if (c.ValueKind != JsonValueKind.Object) continue;
+                var login = c.TryGetProperty("user", out var u) && u.ValueKind == JsonValueKind.Object
+                    ? String(u, "login") : null;
+                string? file = null;
+                int? line = null;
+                string? parent = null;
+                if (review)
+                {
+                    file = String(c, "path");
+                    line = Int(c, "line") ?? Int(c, "original_line");
+                    if (c.TryGetProperty("in_reply_to_id", out var r) && r.ValueKind == JsonValueKind.Number)
+                        parent = $"review:{r.GetInt64()}";
+                }
+
+                into.Add(new PullRequestComment($"{prefix}:{c.GetProperty("id").GetInt64()}", login ?? "ghost",
+                    login is not null && me.Length > 0 && string.Equals(login, me, StringComparison.OrdinalIgnoreCase),
+                    DateTimeOffset.TryParse(String(c, "created_at"), out var created) ? created : DateTimeOffset.MinValue,
+                    String(c, "body") ?? "", file, line, parent));
+            }
+
+            if (doc.RootElement.GetArrayLength() < 100) return;
+        }
+    }
+
+    public async Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Post, $"{RepoPath}/issues/{id}/comments", new { body = markdown }, ct);
+    }
+
+    public async Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct)
+    {
+        const string review = "review:";
+        if (comment.Id.StartsWith(review, StringComparison.Ordinal) && long.TryParse(comment.Id[review.Length..], out var reviewId))
+        {
+            using var _ = await _api.SendAsync(HttpMethod.Post, $"{RepoPath}/pulls/{id}/comments/{reviewId}/replies",
+                new { body = markdown }, ct);
+            return;
+        }
+
+        var firstLine = comment.Body.ReplaceLineEndings("\n").Split('\n')[0];
+        if (firstLine.Length > 200) firstLine = firstLine[..200];
+        await CommentOnPullRequestAsync(id, $"> {firstLine}\n\n{markdown}", ct);
+    }
+
+    private static int? Int(JsonElement obj, string property) =>
+        obj.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
+
     /// <summary>The web page of pull request <paramref name="id"/> (no API call needed).</summary>
     public static Uri PullRequestUrl(GitHubRepoConfig repo, long id) =>
         new($"https://github.com/{Uri.EscapeDataString(repo.Owner)}/{Uri.EscapeDataString(repo.Repo)}/pull/{id}");

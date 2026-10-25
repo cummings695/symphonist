@@ -356,4 +356,99 @@ public class BitbucketTests
         await Assert.ThrowsAsync<HttpRequestException>(() => new BitbucketPipelinesProvider().DiscoverAsync(Draft(),
             new HttpClient(failing), Token, CancellationToken.None));
     }
+
+    private const string BbComments = RepoPrefix + "/pullrequests/7/comments?pagelen=100";
+    private const string BbUser = "/2.0/user";
+    private const string BbMe = "{\"account_id\":\"acc-me\",\"display_name\":\"Me\"}";
+
+    private static string BbComment(int id, string accountId, string name, string raw, string created = "2026-10-01T10:00:00+00:00",
+        string extra = "") =>
+        "{\"id\":" + id + ",\"created_on\":\"" + created + "\",\"content\":{\"raw\":" + JsonSerializer.Serialize(raw)
+        + "},\"user\":{\"display_name\":\"" + name + "\",\"account_id\":\"" + accountId + "\"}" + extra + "}";
+
+    [Fact]
+    public async Task Lists_comments_with_inline_and_reply_fields()
+    {
+        var page = "{\"values\":[" + BbComment(1, "acc-other", "Ann", "top level") + ","
+            + BbComment(2, "acc-me", "Me", "inline", extra: ",\"inline\":{\"path\":\"src/a.cs\",\"from\":null,\"to\":12},\"parent\":{\"id\":1}")
+            + "," + BbComment(3, "acc-other", "Ann", "old side", extra: ",\"inline\":{\"path\":\"src/b.cs\",\"from\":4,\"to\":null}")
+            + "]}";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK, page);
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(3, comments.Count);
+        Assert.Equal(new PullRequestComment("1", "Ann", false, DateTimeOffset.Parse("2026-10-01T10:00:00+00:00"), "top level"), comments[0]);
+        Assert.Equal(("2", "Me", true, "src/a.cs", 12, "1"),
+            (comments[1].Id, comments[1].Author, comments[1].IsMine, comments[1].Path, comments[1].Line, comments[1].ParentId));
+        Assert.Equal(("src/b.cs", 4), (comments[2].Path, comments[2].Line));
+    }
+
+    [Fact]
+    public async Task Follows_pagination()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, RepoPrefix + "/pullrequests/7/comments?page=2", HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(2, "a", "A", "second") + "]}")
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "first") + "],\"next\":\"https://api.bitbucket.org" + RepoPrefix
+                + "/pullrequests/7/comments?page=2\"}");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(["first", "second"], comments.Select(c => c.Body));
+    }
+
+    [Fact]
+    public async Task Marks_own_comments_mine()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "acc-me", "Me", "mine") + "," + BbComment(2, "acc-x", "X", "theirs") + "]}");
+        var scm = Scm(stub);
+
+        var first = await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+        await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal([true, false], first.Select(c => c.IsMine));
+        Assert.Single(stub.Requests, r => r.PathAndQuery == BbUser);
+    }
+
+    [Fact]
+    public async Task Skips_deleted_comments()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "gone", extra: ",\"deleted\":true") + "," + BbComment(2, "a", "A", "kept") + "]}");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal("kept", Assert.Single(comments).Body);
+    }
+
+    [Fact]
+    public async Task Reply_is_threaded()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/comments", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("5", "Ann", false, DateTimeOffset.UnixEpoch, "x");
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("done", body.RootElement.GetProperty("content").GetProperty("raw").GetString());
+        Assert.Equal(5, body.RootElement.GetProperty("parent").GetProperty("id").GetInt64());
+    }
+
+    [Fact]
+    public async Task Comment_on_pull_request_posts_markdown()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/comments", HttpStatusCode.Created, "{}");
+
+        await Scm(stub).CommentOnPullRequestAsync(7, "**hi**", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("**hi**", body.RootElement.GetProperty("content").GetProperty("raw").GetString());
+        Assert.False(body.RootElement.TryGetProperty("parent", out _));
+    }
 }

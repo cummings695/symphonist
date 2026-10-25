@@ -94,4 +94,30 @@ public sealed class FakeSourceControl : ISourceControl
         Task.FromResult(OnBranchContains(branch, other));
 
     public Uri BranchFileUrl(string branch, string path) => new($"https://scm.example/src/{branch}/{path}");
+
+    public Dictionary<long, List<PullRequestComment>> Comments { get; } = [];
+    public List<(long Pr, string Body)> PostedComments { get; } = [];
+    public List<(long Pr, string CommentId, string Body)> Replies { get; } = [];
+
+    /// <summary>Thrown from ListPullRequestCommentsAsync when set.</summary>
+    public Exception? CommentsError { get; set; }
+
+    public Task<IReadOnlyList<PullRequestComment>> ListPullRequestCommentsAsync(long id, CancellationToken ct)
+    {
+        if (CommentsError is not null) throw CommentsError;
+        return Task.FromResult<IReadOnlyList<PullRequestComment>>(
+            Comments.TryGetValue(id, out var list) ? [.. list] : []);
+    }
+
+    public Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
+    {
+        PostedComments.Add((id, markdown));
+        return Task.CompletedTask;
+    }
+
+    public Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct)
+    {
+        Replies.Add((id, comment.Id, markdown));
+        return Task.CompletedTask;
+    }
 }
