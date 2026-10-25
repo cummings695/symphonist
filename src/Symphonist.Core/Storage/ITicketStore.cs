@@ -37,7 +37,11 @@ public sealed record AgentRunRecord(Guid TicketId, string StageId, DateTimeOffse
 /// <param name="ReportJson">The evidence report as JSON; null when the run produced none (see <paramref name="Error"/>).</param>
 public sealed record EvidenceRecord(Guid TicketId, string ProjectId, string StageId, DateTimeOffset WaitingSince,
     DateTimeOffset At, string? Head, string? ReportJson, bool HasIssues, string? Error,
-    IReadOnlyList<string> Screenshots, bool Posted);
+    IReadOnlyList<string> Screenshots, bool Posted)
+{
+    /// <summary>The typed report; null when there is none or it is unusable.</summary>
+    public Evidence.EvidenceReport? Report => Evidence.EvidenceReport.FromJson(ReportJson);
+}
 
 /// <param name="Decision">The latest decision of the same round (joined on read); null while undecided.</param>
 public sealed record GateReview(Guid TicketId, string ProjectId, string StageId, DateTimeOffset WaitingSince, DateTimeOffset At,
