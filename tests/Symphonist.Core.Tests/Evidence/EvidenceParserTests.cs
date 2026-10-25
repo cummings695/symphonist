@@ -28,7 +28,8 @@ public class EvidenceParserTests
         var reg = Assert.Single(r.Regressions);
         Assert.Equal(("auth", false, RiskLevel.High), (reg.Area, reg.Intended, reg.Risk));
         Assert.Equal(2, r.Coverage.Count);
-        Assert.Equal("", r.Coverage[0].Gap);
+        Assert.Equal("no tests", r.Coverage[0].Gap); // gaps first
+        Assert.Equal("", r.Coverage[1].Gap);
         Assert.Equal("42 passed", r.Tests!.Summary);
         Assert.True(r.Walkthrough.Ran);
         Assert.Equal(EvidenceSource.Config, r.Walkthrough.RunSource);
@@ -83,6 +84,43 @@ public class EvidenceParserTests
         Assert.Null(s[0].Screenshot);
         Assert.Null(s[1].Screenshot);
         Assert.Equal("OK.PNG", s[2].Screenshot);
+    }
+
+    [Fact]
+    public void Bad_news_survives_the_limits()
+    {
+        var regs = string.Join(",", Enumerable.Range(0, 10).Select(i => $$"""{"area":"a{{i}}","intended":true,"risk":"low","reason":"r"}"""))
+            + """,{"area":"eleventh","intended":false,"risk":"high","reason":"bad"}""";
+        var steps = string.Join(",", Enumerable.Range(0, 30).Select(_ => """{"action":"a","result":"r","passed":true}"""))
+            + """,{"action":"late fail","result":"boom","passed":false}""";
+        var json = $$$"""
+        {"headline":[],"coverage":[],"regressions":[{{{regs}}}],
+         "walkthrough":{"ran":true,"run_source":"config","features":[{"name":"f","source":"config","steps":[{{{steps}}}]}]}}
+        """;
+        var r = EvidenceParser.Parse(J(json))!;
+        Assert.Equal(10, r.Regressions.Count);
+        Assert.Equal("eleventh", r.Regressions[0].Area);
+        Assert.Equal(EvidenceParser.MaxStepsPerFeature, r.Walkthrough.Features[0].Steps.Count);
+        Assert.Equal("late fail", r.Walkthrough.Features[0].Steps[0].Action);
+        Assert.True(r.HasIssues);
+    }
+
+    [Fact]
+    public void Blank_text_or_non_boolean_passed_keeps_bad_news()
+    {
+        var json = """
+        {"headline":[],"coverage":[],
+         "regressions":[{"area":"","intended":false,"risk":"high","reason":""}],
+         "walkthrough":{"ran":true,"run_source":"config","features":[{"name":"f","source":"config","steps":[
+           {"action":"  ","result":"","passed":false},{"action":"x","result":"y","passed":"yes"}]}]}}
+        """;
+        var r = EvidenceParser.Parse(J(json))!;
+        Assert.Equal("(no description given)", r.Regressions[0].Reason);
+        var steps = r.Walkthrough.Features[0].Steps;
+        Assert.Equal(2, steps.Count);
+        Assert.Equal("(no description given)", steps[0].Action);
+        Assert.All(steps, s => Assert.False(s.Passed));
+        Assert.True(r.HasIssues);
     }
 
     [Fact]

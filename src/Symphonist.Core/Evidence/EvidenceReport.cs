@@ -60,6 +60,7 @@ public static partial class EvidenceParser
 {
     public const int MaxStepsPerFeature = 30;
     public const int MaxHeadlineLines = 3;
+    private const string NoDescription = "(no description given)";
 
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpg|jpeg|webp)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ScreenshotName();
@@ -78,8 +79,11 @@ public static partial class EvidenceParser
             [.. headline.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
                 .Select(e => ReviewerText.Line(e.GetString(), ReviewerText.MaxSummaryChars))
                 .Where(l => l.Length > 0).Take(MaxHeadlineLines)],
-            [.. regressions.EnumerateArray().Select(ParseRegression).OfType<RegressionItem>().Take(ReviewerText.MaxItems)],
-            [.. coverage.EnumerateArray().Select(ParseCoverage).OfType<CoverageItem>().Take(ReviewerText.MaxItems)],
+            // Bad news is selected before the limit, so it can never be cut off; otherwise the agent's order is kept.
+            [.. regressions.EnumerateArray().Select(ParseRegression).OfType<RegressionItem>()
+                .OrderBy(r => !r.Intended && r.Risk == RiskLevel.High ? 0 : 1).Take(ReviewerText.MaxItems)],
+            [.. coverage.EnumerateArray().Select(ParseCoverage).OfType<CoverageItem>()
+                .OrderBy(c => c.Gap.Length > 0 ? 0 : 1).Take(ReviewerText.MaxItems)],
             root.TryGetProperty("tests", out var t) ? ParseTests(t) : null,
             walkthrough,
             ParseProposedRun(root),
@@ -89,9 +93,9 @@ public static partial class EvidenceParser
     private static RegressionItem? ParseRegression(JsonElement e)
     {
         if (e.ValueKind != JsonValueKind.Object) return null;
-        var area = Text(e, "area", ReviewerText.MaxItemChars);
-        var reason = Text(e, "reason", ReviewerText.MaxItemChars);
-        if (area is null || reason is null || !Bool(e, "intended", out var intended)) return null;
+        var area = Text(e, "area", ReviewerText.MaxItemChars) ?? NoDescription;
+        var reason = Text(e, "reason", ReviewerText.MaxItemChars) ?? NoDescription;
+        if (!Bool(e, "intended", out var intended)) intended = false; // fail safe: unknown counts as unintended
         var risk = Text(e, "risk", 20) == "low" ? RiskLevel.Low : RiskLevel.High;
         return new RegressionItem(area, intended, risk, reason);
     }
@@ -121,39 +125,40 @@ public static partial class EvidenceParser
         var runSource = Text(w, "run_source", 20) == "config" ? EvidenceSource.Config : EvidenceSource.Guessed;
         var features = new List<WalkthroughFeature>();
         if (w.TryGetProperty("features", out var fs) && fs.ValueKind == JsonValueKind.Array)
-            foreach (var f in fs.EnumerateArray().Take(EvidenceLimits.MaxFeatures))
-                if (ParseFeature(f) is { } feature) features.Add(feature);
+            features = [.. fs.EnumerateArray().Select(ParseFeature).OfType<WalkthroughFeature>()
+                .OrderBy(f => f.Steps.Any(s => !s.Passed) ? 0 : 1).Take(EvidenceLimits.MaxFeatures)];
         return new Walkthrough(ran, whyNot, runSource, features);
     }
 
     private static WalkthroughFeature? ParseFeature(JsonElement f)
     {
         if (f.ValueKind != JsonValueKind.Object) return null;
-        var name = Text(f, "name", EvidenceLimits.MaxFeatureNameChars);
-        if (name is null) return null;
-        EvidenceSource source;
-        switch (Text(f, "source", 20))
-        {
-            case "config": source = EvidenceSource.Config; break;
-            case "added": source = EvidenceSource.Added; break;
-            case "guessed": source = EvidenceSource.Guessed; break;
-            default: return null;
-        }
+        var name = Text(f, "name", EvidenceLimits.MaxFeatureNameChars) ?? NoDescription;
         var steps = new List<WalkthroughStep>();
         if (f.TryGetProperty("steps", out var ss) && ss.ValueKind == JsonValueKind.Array)
-            foreach (var s in ss.EnumerateArray())
-            {
-                if (steps.Count >= MaxStepsPerFeature) break;
-                if (ParseStep(s) is { } step) steps.Add(step);
-            }
-        return new WalkthroughFeature(name, source, steps);
+            steps = [.. ss.EnumerateArray().Select(ParseStep).OfType<WalkthroughStep>()
+                .OrderBy(s => s.Passed ? 1 : 0).Take(MaxStepsPerFeature)];
+        EvidenceSource? source = Text(f, "source", 20) switch
+        {
+            "config" => EvidenceSource.Config,
+            "added" => EvidenceSource.Added,
+            "guessed" => EvidenceSource.Guessed,
+            _ => null,
+        };
+        // An unknown source drops the feature, unless it carries a failure: that is kept (as guessed).
+        if (source is null)
+        {
+            if (!steps.Any(s => !s.Passed)) return null;
+            source = EvidenceSource.Guessed;
+        }
+        return new WalkthroughFeature(name, source.Value, steps);
     }
 
     private static WalkthroughStep? ParseStep(JsonElement s)
     {
         if (s.ValueKind != JsonValueKind.Object) return null;
-        var action = Text(s, "action", ReviewerText.MaxItemChars);
-        if (action is null || !Bool(s, "passed", out var passed)) return null;
+        var action = Text(s, "action", ReviewerText.MaxItemChars) ?? NoDescription;
+        if (!Bool(s, "passed", out var passed)) passed = false; // fail safe: unknown counts as failed
         string? shot = null;
         if (s.TryGetProperty("screenshot", out var sh) && sh.ValueKind == JsonValueKind.String
             && sh.GetString() is { } name && ScreenshotName().IsMatch(name))
