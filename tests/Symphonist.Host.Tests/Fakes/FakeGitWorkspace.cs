@@ -45,9 +45,17 @@ public sealed class FakeGitWorkspace : IGitWorkspace
         ["refs/remotes/origin/symphonist/ORD-1"] = "head000",
     };
 
+    /// <summary>"prepare {key}" and "remove {key}" in call order.</summary>
+    public List<string> Events { get; } = [];
+
+    /// <summary>LocalPath of the project at each PrepareAsync call.</summary>
+    public List<string> PreparedFrom { get; } = [];
+
     public Task<string> PrepareAsync(ProjectConfig project, string ticketKey, string branch, CancellationToken ct)
     {
         if (PrepareError is not null) throw PrepareError;
+        Events.Add($"prepare {ticketKey}");
+        PreparedFrom.Add(project.Repo.LocalPath);
         Prepared.Add((ticketKey, branch));
         return Task.FromResult(WorkspacePath);
     }
@@ -98,9 +106,18 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>(project id, key) of each RemoveAsync call.</summary>
     public List<(string ProjectId, string Key)> Removed { get; } = [];
 
+    /// <summary>Thrown from RemoveAsync when set (after recording the call).</summary>
+    public Exception? RemoveError { get; set; }
+
+    /// <summary>Runs on each RemoveAsync call after recording it (e.g. to throw on the n-th call).</summary>
+    public Action? OnRemove { get; set; }
+
     public Task RemoveAsync(ProjectConfig project, string key, CancellationToken ct)
     {
+        Events.Add($"remove {key}");
         Removed.Add((project.Id, key));
+        if (RemoveError is not null) throw RemoveError;
+        OnRemove?.Invoke();
         return Task.CompletedTask;
     }
 }

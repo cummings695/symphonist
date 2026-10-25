@@ -40,9 +40,32 @@ public sealed class OnboardingProposer(IGitWorkspace git, IAgentRunners agents, 
         CancellationToken ct)
     {
         var runner = agents.For(draft.Review.Agent.Type);
+        try
+        {
+            return await RunInFreshWorkspaceAsync(draft, form, discovery, runner, ct);
+        }
+        finally
+        {
+            // Not kept between runs; a leftover is removed again before the next one.
+            try
+            {
+                await git.RemoveAsync(draft, WorkspaceKey, CancellationToken.None);
+            }
+            catch (Exception e)
+            {
+                log?.LogWarning(e, "Could not remove the onboarding workspace of {Project}", draft.Id);
+            }
+        }
+    }
+
+    private async Task<OnboardingProposal> RunInFreshWorkspaceAsync(ProjectConfig draft, ProjectForm form,
+        TrackerDiscovery discovery, IAgentRunner runner, CancellationToken ct)
+    {
         string workspace;
         try
         {
+            // Always a fresh clone: an existing one may sit at an old commit, or clone a localPath since corrected.
+            await git.RemoveAsync(draft, WorkspaceKey, ct);
             workspace = await git.PrepareAsync(draft, WorkspaceKey, draft.Repo.MainBranch, ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -62,8 +85,11 @@ public sealed class OnboardingProposer(IGitWorkspace git, IAgentRunners agents, 
                 ? "(no statuses: status source missing or unreadable)"
                 : Fence(string.Join("\n", discovery.Statuses.Select(StatusLine))),
             ["onboarding.pipeline"] = string.Join("\n", form.Pipeline.Select(s => $"{s.Id} ({Lower(s.Kind)}, {Lower(s.Gate)})")),
-            ["risk.areas"] = GateReviewer.RiskAreasText(form.RiskAreas
-                .Select(a => new RiskArea(a.Name, a.Description, a.Paths.ToList())).ToList()),
+            // The form may hold risk areas from an applied, not yet saved proposal: agent-written text.
+            ["risk.areas"] = form.RiskAreas.Count == 0
+                ? GateReviewer.RiskAreasText([])
+                : Fence(GateReviewer.RiskAreasText(form.RiskAreas
+                    .Select(a => new RiskArea(a.Name, a.Description, a.Paths.ToList())).ToList())),
             ["onboarding.fence_id"] = nonce,
         };
         var prompt = PromptRenderer.Render(PromptLibrary.GetOnboarding(), values);
@@ -83,8 +109,16 @@ public sealed class OnboardingProposer(IGitWorkspace git, IAgentRunners agents, 
 
         var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
         var logPath = SymphonistPaths.Resolve("logs", draft.Id, WorkspaceKey, $"proposal-{stamp}.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        await File.WriteAllTextAsync(logPath, result.RawLog, ct);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            await File.WriteAllTextAsync(logPath, result.RawLog, ct);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The proposal does not depend on its log.
+            log?.LogWarning(e, "Could not write the onboarding log {Path}", logPath);
+        }
         log?.LogInformation("Onboarding proposal for {Project}: {Outcome} in {Duration}, cost {Cost}", draft.Id,
             result.Succeeded ? "succeeded" : "failed", result.Duration,
             result.CostUsd is { } cost ? cost.ToString("0.00##", CultureInfo.InvariantCulture) + " USD" : "unknown");
