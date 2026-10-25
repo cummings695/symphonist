@@ -1,8 +1,10 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
@@ -47,6 +49,7 @@ public sealed class OrchestratorTests : IDisposable
           - { id: deploy,    kind: deploy }
           - { id: done,      kind: done,      onEnterStatus: Done }
         review: { mode: off }
+        evidence: { mode: off }
         """;
 
     private readonly string home = Path.Combine(Path.GetTempPath(), "symphonist-tests-" + Guid.NewGuid().ToString("N"));
@@ -57,6 +60,8 @@ public sealed class OrchestratorTests : IDisposable
     private readonly FakeTracker tracker = new();
     private readonly FakeSourceControl scm = new();
     private readonly FakeBuildWatcher builds = new();
+    /// <summary>The evidence runner's own clone (a separate fake, so stage tests see only their workspace's calls).</summary>
+    private readonly FakeGitWorkspace evidenceGit = new();
     private readonly ProjectRegistry registry;
 
     private static AgentRunResult StageResult => FakeAgentRunner.Ok(FakeAgentRunner.Output(
@@ -69,6 +74,7 @@ public sealed class OrchestratorTests : IDisposable
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         agent.OnRun = _ => StageResult;
+        evidenceGit.WorkspacePath = Path.Combine(home, "evidence-ws");
     }
 
     public void Dispose()
@@ -82,11 +88,14 @@ public sealed class OrchestratorTests : IDisposable
     /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time,
+            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
 
     private GateReviewer Reviewer() =>
         new(git, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
+
+    private EvidenceRunner Evidence() =>
+        new(evidenceGit, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
 
     private void Source(string key, string status, params SourceComment[] comments) =>
         tracker.Tickets.Add(new SourceTicket(key, $"Title {key}", $"Description {key}", status, comments,
@@ -1127,7 +1136,7 @@ public sealed class OrchestratorTests : IDisposable
         tracker.OnQuery = () => Interlocked.Increment(ref queries) % 2 == 0 ? throw new HttpRequestException("flaky") : [];
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1153,7 +1162,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1186,7 +1195,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -2038,4 +2047,352 @@ public sealed class OrchestratorTests : IDisposable
         await tick;
         await reload;
     }
+
+    #region Evidence_*
+
+    /// <summary><see cref="Configure"/>, with evidence gathered in <paramref name="evidenceMode"/>.</summary>
+    private void ConfigureEvidence(string reviewMode, string evidenceMode = "high-risk", params (string Stage, string Gate)[] gates)
+    {
+        Configure(reviewMode, gates);
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path).Replace("evidence: { mode: off }", $"evidence: {{ mode: {evidenceMode} }}"));
+        registry.Reload();
+        Assert.NotEqual(EvidenceMode.Off, registry.Get("orders").Evidence.Mode);
+    }
+
+    private static bool IsEvidence(AgentRunRequest r) => r.OutputSchema == EvidenceSchema.Json;
+
+    private int EvidenceRequests => agent.Requests.Count(IsEvidence);
+
+    /// <summary>Review runs answer with <paramref name="review"/>, evidence runs with <paramref name="evidence"/>.</summary>
+    private void Answer(Func<AgentRunResult> review, Func<AgentRunResult> evidence) =>
+        agent.OnRun = r => FakeAgentRunner.IsReview(r) ? review() : IsEvidence(r) ? evidence() : StageResult;
+
+    private static AgentRunResult EvidenceReport() =>
+        new(true, null, 0.5m, TimeSpan.FromMinutes(4), null, """{"raw":"evidence"}""",
+            JsonSerializer.SerializeToElement(new Dictionary<string, object>
+            {
+                ["headline"] = new[] { "All tests pass", "Checkout works" },
+                ["regressions"] = Array.Empty<object>(),
+                ["coverage"] = Array.Empty<object>(),
+                ["walkthrough"] = new Dictionary<string, object>
+                {
+                    ["ran"] = true, ["run_source"] = "config",
+                    ["features"] = new[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["name"] = "Export", ["source"] = "added",
+                            ["steps"] = new[] { new Dictionary<string, object> { ["action"] = "open", ["result"] = "ok", ["passed"] = true } },
+                        },
+                    },
+                },
+            }));
+
+    /// <summary>Evidence runs block until their token is cancelled (other runs answer as usual).</summary>
+    private (TaskCompletionSource Started, Func<bool> Cancelled) BlockEvidence()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = false;
+        agent.OnRunCancellableAsync = async (r, ct) =>
+        {
+            if (!IsEvidence(r)) return FakeAgentRunner.IsReview(r) ? Low() : StageResult;
+            var run = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var registration = ct.Register(() =>
+            {
+                Volatile.Write(ref cancelled, true);
+                run.TrySetCanceled(ct);
+            });
+            started.TrySetResult();
+            return await run.Task;
+        };
+        return (started, () => Volatile.Read(ref cancelled));
+    }
+
+    /// <summary>A high-risk implement round waiting on the developer, evidence owed, no review (review off).</summary>
+    private Task SeedEvidenceDue(string key = "ORD-1") =>
+        Seed(key, "implement", StageStatus.AwaitingApproval, "In Review", t =>
+        {
+            t.Risk = RiskLevel.High;
+            t.EvidenceDue = true;
+            t.PullRequestId = 7;
+        });
+
+    [Fact] public async Task Evidence_runs_after_review_and_posts_to_pr_and_tracker()
+    {
+        ConfigureEvidence("active");
+        Answer(() => FakeAgentRunner.Review("high", "touches tax", reasons: ["changes the tax rule"]), EvidenceReport);
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review: high
+        Assert.Equal(0, EvidenceRequests);
+        await TickIdle(o); // evidence
+
+        Assert.Equal([true, false], agent.Requests.Select(FakeAgentRunner.IsReview));
+        Assert.True(IsEvidence(agent.Requests[1]));
+        var (pr, body) = Assert.Single(scm.PostedComments);
+        Assert.Equal(7, pr);
+        Assert.True(TrackerComments.IsSymphonist(body));
+        Assert.Contains("All tests pass", body);
+        Assert.Contains("### Walkthrough", body);
+        var line = Assert.Single(tracker.Comments);
+        Assert.Equal("ORD-1", line.Key);
+        Assert.True(TrackerComments.IsSymphonist(line.Markdown));
+        Assert.StartsWith("Evidence posted on the PR: All tests pass", line.Markdown);
+        var t = store.Single("ORD-1");
+        var record = Assert.Single(store.Evidence);
+        Assert.Equal((t.Id, "implement", t.WaitingSince!.Value, "head000", true, false, (string?)null),
+            (record.TicketId, record.StageId, record.WaitingSince, record.Head, record.Posted, record.HasIssues, record.Error));
+        Assert.Equal("All tests pass", record.Report!.Headline[0]);
+        Assert.Equal((StageStatus.AwaitingApproval, false, RiskLevel.High), (t.Status, t.EvidenceDue, t.Risk));
+        var events = store.EventMessages("ORD-1");
+        Assert.Equal(["gathering evidence for implement", "evidence for head000 gathered"], events.TakeLast(2));
+        Assert.Empty(store.GateDecisions); // evidence never decides the gate
+
+        await TickIdle(o); // nothing owed any more
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Evidence_does_not_run_when_auto_approved()
+    {
+        ConfigureEvidence("active", "always", ("implement", "auto"));
+        Answer(Low, EvidenceReport);
+        git.ChangedFiles = ["src/Export/Csv.cs"]; // a change the reviewer can call low
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        scm.AddOpen(7, "symphonist/ORD-1");
+        var o = Create();
+
+        await TickIdle(o); // review: low, auto-approved
+        Assert.Equal((StageStatus.Approved, false), (store.Single("ORD-1").Status, store.Single("ORD-1").EvidenceDue));
+        await TickIdle(o); // the merge
+
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events);
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Not_needed_posts_nothing_and_clears_due()
+    {
+        ConfigureEvidence("active");
+        Answer(Low, EvidenceReport); // human gate: a low verdict still waits on the developer
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Contains("remove _evidence-ORD-1", evidenceGit.Events); // checked in a clone, then removed
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.Evidence);
+        Assert.Equal("no evidence needed for head000: not high risk", store.EventMessages("ORD-1")[^1]);
+
+        await TickIdle(o);
+        Assert.Equal(1, evidenceGit.Events.Count(e => e == "prepare _evidence-ORD-1"));
+    }
+
+    [Fact] public async Task Evidence_failure_never_blocks()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, () => FakeAgentRunner.Fail("timed out"));
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.AwaitingApproval, false, 0), (t.StageId, t.Status, t.EvidenceDue, t.Attempts));
+        Assert.Null(t.BlockedReason);
+        var (_, body) = Assert.Single(scm.PostedComments);
+        Assert.True(TrackerComments.IsSymphonist(body));
+        Assert.StartsWith("Evidence could not be gathered: timed out", body);
+        Assert.StartsWith("Evidence could not be gathered: timed out", Assert.Single(tracker.Comments).Markdown);
+        var record = Assert.Single(store.Evidence);
+        Assert.Equal(("timed out", (string?)null, true, false), (record.Error, record.ReportJson, record.Posted, record.HasIssues));
+        Assert.Equal("evidence for head000 failed: timed out", store.EventMessages("ORD-1")[^1]);
+        Assert.Empty(store.GateDecisions);
+
+        await TickIdle(o); // no second run for the round
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Evidence_comment_failure_is_recorded_and_not_retried()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        scm.CommentError = new HttpRequestException("pr host down");
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(tracker.Comments); // the tracker line points at the PR comment, which is not there
+        var record = Assert.Single(store.Evidence);
+        Assert.False(record.Posted);
+        Assert.NotNull(record.Report);
+        Assert.Contains("evidence comment failed: pr host down", store.EventMessages("ORD-1"));
+        Assert.False(store.Single("ORD-1").EvidenceDue);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Decision_cancels_running_evidence_and_posts_nothing()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the evidence run is in progress
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        Assert.Equal("remove _evidence-ORD-1", evidenceGit.Events[^1]); // its clone removed
+        Assert.Contains("evidence for implement cancelled: the gate was decided", store.EventMessages("ORD-1"));
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+
+        await TickIdle(o); // the merge goes ahead
+
+        Assert.Equal([7L], scm.MergeCalls);
+        Assert.Equal("build", store.Single("ORD-1").StageId);
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.Evidence);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Shutdown_keeps_evidence_owed()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        o.CancelRuns();
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (t.Status, t.EvidenceDue));
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("cancelled", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Evidence_respects_max_concurrent_runs()
+    {
+        ConfigureEvidence("off");
+        var (started, _) = BlockEvidence();
+        await SeedEvidenceDue();
+        Source("ORD-2", "Planned");
+        var o = Create(maxRuns: 1);
+
+        await o.TickAsync(CancellationToken.None); // ORD-1's evidence takes the slot (ORD-2 is created after it)
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-2").Status);
+        Assert.Single(agent.Requests);
+        o.CancelRuns();
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact] public async Task Evidence_waits_for_a_free_slot()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = r => IsEvidence(r) ? Task.FromResult(EvidenceReport()) : release.Task;
+        Source("ORD-2", "Planned");
+        var o = Create(maxRuns: 1);
+        await o.TickAsync(CancellationToken.None); // ORD-2's plan run takes the slot
+        await SeedEvidenceDue();
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(0, EvidenceRequests);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("gathering", StringComparison.Ordinal));
+
+        release.SetResult(StageResult);
+        await o.WhenIdleAsync();
+        await TickIdle(o);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Merge_hold_on_same_head_reuses_evidence()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        evidenceGit.ChangedFiles = ["src/Pricing/Tax.cs"]; // a risk area: evidence is needed whatever the risk
+        await SeedEvidenceDue();
+        var o = Create();
+        await TickIdle(o); // round 1: gathered and posted for head000
+        Assert.Single(scm.PostedComments);
+        var first = store.Single("ORD-1").WaitingSince;
+
+        // Round 1 was later auto-approved on an older commit (pinned); the branch is now at head000.
+        var approved = store.Single("ORD-1").Clone();
+        approved.Status = StageStatus.Approved;
+        approved.ApprovedBranch = "symphonist/ORD-1";
+        approved.ApprovedHead = "head-old";
+        await store.SaveAsync(approved, CancellationToken.None);
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.AddOpen(7, "symphonist/ORD-1");
+        time.Advance(TimeSpan.FromMinutes(1));
+
+        await TickIdle(o); // merge held: a new round, evidence owed
+        var held = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (held.Status, held.EvidenceDue));
+        Assert.NotEqual(first, held.WaitingSince);
+        await TickIdle(o); // round 2: the same head
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+        Assert.Single(scm.PostedComments);
+        Assert.Single(store.Evidence);
+        Assert.Equal(1, EvidenceRequests);
+        Assert.Equal("evidence for head000 already gathered", store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Fact] public async Task Evidence_finishing_after_a_new_round_is_stored_not_posted()
+    {
+        ConfigureEvidence("off");
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = r =>
+        {
+            if (!IsEvidence(r)) return Task.FromResult(StageResult);
+            started.TrySetResult();
+            return release.Task; // ignores cancellation: finishes with a report anyway
+        };
+        await SeedEvidenceDue();
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True((await o.SendBackAsync("orders", "ORD-1", "redo", null, CancellationToken.None)).Changed);
+        release.SetResult(EvidenceReport());
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(scm.PostedComments);
+        var record = Assert.Single(store.Evidence);
+        Assert.False(record.Posted);
+        Assert.Contains("evidence for implement finished after the gate was decided; not posted",
+            store.EventMessages("ORD-1"));
+    }
+
+    #endregion
 }

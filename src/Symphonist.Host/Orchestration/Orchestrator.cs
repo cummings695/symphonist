@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
@@ -22,7 +23,7 @@ public enum ForgetResult { Forgotten, NotFound, Running }
 /// every one of them loads the ticket fresh from the store, so no two writers ever save a ticket from stale copies.
 /// </summary>
 public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, IIntegrationFactory integrations,
-    StageExecutor executor, GateReviewer reviewer, TimeProvider time, OrchestratorOptions options,
+    StageExecutor executor, GateReviewer reviewer, EvidenceRunner evidence, TimeProvider time, OrchestratorOptions options,
     ILogger<Orchestrator> log) : IDisposable
 {
     private const string LeftQuery = "no longer matches tracker query";
@@ -38,6 +39,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
+    /// <summary>
+    /// The evidence run of each ticket, with its gate round, cancelled once that round is decided. Added, cancelled and
+    /// removed under gate only; its CTS is disposed only after removal, so a cancel never meets a disposed CTS.
+    /// </summary>
+    private readonly Dictionary<Guid, (DateTimeOffset WaitingSince, CancellationTokenSource Cts)> evidenceRuns = [];
     private readonly CancellationTokenSource shutdown = new();
     private readonly ConcurrentDictionary<string, string> problems = new(StringComparer.Ordinal);
     private CoalescedTrigger? tickTrigger;
@@ -432,6 +438,18 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 await AddEventOnceAsync(t, $"reviewing {t.StageId}", ct);
                 return;
 
+            case StageStatus.AwaitingApproval when PipelineEngine.WaitsOnEvidence(p, t):
+            {
+                // The round's evidence (also one interrupted by a restart), after its review; cancelled when the round
+                // is decided (see ApplyAsync). Nothing is saved until it completes.
+                if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
+                evidenceRuns[t.Id] = (t.WaitingSince!.Value, cts);
+                inFlight[t.Id] = RunEvidenceAsync(p, io, t.Clone(), source, cts);
+                await AddEventOnceAsync(t, $"gathering evidence for {t.StageId}", ct);
+                return;
+            }
+
             case StageStatus.Running when agentStage:
                 // Not in flight (in-flight tickets are skipped), so its run's result was lost: retry like a restart.
                 t.Status = StageStatus.Pending;
@@ -670,6 +688,125 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
+    /// Gathers the gate round's evidence on a private copy, then records and posts it for the ticket re-loaded under the
+    /// lock. <paramref name="cts"/> (linked to shutdown) is cancelled when the round is decided meanwhile.
+    /// </summary>
+    private async Task RunEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, SourceTicket? source,
+        CancellationTokenSource cts)
+    {
+        await Task.Yield();
+        EvidenceOutcome? outcome = null;
+        var decided = false;
+        try
+        {
+            outcome = await evidence.GatherAsync(p, run, source, cts.Token);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Not gathered: EvidenceDue stays set, so the next start gathers the round's evidence again.
+            log.LogInformation("Evidence for {Project}/{Key} cancelled by shutdown", p.Id, run.Key);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            decided = true;
+        }
+        catch (Exception e)
+        {
+            outcome = new EvidenceOutcome(EvidenceStatus.Failed, null, null, [], e.Message, $"evidence failed: {e.Message}");
+        }
+
+        await gate.WaitAsync(CancellationToken.None);
+        try
+        {
+            if (decided)
+                await AddEventAsync(run, $"evidence for {run.StageId} cancelled: the gate was decided", CancellationToken.None);
+            else if (outcome is not null)
+                await CompleteEvidenceAsync(p, io, run, outcome, CancellationToken.None);
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Applying evidence for {Project}/{Key} failed", p.Id, run.Key);
+            await TryAddEventOnceAsync(run, $"{run.StageId} evidence could not be applied: {e.Message}");
+        }
+        finally
+        {
+            // Removed under the lock before it is disposed: ApplyAsync (also under the lock) cancels only entries present.
+            evidenceRuns.Remove(run.Id);
+            inFlight.TryRemove(run.Id, out _);
+            gate.Release();
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Records gathered (or failed) evidence and, while its round is still waiting, posts it to the pull request and a
+    /// line to the tracker; posting is never retried. Evidence never decides the gate: it only stops being owed.
+    /// </summary>
+    private async Task CompleteEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, EvidenceOutcome outcome,
+        CancellationToken ct)
+    {
+        var t = await store.FindAsync(p.Id, run.Key, ct);
+        if (t is null || t.Id != run.Id)
+        {
+            log.LogWarning("Ticket {Project}/{Key} disappeared while its evidence was gathered", p.Id, run.Key);
+            return;
+        }
+
+        var waitingSince = run.WaitingSince!.Value; // the round key as loaded from the store
+        var current = t.Status == StageStatus.AwaitingApproval && t.WaitingSince == waitingSince;
+        if (outcome.Status is EvidenceStatus.Gathered or EvidenceStatus.Failed)
+        {
+            var posted = false;
+            if (!current)
+                await AddEventAsync(t, $"evidence for {run.StageId} finished after the gate was decided; not posted", ct);
+            else if (t.PullRequestId is { } prId)
+                posted = await PostEvidenceAsync(io, t, prId, outcome, ct);
+            await store.AddEvidenceAsync(new EvidenceRecord(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
+                outcome.Head, outcome.Report?.ToJson(), outcome.Report?.HasIssues ?? false, outcome.Error,
+                outcome.Screenshots, posted), ct);
+        }
+
+        var fromStageId = t.StageId;
+        var completed = PipelineEngine.EvidenceCompleted(p, t, waitingSince, outcome.Message, time.GetUtcNow());
+        if (!completed.Changed) return; // another round: its own evidence is owed (or it was decided)
+        await store.SaveAsync(t, ct);
+        await ApplyAsync(io, t, fromStageId, completed, ct);
+    }
+
+    /// <summary>
+    /// Posts the signed report (or failure) to the pull request, then a signed line to the tracker. Returns whether the
+    /// pull request comment was posted; a failure is recorded as an event.
+    /// </summary>
+    private async Task<bool> PostEvidenceAsync(ProjectIntegrations io, Ticket t, long prId, EvidenceOutcome outcome,
+        CancellationToken ct)
+    {
+        var report = outcome.Report;
+        var failed = EvidenceComment.Failed(outcome.Error ?? "no evidence report");
+        try
+        {
+            var body = report is null ? failed : EvidenceComment.Format(report, outcome.Screenshots.Count > 0);
+            await io.SourceControl.CommentOnPullRequestAsync(prId, TrackerComments.Sign(body), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Evidence comment on pull request {Id} for {Key} failed", prId, t.Key);
+            await AddEventAsync(t, $"evidence comment failed: {e.Message}", ct);
+            return false;
+        }
+        try
+        {
+            var line = report is null ? failed : EvidenceComment.TrackerLine(report);
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(line), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Evidence comment on {Key} failed", t.Key);
+            await AddEventAsync(t, $"evidence comment failed: {e.Message}", ct);
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Why the reviewed commits cannot be confirmed as the current heads, or null when they are (or the gate reviews no
     /// commit). An implement or release verdict covers only the reviewed commit of the branch that would be merged (the
     /// ticket branch, or main), and a release also its production base; the stage's pull request, when there is one,
@@ -796,6 +933,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         CancellationToken ct)
     {
         if (!outcome.Changed) return;
+        CancelDecidedEvidence(t);
         await AddEventAsync(t, outcome.Message, ct);
         if (outcome.Decision is { } d)
             await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, t.ProjectId, d.StageId, d.WaitingSince, d.Decision,
@@ -841,6 +979,25 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await AddEventAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
             retryFailureRecorded.Add(t.Id);
             await SaveRetryAsync(t, target, ct);
+        }
+    }
+
+    /// <summary>
+    /// Cancels the ticket's evidence run once its round is no longer the one waiting (approved, sent back, moved, rerun
+    /// by @claude, auto-approved or blocked); under gate only, like every outcome applied.
+    /// </summary>
+    private void CancelDecidedEvidence(Ticket t)
+    {
+        if (!evidenceRuns.TryGetValue(t.Id, out var run)) return;
+        if (t.Status == StageStatus.AwaitingApproval && t.WaitingSince == run.WaitingSince) return;
+        try
+        {
+            run.Cts.Cancel();
+        }
+        catch (AggregateException e)
+        {
+            // A token callback (e.g. the runner's cleanup) threw; the decision itself must still be applied.
+            log.LogWarning(e, "Cancelling the evidence run of {Project}/{Key} raised", t.ProjectId, t.Key);
         }
     }
 

@@ -32,7 +32,8 @@ public sealed class ProjectFileStoreTests : IDisposable
         orchestrator = new Orchestrator(registry, tickets,
             new FakeIntegrationFactory(new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher())),
             new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), tickets, time),
-            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time), time,
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time),
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
         files = new ProjectFileStore(registry, tickets, orchestrator, Providers);
     }

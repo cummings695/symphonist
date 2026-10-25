@@ -109,8 +109,12 @@ public sealed class FakeSourceControl : ISourceControl
             Comments.TryGetValue(id, out var list) ? [.. list] : []);
     }
 
+    /// <summary>Thrown from CommentOnPullRequestAsync when set.</summary>
+    public Exception? CommentError { get; set; }
+
     public Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
     {
+        if (CommentError is not null) throw CommentError;
         PostedComments.Add((id, markdown));
         return Task.CompletedTask;
     }

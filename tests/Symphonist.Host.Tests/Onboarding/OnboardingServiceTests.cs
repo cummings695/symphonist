@@ -40,7 +40,8 @@ public sealed class OnboardingServiceTests : IDisposable
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         orchestrator = new Orchestrator(registry, tickets, factory,
             new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), tickets, time),
-            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time), time,
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time),
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), tickets, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
         var agents = new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent });
         var docker = new DockerLauncher(new FakeProcessRunner(), Path.Combine(home.Path, "agent-context"), _ => null);
