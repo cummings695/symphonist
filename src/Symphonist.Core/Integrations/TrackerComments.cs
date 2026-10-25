@@ -16,14 +16,15 @@ public static partial class TrackerComments
 
     public const string ClaudeMarker = "@claude";
 
-    [GeneratedRegex(@"(?<!\\)@claude", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("@(claude)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Mention();
 
     /// <summary>
-    /// Escapes every "@claude" (any case) as "\@claude", so text Symphonist posts under the developer's account can
-    /// neither read as a request nor trigger the Claude GitHub App. An already escaped mention is left as it is.
+    /// Breaks every "@claude" (any case, case kept) with a zero-width space after the "@", so text Symphonist posts
+    /// under the developer's account never contains the substring "@claude": it can neither read as a request nor
+    /// trigger the Claude GitHub App, whether that reads the rendered or the raw text. Idempotent.
     /// </summary>
-    public static string EscapeMentions(string text) => Mention().Replace(text, @"\$0");
+    public static string EscapeMentions(string text) => Mention().Replace(text, "@​$1");
 
     /// <summary>
     /// The request text of a developer "@claude" comment (marker removed, trimmed); null when the body does not start

@@ -9,7 +9,7 @@ public static class EvidenceComment
     /// <summary>
     /// PR comment (unsigned; the caller signs it): a guessed warning first, the headline, then Regressions, Tests and
     /// coverage and Walkthrough, failures first in each. All agent text is bounded, and every "@claude" is
-    /// escaped (it would read as a request).
+    /// broken up (it would read as a request).
     /// </summary>
     public static string Format(EvidenceReport report, bool hasScreenshots)
     {

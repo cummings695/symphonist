@@ -336,7 +336,7 @@ public class GitHubSourceControlTests
         await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
 
         using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
-        Assert.Equal("> \\@claude ask \\@Claude too\n\ndone", body.RootElement.GetProperty("body").GetString());
+        Assert.Equal("> @​claude ask @​Claude too\n\ndone", body.RootElement.GetProperty("body").GetString());
     }
 
     [Fact]

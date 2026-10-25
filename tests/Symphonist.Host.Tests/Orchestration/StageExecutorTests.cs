@@ -775,7 +775,7 @@ public sealed class StageExecutorTests : IDisposable
 
         await executor.ExecuteAsync(project, io, FixTicket(Mine("issue:1")), source, CancellationToken.None);
 
-        Assert.Equal(TrackerComments.Sign(@"\@claude can take it from here; or \@Claude."), Assert.Single(scm.Replies).Body);
+        Assert.Equal(TrackerComments.Sign("@​claude can take it from here; or @​Claude."), Assert.Single(scm.Replies).Body);
     }
 
     [Fact] public async Task No_change_fix_run_completes_and_replies()
