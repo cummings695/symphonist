@@ -17,10 +17,10 @@ public sealed record WorkspaceFileResult(string? Text, string? Problem, bool Pat
 /// characters, <c>:</c> (drive letters, NTFS streams), segments ending in a dot or space, or Windows device names, and must
 /// resolve inside the workspace. Neither the file nor any folder from the workspace down to it may be a link (which could
 /// point anywhere on the host). The agent may still be running in the workspace and could swap a folder or the file for a
-/// link after those checks, so the file is opened first and the real path of the open handle must be inside the
-/// workspace's real path; the text is then read from that same handle. Where the handle's path cannot be obtained
-/// (macOS), the real path of the requested name, resolved after opening, must be inside instead (see
-/// <see cref="CheckOpened"/>).
+/// link after those checks, so what is checked comes from the opened file itself, and the text is read from that same
+/// handle: on Windows the real path of the open handle must be inside the workspace's real path; on Linux and macOS the
+/// file is opened one component at a time with <c>openat(O_NOFOLLOW)</c> from the workspace folder, so no link is ever
+/// followed (Linux also checks the handle's real path).
 /// </remarks>
 public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log = null)
 {
@@ -35,12 +35,6 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
 
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-
-    /// <summary>Whether this system tells the real path of an open file (Windows, Linux); macOS does not.</summary>
-    internal static readonly bool HandlePathSupported = OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
-
-    /// <summary>Check the open handle's real path (default where supported), else the requested name's; a test switch.</summary>
-    internal bool UseHandlePath { get; init; } = HandlePathSupported;
 
     private static readonly HashSet<string> DeviceNames = new(
         ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
@@ -81,12 +75,18 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
             if (!file.Exists) return new(null, Missing);
             if (file.Length > MaxBytes) return new(null, TooLarge);
 
-            if (RealPath(workspace) is not { } realWorkspace) return new(null, CannotVerify);
-            await using var stream = new FileStream(full, new FileStreamOptions
+            SafeFileHandle handle;
+            if (OperatingSystem.IsWindows())
+                handle = File.OpenHandle(full, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+            else if (OpenConfined(workspace, segments, out var opened) is { } openProblem) return new(null, openProblem);
+            else handle = opened!;
+
+            await using var stream = new FileStream(handle, FileAccess.Read, 4096, handle.IsAsync);
+            if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
             {
-                Mode = FileMode.Open, Access = FileAccess.Read, Share = FileShare.Read, Options = FileOptions.Asynchronous,
-            });
-            if (CheckOpened(stream.SafeFileHandle, full, realWorkspace, UseHandlePath) is { } problem) return new(null, problem);
+                if (RealPath(workspace) is not { } realWorkspace) return new(null, CannotVerify);
+                if (CheckOpened(handle, realWorkspace) is { } problem) return new(null, problem);
+            }
 
             // Read at most one byte past the limit, in case the file grew since it was measured.
             var buffer = new byte[MaxBytes + 1];
@@ -116,15 +116,9 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
     /// Why the open file must not be shown, or null when its real location is inside <paramref name="realWorkspace"/> and
     /// (where the system tells) it has no other hard link.
     /// </summary>
-    /// <param name="requestedPath">The path the file was opened by.</param>
-    /// <param name="useHandlePath">
-    /// True: the real path of the open handle, which no later swap can change. False (macOS): the real path of
-    /// <paramref name="requestedPath"/>, resolved after opening. That narrows the race but does not close it: a folder could
-    /// be swapped for a link before the open and swapped back before this check.
-    /// </param>
-    internal static string? CheckOpened(SafeFileHandle handle, string requestedPath, string realWorkspace, bool useHandlePath)
+    internal static string? CheckOpened(SafeFileHandle handle, string realWorkspace)
     {
-        if ((useHandlePath ? RealPathOf(handle) : RealPath(requestedPath)) is not { } real) return CannotVerify;
+        if (RealPathOf(handle) is not { } real) return CannotVerify;
         if (!IsInside(realWorkspace, real)) return Linked;
         // A second hard link could be a file outside the workspace. Only Windows is checked: the link count on Linux
         // and macOS needs fstat, whose struct layout differs per platform. (Container agents cannot link to host files.)
@@ -140,8 +134,54 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
             return new FileInfo($"/proc/self/fd/{handle.DangerousGetHandle()}").LinkTarget is { } target && Path.IsPathRooted(target)
                 ? target
                 : null;
-        // macOS would need fcntl(F_GETPATH), a variadic call P/Invoke cannot make safely on arm64.
+        // macOS would need fcntl(F_GETPATH), whose third argument is variadic: never called (unsafe on Apple arm64).
         return null;
+    }
+
+    /// <summary>
+    /// Linux and macOS: opens <paramref name="segments"/> under <paramref name="workspace"/> one component at a time with
+    /// <c>openat(O_NOFOLLOW)</c>, so a link anywhere (the workspace folder included) fails the open instead of being
+    /// followed, whatever is swapped meanwhile. Returns why it is not shown, or null with the open file in
+    /// <paramref name="handle"/>.
+    /// </summary>
+    internal static string? OpenConfined(string workspace, string[] segments, out SafeFileHandle? handle)
+    {
+        handle = null;
+        if (Unix.Flags() is not { } f) return CannotVerify;
+        var fds = new List<int>();
+        try
+        {
+            int fd;
+            try
+            {
+                fd = Unix.open(workspace, f.ReadOnly | f.Directory | f.NoFollow | f.CloseOnExec);
+            }
+            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return CannotVerify;
+            }
+            if (fd < 0) return Unix.Problem(Marshal.GetLastPInvokeError(), f);
+            fds.Add(fd);
+            for (var i = 0; i < segments.Length; i++)
+            {
+                var last = i == segments.Length - 1;
+                // The file itself without O_DIRECTORY, and non-blocking so a FIFO cannot hang the open.
+                var flags = f.ReadOnly | f.NoFollow | f.CloseOnExec | (last ? f.NonBlock : f.Directory);
+                var next = Unix.openat(fds[^1], segments[i], flags);
+                if (next < 0) return Unix.Problem(Marshal.GetLastPInvokeError(), f);
+                if (last)
+                {
+                    handle = new SafeFileHandle(next, ownsHandle: true);
+                    return null;
+                }
+                fds.Add(next);
+            }
+            return Missing; // no segments: unreachable after validation
+        }
+        finally
+        {
+            foreach (var open in fds) Unix.close(open);
+        }
     }
 
     /// <summary>The real path (links resolved) of an existing file or directory, or null when it cannot be resolved.</summary>
@@ -238,6 +278,40 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
 
     private static class Unix
     {
+        public sealed record OpenFlags(int ReadOnly, int Directory, int NoFollow, int CloseOnExec, int NonBlock, int Loop);
+
+        /// <summary>The open(2) flags and ELOOP of this system, or null where they are not known (fail closed).</summary>
+        public static OpenFlags? Flags()
+        {
+            if (OperatingSystem.IsMacOS()) return new(0, 0x100000, 0x100, 0x1000000, 0x4, 62);
+            if (OperatingSystem.IsLinux() && RuntimeInformation.OSArchitecture is Architecture.X64 or Architecture.Arm64)
+                return new(0, 0x10000, 0x20000, 0x80000, 0x800, 40);
+            return null;
+        }
+
+        private const int NoEntry = 2, AccessDenied = 13, NotDirectory = 20;
+
+        /// <summary>
+        /// Why a component could not be opened. A link fails O_NOFOLLOW with ELOOP (ENOTDIR when a directory was asked
+        /// for); ENOTDIR also covers a file where a folder should be, which the name checks report as missing first.
+        /// </summary>
+        public static string Problem(int errno, OpenFlags f) =>
+            errno == f.Loop || errno == NotDirectory ? Linked
+            : errno == NoEntry ? Missing
+            : errno == AccessDenied ? Unreadable
+            : CannotVerify;
+
+        // open and openat are variadic (a mode follows the flags, only with O_CREAT). Declared with fixed arguments only
+        // and never given a mode, they are ABI-safe on Apple arm64 too, where only variadic arguments go on the stack.
+        [DllImport("libc", ExactSpelling = true, SetLastError = true)]
+        public static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [DllImport("libc", ExactSpelling = true, SetLastError = true)]
+        public static extern int openat(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+        [DllImport("libc", ExactSpelling = true, SetLastError = true)]
+        public static extern int close(int fd);
+
         public static string? RealPath(string path)
         {
             var resolved = realpath(path, IntPtr.Zero);

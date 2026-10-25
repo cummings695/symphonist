@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 using Symphonist.Host.Dashboard;
 
 namespace Symphonist.Host.Tests.Dashboard;
@@ -269,38 +270,33 @@ public sealed class WorkspaceFilesTests : IDisposable
 
     private string RealWorkspace => WorkspaceFiles.RealPath(Workspace)!;
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void Open_file_inside_the_workspace_passes_the_check(bool useHandlePath)
+    [Fact]
+    public void Open_file_inside_the_workspace_passes_the_handle_check()
     {
         Write("docs/a.md", "fine");
         var path = Path.Combine(Workspace, "docs", "a.md");
         using var stream = File.OpenRead(path);
-        Assert.Null(WorkspaceFiles.CheckOpened(stream.SafeFileHandle, path, RealWorkspace, useHandlePath));
+        Assert.Null(WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void File_opened_through_a_linked_directory_fails_the_check(bool useHandlePath)
+    [Fact]
+    public void File_opened_through_a_linked_directory_fails_the_handle_check()
     {
         // As if docs/ were swapped for a link after the name checks: the open handle still shows where the file really is.
         WorkspaceLinks.LinkDirectory(Path.Combine(Workspace, "docs"), outside);
         var path = Path.Combine(Workspace, "docs", "secret.md");
         using var stream = File.OpenRead(path);
-        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, path, RealWorkspace, useHandlePath));
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
     }
 
     [SymlinkFact]
-    public void File_opened_through_a_symlink_fails_the_check()
+    public void File_opened_through_a_symlink_fails_the_handle_check()
     {
         Directory.CreateDirectory(Path.Combine(Workspace, "docs"));
         File.CreateSymbolicLink(Path.Combine(Workspace, "docs", "spec.md"), Path.Combine(outside, "secret.md"));
         var path = Path.Combine(Workspace, "docs", "spec.md");
         using var stream = File.OpenRead(path);
-        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, path, RealWorkspace, true));
-        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, path, RealWorkspace, false));
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.CheckOpened(stream.SafeFileHandle, RealWorkspace));
     }
 
     [Fact]
@@ -332,17 +328,54 @@ public sealed class WorkspaceFilesTests : IDisposable
         Assert.Equal(WorkspaceFiles.HardLinked, result.Problem);
     }
 
-    [Fact]
-    public async Task Name_fallback_reads_files_and_refuses_links()
-    {
-        // The macOS path (no real path for a handle), run here through the switch.
-        var fallback = new WorkspaceFiles(Path.Combine(root, "work")) { UseHandlePath = false };
-        Write("docs/specs/a.md", "# Spec\n");
-        Assert.Equal("# Spec\n", (await fallback.ReadAsync("orders", "ORD-1", "docs/specs/a.md", default)).Text);
+    // The openat(O_NOFOLLOW) walk that confines reads on Linux and macOS, called directly (the name checks in ReadAsync
+    // would refuse these links first).
 
-        WorkspaceLinks.LinkDirectory(Path.Combine(Workspace, "linked"), outside);
-        var linked = await fallback.ReadAsync("orders", "ORD-1", "linked/secret.md", default);
-        Assert.Null(linked.Text);
-        Assert.Contains("symbolic link", linked.Problem);
+    private static string ReadAll(SafeFileHandle handle)
+    {
+        using var stream = new FileStream(handle, FileAccess.Read, 4096, handle.IsAsync);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    [UnixFact]
+    public void Confined_open_reads_a_normal_file()
+    {
+        Write("docs/specs/a.md", "# Spec");
+        Assert.Null(WorkspaceFiles.OpenConfined(Workspace, ["docs", "specs", "a.md"], out var handle));
+        Assert.Equal("# Spec", ReadAll(handle!));
+    }
+
+    [UnixFact]
+    public void Confined_open_refuses_a_symlinked_file()
+    {
+        Directory.CreateDirectory(Path.Combine(Workspace, "docs"));
+        File.CreateSymbolicLink(Path.Combine(Workspace, "docs", "spec.md"), Path.Combine(outside, "secret.md"));
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.OpenConfined(Workspace, ["docs", "spec.md"], out var handle));
+        Assert.Null(handle);
+    }
+
+    [UnixFact]
+    public void Confined_open_refuses_a_symlinked_folder()
+    {
+        Directory.CreateSymbolicLink(Path.Combine(Workspace, "docs"), outside);
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.OpenConfined(Workspace, ["docs", "secret.md"], out var handle));
+        Assert.Null(handle);
+    }
+
+    [UnixFact]
+    public void Confined_open_refuses_a_symlinked_workspace()
+    {
+        Directory.Delete(Workspace);
+        Directory.CreateSymbolicLink(Workspace, outside);
+        Assert.Equal(WorkspaceFiles.Linked, WorkspaceFiles.OpenConfined(Workspace, ["secret.md"], out var handle));
+        Assert.Null(handle);
+    }
+
+    [UnixFact]
+    public void Confined_open_reports_a_missing_file()
+    {
+        Write("docs/a.md", "x");
+        Assert.Contains("not in the ticket's workspace", WorkspaceFiles.OpenConfined(Workspace, ["docs", "none.md"], out _));
     }
 }
