@@ -292,7 +292,7 @@ public sealed class ProjectForm
             else Line($"{slot}.{key}", value, errors);
             if (string.IsNullOrWhiteSpace(value) || field is null) continue;
             if (field.Kind == ProviderFieldKind.Secret && !SecretNames.IsValid(value))
-                errors.Add($"invalid secret name '{value}'");
+                errors.Add($"{slot}.{key}: invalid secret name; use lowercase letters, digits and '-'");
             if (field.Kind == ProviderFieldKind.Number
                 && !int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
                 errors.Add($"{slot}.{key} must be a whole number");

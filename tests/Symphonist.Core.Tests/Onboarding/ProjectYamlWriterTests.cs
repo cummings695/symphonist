@@ -250,7 +250,10 @@ public class ProjectYamlWriterTests
         var form = Filled();
         form.Tracker.Values["tokenSecret"] = "Jira Acme";
 
-        Assert.Contains("invalid secret name 'Jira Acme'", form.Validate(Registry));
+        var errors = form.Validate(Registry);
+
+        Assert.Contains("tracker.tokenSecret: invalid secret name; use lowercase letters, digits and '-'", errors);
+        Assert.DoesNotContain(errors, e => e.Contains("Jira Acme")); // a pasted token must not be echoed
     }
 
     [Fact]
