@@ -62,7 +62,7 @@ public static partial class EvidenceParser
     public const int MaxHeadlineLines = 3;
     private const string NoDescription = "(no description given)";
 
-    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpg|jpeg|webp)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpg|jpeg|webp)\z",RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ScreenshotName();
 
     /// <summary>A short, plain image file name (no directories, no leading dot or dash) the report may reference.</summary>

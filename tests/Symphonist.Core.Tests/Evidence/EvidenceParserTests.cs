@@ -174,4 +174,14 @@ public class EvidenceParserTests
         Assert.Equal("object", s.GetProperty("type").GetString());
         Assert.Equal(4, s.GetProperty("required").GetArrayLength());
     }
+
+    [Theory]
+    [InlineData("a.png", true)]
+    [InlineData("Home-1.JPEG", true)]
+    [InlineData("a.png\n", false)]
+    [InlineData("a.png\nb", false)]
+    [InlineData(".a.png", false)]
+    [InlineData("dir/a.png", false)]
+    public void Screenshot_names_are_whole_plain_file_names(string name, bool valid) =>
+        Assert.Equal(valid, EvidenceParser.IsScreenshotName(name));
 }
