@@ -7,10 +7,13 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
 using Symphonist.Core.Onboarding;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Storage;
 using Symphonist.Host.Components.Pages;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Onboarding;
@@ -62,6 +65,7 @@ public sealed class ProjectSetupComponentTests : IDisposable
         ctx.Services.AddSingleton(registry);
         ctx.Services.AddSingleton(Providers);
         ctx.Services.AddSingleton(service);
+        ctx.Services.AddSingleton<ITicketStore>(tickets);
         ctx.Services.AddScoped<DashboardChrome>();
     }
 
@@ -456,5 +460,126 @@ public sealed class ProjectSetupComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.Contains("this setup was replaced by another one; reload the page",
             cut.Find("[role=alert]").TextContent));
         Assert.NotNull(cut.Find("[data-reload]"));
+    }
+
+    [Fact]
+    public async Task Setup_edits_and_saves_evidence_and_pr_comments()
+    {
+        var text = WriteProject("orders");
+        var cut = Render("orders");
+
+        var headings = cut.FindAll("h2").Select(h => h.TextContent.Trim()).ToList();
+        Assert.Equal(headings.IndexOf("Review and guardrails") + 1, headings.IndexOf("Evidence"));
+        Assert.Contains("PR comments", headings);
+        Assert.Equal(["Off", "High risk", "Always"], cut.FindAll("#evidence-mode option").Select(o => o.TextContent.Trim()));
+        Assert.Contains(cut.FindAll("#evidence-mode option"), o => o.TextContent.Trim() == "High risk" && o.HasAttribute("selected"));
+
+        cut.Find("#evidence-mode").Change("Always");
+        cut.Find("#evidence-setup").Change("npm ci\nnpm run seed");
+        cut.Find("#evidence-start").Change("npm start");
+        cut.Find("#evidence-url").Change("http://localhost:3000");
+        cut.Find("#evidence-ready").Change("Listening on");
+        cut.Find("#evidence-notes").Change("Sign in as demo/demo.");
+        await Button(cut, "Add feature").ClickAsync(new());
+        cut.Find("#evidence-feature-0-name").Change("Checkout");
+        cut.Find("#evidence-feature-0-steps").Change("Add an item\r\nPay");
+        cut.Find("#evidence-timeout").Change("45");
+        cut.Find("#evidence-model").Change("opus");
+        var others = cut.Find("#pr-comments-others");
+        Assert.False(others.HasAttribute("checked"));
+        Assert.Equal("Let anyone's @claude PR comments start a fix run", cut.Find("label[for='pr-comments-others']").TextContent.Trim());
+        Assert.Contains("teammates' comments direct an agent that pushes under your account", cut.Find("[data-pr-comments]").TextContent);
+        others.Change(true);
+
+        Assert.Equal(text, File.ReadAllText(PathOf("orders.yaml"))); // nothing saved until Save
+        await Button(cut, "Save project").ClickAsync(new());
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-saved]")));
+
+        var saved = registry.Projects.Single(p => p.Id == "orders");
+        Assert.Equal(EvidenceMode.Always, saved.Evidence.Mode);
+        Assert.Equal(["npm ci", "npm run seed"], saved.Evidence.Run.Setup);
+        Assert.Equal("npm start", saved.Evidence.Run.Start);
+        Assert.Equal("http://localhost:3000", saved.Evidence.Run.Url);
+        Assert.Equal("Listening on", saved.Evidence.Run.Ready);
+        Assert.Equal("Sign in as demo/demo.", saved.Evidence.Run.Notes);
+        var feature = Assert.Single(saved.Evidence.Features);
+        Assert.Equal(("Checkout", "Add an item\nPay"), (feature.Name, feature.Steps));
+        Assert.Equal(45, saved.Evidence.Agent.TimeoutMinutes);
+        Assert.Equal("opus", saved.Evidence.Agent.Model);
+        Assert.True(saved.PrComments.FromOthers);
+    }
+
+    [Fact]
+    public async Task Feature_editor_removes_a_feature()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        await Button(cut, "Add feature").ClickAsync(new());
+        cut.Find("#evidence-feature-0-name").Change("Checkout");
+
+        await cut.Find("button[aria-label='Remove feature Checkout']").ClickAsync(new());
+
+        Assert.Empty(service.Current!.Form.Evidence.Features);
+        Assert.Empty(cut.FindAll("[data-feature-row]"));
+    }
+
+    [Fact]
+    public async Task Setup_prefills_from_evidence_proposal_without_saving()
+    {
+        var text = WriteProject("orders");
+        var ticket = new Ticket
+        {
+            Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-1", Title = "Cart", StageId = "implement",
+            Status = StageStatus.AwaitingApproval, CreatedAt = Now, UpdatedAt = Now,
+        };
+        await tickets.SaveAsync(ticket, default);
+        EvidenceRecord Record(DateTimeOffset at, EvidenceRun? run, IReadOnlyList<EvidenceFeature> features) =>
+            new(ticket.Id, "orders", "implement", at, at, "abc",
+                new EvidenceReport(["ok"], [], [], null, new Walkthrough(true, null, EvidenceSource.Guessed, []), run, features).ToJson(),
+                false, null, [], true);
+        await tickets.AddEvidenceAsync(Record(Now.AddHours(-2),
+            new EvidenceRun([], "old start", null, null, null), [new EvidenceFeature("Old", "old steps")]), default);
+        await tickets.AddEvidenceAsync(Record(Now.AddHours(-1),
+            new EvidenceRun(["npm ci"], "npm start", "http://localhost:3000", null, null), [new EvidenceFeature("Cart", "Open the cart")]), default);
+        await tickets.AddEvidenceAsync(Record(Now, null, []), default); // the latest has no proposal
+
+        ctx.Services.GetRequiredService<NavigationManager>().NavigateTo("/projects/orders/setup?evidenceFrom=ORD-1");
+        var cut = Render("orders");
+
+        cut.WaitForAssertion(() => Assert.Equal("npm start", cut.Find("#evidence-start").GetAttribute("value")));
+        Assert.Equal("http://localhost:3000", cut.Find("#evidence-url").GetAttribute("value"));
+        Assert.Equal("Cart", cut.Find("#evidence-feature-0-name").GetAttribute("value"));
+        Assert.Single(service.Current!.Form.Evidence.Features);
+        Assert.Contains("ORD-1", cut.Find("[data-evidence-from]").TextContent);
+        Assert.Equal(text, File.ReadAllText(PathOf("orders.yaml")));
+    }
+
+    [Fact]
+    public async Task Onboarding_proposal_evidence_shows_as_proposed_and_applies()
+    {
+        WriteProject("orders");
+        var cut = RenderWithSecrets("orders");
+        await Propose(cut, new
+        {
+            stages = Array.Empty<object>(),
+            risk_areas = Array.Empty<object>(),
+            evidence = new
+            {
+                run = new { start = "npm start", url = "http://localhost:3000" },
+                features = new[] { new { name = "Checkout", steps = "Pay for an item" } },
+                reason = "package.json has a start script <b>x</b>",
+            },
+        });
+
+        var proposed = cut.Find("[data-proposal-evidence]");
+        Assert.Contains("Proposed", proposed.TextContent);
+        Assert.Contains("package.json has a start script <b>x</b>", proposed.TextContent);
+        Assert.Empty(cut.FindAll("b"));
+        Assert.Null(service.Current!.Form.Evidence.Start);
+
+        await Button(cut, "Apply proposal").ClickAsync(new());
+
+        Assert.Equal("npm start", cut.Find("#evidence-start").GetAttribute("value"));
+        Assert.Equal("Checkout", cut.Find("#evidence-feature-0-name").GetAttribute("value"));
     }
 }

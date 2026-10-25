@@ -139,6 +139,12 @@ h1 {
     overflow-wrap: anywhere;
 }
 
+/* The latest evidence found issues: said in words, with the danger colour as a second cue. */
+.evidence-issues {
+    color: var(--danger);
+    font-weight: 600;
+}
+
 .ticket-reason {
     background: var(--danger-tint);
     border-left: 4px solid var(--danger);

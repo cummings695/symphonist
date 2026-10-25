@@ -748,4 +748,33 @@ public sealed class BoardComponentTests : IDisposable
         Assert.Empty(cut.FindAll("[data-project]"));
         Assert.Equal("billing", ctx.Services.GetRequiredService<DashboardChrome>().CurrentProject);
     }
+
+    [Fact]
+    public async Task Card_shows_gathering_evidence_and_still_waits_on_you()
+    {
+        await Seed("ORD-9", "implement", StageStatus.AwaitingApproval, with: t => t.EvidenceDue = true);
+
+        var cut = RenderBoard();
+
+        var card = Card(cut, "ORD-9");
+        Assert.Equal("Gathering evidence", card.QuerySelector("[data-card-evidence]")!.TextContent.Trim());
+        Assert.DoesNotContain("Waiting on you", card.TextContent);
+        Assert.Contains(card.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Approve");
+        Assert.Empty(Card(cut, "ORD-9").QuerySelectorAll("[data-evidence-issues]"));
+    }
+
+    [Fact]
+    public async Task Card_shows_evidence_issues_marker()
+    {
+        var bad = await Seed("ORD-8", "implement", StageStatus.AwaitingApproval);
+        var good = await Seed("ORD-7", "implement", StageStatus.AwaitingApproval);
+        await store.AddEvidenceAsync(new EvidenceRecord(bad.Id, "orders", "implement", Now, Now, "abc", null, true, null, [], true), default);
+        await store.AddEvidenceAsync(new EvidenceRecord(good.Id, "orders", "implement", Now, Now, "abc", null, false, null, [], true), default);
+
+        var cut = RenderBoard();
+
+        Assert.Equal("Evidence: issues found", Card(cut, "ORD-8").QuerySelector("[data-evidence-issues]")!.TextContent.Trim());
+        Assert.Empty(Card(cut, "ORD-7").QuerySelectorAll("[data-evidence-issues]"));
+        Assert.Contains("Waiting on you", Card(cut, "ORD-8").QuerySelector(".status-label")!.TextContent);
+    }
 }

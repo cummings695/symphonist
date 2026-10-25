@@ -32,6 +32,10 @@
             <span class="badge">@card.Source</span>
             <span class="ticket-status ticket-@StatusClass(card)" data-status><span class="status-dot" aria-hidden="true"></span>@TicketCard.StatusLabel(card)</span>
             <RiskBadge Risk="card.Risk" />
+            @if (card.EvidenceIssues)
+            {
+                <span class="badge evidence-issues" data-evidence-issues>Evidence: issues found</span>
+            }
             <span class="facts-numbers">
                 @if (!model!.Pipeline.Any(s => s.Id == card.StageId))
                 {
@@ -114,6 +118,8 @@
                     </ol>
                 }
             </section>
+
+            <EvidencePanel Records="model.Evidence" Project="@Project" Key="@Key" Known="card.Known" />
 
             <section class="panel" aria-labelledby="runs-heading">
                 <h2 id="runs-heading">Agent runs</h2>

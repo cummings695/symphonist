@@ -171,6 +171,13 @@
     overflow-wrap: anywhere;
 }
 
+.card-evidence-issues {
+    margin: 0.1rem 0 0;
+    color: var(--danger);
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
 .card .button {
     align-self: flex-start;
     margin-top: 0.3rem;

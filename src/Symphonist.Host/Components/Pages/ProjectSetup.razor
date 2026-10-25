@@ -3,9 +3,11 @@
 @using Symphonist.Core.Integrations.Providers
 @using Symphonist.Core.Onboarding
 @using Symphonist.Core.Risk
+@using Symphonist.Core.Storage
 @using Symphonist.Host.Onboarding
 @implements IDisposable
 @inject OnboardingService Service
+@inject ITicketStore Tickets
 @inject ProviderRegistry Providers
 @inject DashboardChrome Chrome
 @inject NavigationManager Navigation
@@ -149,6 +151,10 @@
                     {
                         <p class="hint">@proposal.RiskAreas.Count proposed risk area(s), listed under Risk areas.</p>
                     }
+                    @if (proposal.Evidence is not null)
+                    {
+                        <p class="hint">Proposed evidence settings, listed under Evidence.</p>
+                    }
                     @if (proposal.Notes.Count > 0)
                     {
                         <h4>Notes</h4>
@@ -214,6 +220,132 @@
             </div>
         </section>
 
+        <section class="setup-section" aria-labelledby="setup-evidence">
+            <h2 id="setup-evidence">Evidence</h2>
+            <p class="hint">
+                Before a gated implement round waits on you, an agent runs the tests and the app in a throwaway clone and
+                posts what it saw to the pull request. It never approves, blocks, commits or pushes.
+            </p>
+            @if (evidenceFrom is not null)
+            {
+                <p class="hint" role="status" data-evidence-from>@evidenceFrom</p>
+            }
+            <div class="setup-fields">
+                <div class="setup-field">
+                    <label for="evidence-mode">Mode</label>
+                    <select id="evidence-mode" value="@Form.Evidence.Mode" aria-describedby="evidence-mode-hint" @onchange="SetEvidenceMode">
+                        @foreach (var (mode, label) in EvidenceModes)
+                        {
+                            <option value="@mode" selected="@(Form.Evidence.Mode == mode)">@label</option>
+                        }
+                    </select>
+                    <span class="hint" id="evidence-mode-hint">High risk: only when the change is rated high risk or touches a risk area</span>
+                </div>
+                <div class="setup-field">
+                    <label for="evidence-start">Start command</label>
+                    <input id="evidence-start" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. npm start"
+                           value="@Form.Evidence.Start" @onchange="e => SetText(e, v => Form.Evidence.Start = v)" />
+                </div>
+                <div class="setup-field">
+                    <label for="evidence-url">App URL</label>
+                    <input id="evidence-url" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. http://localhost:3000"
+                           value="@Form.Evidence.Url" @onchange="e => SetText(e, v => Form.Evidence.Url = v)" />
+                </div>
+                <div class="setup-field">
+                    <label for="evidence-ready">Ready when</label>
+                    <input id="evidence-ready" type="text" autocomplete="off" spellcheck="false" aria-describedby="evidence-ready-hint"
+                           value="@Form.Evidence.Ready" @onchange="e => SetText(e, v => Form.Evidence.Ready = v)" />
+                    <span class="hint" id="evidence-ready-hint">How the agent knows the app is up, e.g. a log line or the URL answering</span>
+                </div>
+                @ListField("evidence-setup", "Setup commands", "Run once before the app starts, one per line", Form.Evidence.Setup, v => Form.Evidence.Setup = v)
+                <div class="setup-field setup-field-wide">
+                    <label for="evidence-notes">Notes</label>
+                    <textarea id="evidence-notes" rows="2" aria-describedby="evidence-notes-hint" value="@Form.Evidence.Notes"
+                              @onchange="e => SetBlock(e, v => Form.Evidence.Notes = v)"></textarea>
+                    <span class="hint" id="evidence-notes-hint">Anything else the agent needs, e.g. a test account</span>
+                </div>
+                <div class="setup-field">
+                    <label for="evidence-timeout">Evidence timeout (minutes)</label>
+                    <input id="evidence-timeout" type="number" min="1" inputmode="numeric" @bind="Form.Evidence.TimeoutMinutes" @bind:after="Edited" />
+                </div>
+                <div class="setup-field">
+                    <label for="evidence-model">Evidence model</label>
+                    <input id="evidence-model" type="text" autocomplete="off" spellcheck="false" placeholder="the agent's model"
+                           value="@Form.Evidence.Model" @onchange="e => SetText(e, v => Form.Evidence.Model = v)" />
+                </div>
+            </div>
+
+            <h3>Features to try</h3>
+            <p class="hint">What the agent should exercise in the running app, in your own words.</p>
+            @if (Form.Evidence.Features.Count == 0)
+            {
+                <p class="hint">No features yet.</p>
+            }
+            <ol class="risk-list">
+                @for (var i = 0; i < Form.Evidence.Features.Count; i++)
+                {
+                    var index = i;
+                    var feature = Form.Evidence.Features[i];
+                    var prefix = $"evidence-feature-{index}";
+                    <li class="risk-row" data-feature-row @key="feature">
+                        <fieldset>
+                            <legend>@($"Feature {index + 1}")</legend>
+                            <div class="setup-fields">
+                                <div class="setup-field">
+                                    <label for="@($"{prefix}-name")">Name</label>
+                                    <input id="@($"{prefix}-name")" type="text" value="@feature.Name" autocomplete="off"
+                                           @onchange="e => EditFeature(() => feature.Name = (e.Value as string ?? string.Empty).Trim())" />
+                                </div>
+                                <div class="setup-field setup-field-wide">
+                                    <label for="@($"{prefix}-steps")">Steps</label>
+                                    <textarea id="@($"{prefix}-steps")" rows="3" value="@feature.Steps"
+                                              @onchange="e => EditFeature(() => feature.Steps = ProviderSectionEditor.Text(e.Value as string))"></textarea>
+                                </div>
+                            </div>
+                            <div class="stage-actions">
+                                <button type="button" class="button button-quiet" aria-label="@($"Remove feature {feature.Name}")"
+                                        @onclick="() => EditFeature(() => Form.Evidence.Features.Remove(feature))">Remove</button>
+                            </div>
+                        </fieldset>
+                    </li>
+                }
+            </ol>
+            <button type="button" class="button" @onclick="() => EditFeature(() => Form.Evidence.Features.Add(new EvidenceFeatureForm()))">Add feature</button>
+
+            @if (VisibleProposal?.Evidence is { } proposedEvidence)
+            {
+                <div class="proposal" data-proposal-evidence>
+                    <h3>Proposed evidence settings</h3>
+                    <ul class="proposal-list">
+                        @if (!proposedEvidence.Run.IsEmpty)
+                        {
+                            <li><span class="badge">Proposed</span> How to run: @DescribeRun(proposedEvidence.Run)</li>
+                        }
+                        @foreach (var proposedFeature in proposedEvidence.Features)
+                        {
+                            <li><span class="badge">Proposed</span> <strong>@proposedFeature.Name</strong>: @proposedFeature.Steps</li>
+                        }
+                    </ul>
+                    @if (proposedEvidence.Reason.Length > 0)
+                    {
+                        <p class="reason">Why: @proposedEvidence.Reason</p>
+                    }
+                    <p class="hint">Apply proposal fills the blank run fields and adds the features whose names are new.</p>
+                </div>
+            }
+        </section>
+
+        <section class="setup-section" aria-labelledby="setup-pr-comments" data-pr-comments>
+            <h2 id="setup-pr-comments">PR comments</h2>
+            <p class="hint">Your own @@claude comments on the pull request always start a fix run on the same branch.</p>
+            <div class="choice">
+                <input id="pr-comments-others" type="checkbox" checked="@Form.PrCommentsFromOthers"
+                       aria-describedby="pr-comments-others-hint" @onchange="SetPrCommentsFromOthers" />
+                <label for="pr-comments-others">Let anyone's @@claude PR comments start a fix run</label>
+                <span class="hint" id="pr-comments-others-hint">Off by default. When on, teammates' comments direct an agent that pushes under your account.</span>
+            </div>
+        </section>
+
         <section class="setup-section" aria-labelledby="setup-agent">
             <h2 id="setup-agent">Agent and container</h2>
             <div class="setup-fields">
@@ -269,6 +401,11 @@
                     <input id="prompt-review" type="text" autocomplete="off" spellcheck="false" value="@Form.Review.PromptPath"
                            @onchange="e => SetText(e, v => Form.Review.PromptPath = v)" />
                 </div>
+                <div class="setup-field">
+                    <label for="prompt-evidence">evidence agent</label>
+                    <input id="prompt-evidence" type="text" autocomplete="off" spellcheck="false" value="@Form.Evidence.PromptPath"
+                           @onchange="e => SetText(e, v => Form.Evidence.PromptPath = v)" />
+                </div>
             </div>
         </section>
 
@@ -319,6 +456,13 @@
         (ReviewMode.Active, "Auto gates approve themselves when the verdict is low risk."),
     ];
 
+    private static readonly (EvidenceMode Mode, string Label)[] EvidenceModes =
+    [
+        (EvidenceMode.Off, "Off"),
+        (EvidenceMode.HighRisk, "High risk"),
+        (EvidenceMode.Always, "Always"),
+    ];
+
     private static readonly Dictionary<string, string> StepNames = new()
     {
         ["connections"] = "Check connections",
@@ -343,9 +487,13 @@
     private OnboardingProposal? applied;
     private OnboardingProposal? acceptedFor;
     private List<StageForm>? baseline; // a new project's stages before the first applied proposal
+    private string? evidenceFrom; // what loading ?evidenceFrom= did
 
     /// <summary>The project being edited; null adds a project.</summary>
     [Parameter] public string? Id { get; set; }
+
+    /// <summary>A ticket key of the project: its latest evidence proposal fills the blank evidence fields (not saved).</summary>
+    [SupplyParameterFromQuery(Name = "evidenceFrom")] public string? EvidenceFrom { get; set; }
 
     private bool IsNew => session?.ProjectId is null;
 
@@ -384,7 +532,7 @@
         openedFor = Id;
         session = null;
         notFound = false;
-        openError = ended = actionError = savedFile = savedId = null;
+        openError = ended = actionError = savedFile = savedId = evidenceFrom = null;
         saveErrors = [];
         applied = acceptedFor = null;
         accepted.Clear();
@@ -399,12 +547,44 @@
     /// Opens the session after the first interactive render: prerendering (which never runs this) must not start,
     /// replace or reload a session for a page the browser has not connected to yet.
     /// </summary>
-    protected override void OnAfterRender(bool firstRender)
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (!openPending) return;
         openPending = false;
         Open();
+        if (session is { ProjectId: not null } && !string.IsNullOrWhiteSpace(EvidenceFrom)) await PrefillEvidenceAsync(EvidenceFrom);
         StateHasChanged();
+    }
+
+    /// <summary>
+    /// Merges the proposal of the ticket's latest evidence record that has one into the form: blank run fields and new
+    /// features only. Nothing is saved until Save project.
+    /// </summary>
+    private async Task PrefillEvidenceAsync(string key)
+    {
+        var shown = Bounded(key);
+        var opened = session!;
+        try
+        {
+            var ticket = await Tickets.FindAsync(opened.ProjectId!, key, CancellationToken.None);
+            var report = ticket is null ? null
+                : (await Tickets.EvidenceAsync(ticket.Id, CancellationToken.None)).OrderByDescending(r => r.At)
+                    .Select(r => r.Report).FirstOrDefault(r => r is not null && EvidencePanel.HasProposal(r));
+            if (!ReferenceEquals(session, opened)) return; // reopened meanwhile
+            if (report is null)
+            {
+                evidenceFrom = $"No evidence proposal found for {shown}.";
+                return;
+            }
+            Form.Evidence.Merge(report.ProposedRun ?? EvidenceRun.None, report.ProposedFeatures);
+            Edited();
+            evidenceFrom = $"Filled the blank evidence fields from the evidence of {shown}. Nothing is saved until you save the project.";
+        }
+        catch (Exception e)
+        {
+            Log.LogWarning(e, "Reading the evidence of {Project}/{Key} for the setup screen failed", opened.ProjectId, key);
+            evidenceFrom = $"Could not read the evidence of {shown}: {Bounded(e.Message)}";
+        }
     }
 
     private void Open()
@@ -506,6 +686,32 @@
     private void SetReviewMode(ReviewMode mode)
     {
         Form.Review.Mode = mode;
+        Edited();
+    }
+
+    private void SetEvidenceMode(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<EvidenceMode>(e.Value as string, out var mode)) Form.Evidence.Mode = mode;
+        Edited();
+    }
+
+    private void SetPrCommentsFromOthers(ChangeEventArgs e)
+    {
+        Form.PrCommentsFromOthers = e.Value is true || (e.Value is string text && bool.TryParse(text, out var on) && on);
+        Edited();
+    }
+
+    private void EditFeature(Action edit)
+    {
+        edit();
+        Edited();
+    }
+
+    /// <summary>Multi-line text with LF line ends; blank is stored as null.</summary>
+    private void SetBlock(ChangeEventArgs e, Action<string?> set)
+    {
+        var text = ProviderSectionEditor.Text(e.Value as string);
+        set(string.IsNullOrWhiteSpace(text) ? null : text);
         Edited();
     }
 
@@ -686,6 +892,17 @@
         if (m.OnGateStatus is not null) parts.Add($"on gate {m.OnGateStatus}");
         if (m.ApprovedWhenStatus is not null) parts.Add($"approved when {m.ApprovedWhenStatus}");
         return parts.Count == 0 ? "no statuses" : string.Join("; ", parts);
+    }
+
+    private static string DescribeRun(EvidenceRun run)
+    {
+        var parts = new List<string>();
+        if (run.Setup.Count > 0) parts.Add($"setup {string.Join("; ", run.Setup)}");
+        if (!string.IsNullOrWhiteSpace(run.Start)) parts.Add($"start {run.Start}");
+        if (!string.IsNullOrWhiteSpace(run.Url)) parts.Add($"at {run.Url}");
+        if (!string.IsNullOrWhiteSpace(run.Ready)) parts.Add($"ready when {run.Ready}");
+        if (!string.IsNullOrWhiteSpace(run.Notes)) parts.Add($"notes: {run.Notes}");
+        return string.Join("; ", parts);
     }
 
     private static string Bounded(string text) => ReviewerText.Line(text, ReviewerText.MaxSummaryChars);

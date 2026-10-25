@@ -21,9 +21,11 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var tickets = await store.ListAsync(filter?.Id, ct);
         var costs = await store.AgentCostsAsync(ct);
         var agreements = (await store.ReviewAgreementAsync(filter?.Id, ct)).ToLookup(a => a.ProjectId);
+        var issues = await store.EvidenceIssuesAsync(ct);
 
         var byId = configured.ToDictionary(p => p.Id);
-        var cards = tickets.Select(t => (Ticket: t, Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), costs))).ToList();
+        var cards = tickets.Select(t => (Ticket: t,
+            Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), costs, issues.GetValueOrDefault(t.Id)))).ToList();
 
         var boardProjects = configured.OrderBy(p => p.Id, StringComparer.Ordinal)
             .Select(p => new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
@@ -85,6 +87,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
     {
         if (await store.FindAsync(projectId, key, ct) is not { } t) return null;
         var reviews = (await store.GateReviewsAsync(t.Id, ct)).OrderByDescending(r => r.At).ToList();
+        var evidence = (await store.EvidenceAsync(t.Id, ct)).OrderByDescending(e => e.At).ToList();
         var runs = (await store.AgentRunsAsync(t.Id, ct)).OrderByDescending(r => r.StartedAt).ToList();
         var events = (await store.EventsAsync(t.Id, ct)).OrderByDescending(e => e.At).ThenByDescending(e => e.Id).ToList();
         var project = projects.Projects.FirstOrDefault(p => p.Id == t.ProjectId);
@@ -92,7 +95,8 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var costs = runs.Where(r => r.CostUsd is not null).ToList();
         var card = ToCard(t, project, costs.Count == 0
             ? new Dictionary<Guid, decimal>()
-            : new Dictionary<Guid, decimal> { [t.Id] = costs.Sum(r => r.CostUsd!.Value) });
+            : new Dictionary<Guid, decimal> { [t.Id] = costs.Sum(r => r.CostUsd!.Value) },
+            evidence.FirstOrDefault()?.HasIssues ?? false);
 
         // Without its project in the configuration the page is read-only (like the card on the board). A ticket whose
         // stage was removed (hand edit) can only be sent back, to any stage but done.
@@ -108,7 +112,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
             known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews,
             project?.Name ?? t.ProjectId,
-            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, s.Gate)).ToList() ?? []);
+            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, s.Gate)).ToList() ?? [], evidence);
     }
 
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
@@ -141,7 +145,8 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         _ => 5,
     };
 
-    private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs)
+    private static BoardCard ToCard(Ticket t, ProjectConfig? p, IReadOnlyDictionary<Guid, decimal> costs,
+        bool evidenceIssues = false)
     {
         var stages = p?.Pipeline.ToList();
         var index = stages?.FindIndex(s => s.Id == t.StageId) ?? -1;
@@ -151,7 +156,8 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             t.Attempts, p?.MaxAttemptsPerStage, Since(t), costs.TryGetValue(t.Id, out var cost) ? cost : null,
             TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p),
             known, t.Risk, known && PipelineEngine.WaitsOnReviewer(p!, t),
-            placed ? index + 1 : null, placed ? stages!.Count : null);
+            placed ? index + 1 : null, placed ? stages!.Count : null,
+            known && PipelineEngine.WaitsOnEvidence(p!, t), evidenceIssues);
     }
 
     private static DateTimeOffset? Since(Ticket t) => t.Status switch

@@ -7,11 +7,13 @@ using Microsoft.Extensions.Time.Testing;
 using Microsoft.JSInterop;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Components.Pages;
+using Symphonist.Host.Components.Shared;
 using Symphonist.Host.Dashboard;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
@@ -556,5 +558,112 @@ public sealed class TicketDetailComponentTests : IDisposable
         Assert.Equal("/tickets/orders/ORD-1/docs/plan", plan.GetAttribute("href"));
         Assert.Equal("docs/plans/2026-10-24-ORD-1-plan.md", plan.TextContent.Trim());
         Assert.Null(plan.GetAttribute("target"));
+    }
+
+    private const string Stamp = "20261021T120000Z";
+
+    private static EvidenceRecord EvidenceOf(EvidenceReport? report, DateTimeOffset at, string? error = null, bool posted = false,
+        IReadOnlyList<string>? screenshots = null) =>
+        new(Guid.NewGuid(), "orders", "implement", at, at, "0123456789abcdef", report?.ToJson(), report?.HasIssues ?? false, error,
+            screenshots ?? [], posted);
+
+    private static EvidenceReport Report(EvidenceRun? proposedRun = null, IReadOnlyList<EvidenceFeature>? proposedFeatures = null) =>
+        new(["<script>alert(1)</script> checkout fails"],
+            [
+                new RegressionItem("search", true, RiskLevel.Low, "expected"),
+                new RegressionItem("checkout", false, RiskLevel.High, "<b>totals</b> changed"),
+            ],
+            [new CoverageItem("pricing", ["PriceTests"], "no tax test")],
+            new TestRun("dotnet test", false, "3 failed"),
+            new Walkthrough(true, null, EvidenceSource.Guessed,
+            [
+                new WalkthroughFeature("Search", EvidenceSource.Config, [new WalkthroughStep("Find shoes", "found", true, null)]),
+                new WalkthroughFeature("Cart", EvidenceSource.Added,
+                [
+                    new WalkthroughStep("Open cart", "shown", true, "cart.png"),
+                    new WalkthroughStep("Pay", "<i>500</i>", false, "pay.png"),
+                ]),
+            ]),
+            proposedRun, proposedFeatures ?? []);
+
+    private IRenderedComponent<EvidencePanel> RenderPanel(IReadOnlyList<EvidenceRecord> records, bool known = true) =>
+        ctx.Render<EvidencePanel>(p => p.Add(c => c.Records, records).Add(c => c.Project, "orders").Add(c => c.Key, "ORD-1")
+            .Add(c => c.Known, known));
+
+    [Fact]
+    public void Evidence_panel_renders_bad_news_first_as_text()
+    {
+        var cut = RenderPanel(
+        [
+            EvidenceOf(Report(), Now, screenshots: [$"{Stamp}/cart.png", $"{Stamp}/pay.png"]),
+            EvidenceOf(null, Now.AddHours(-1), error: "agent timed out <u>x</u>", posted: true),
+        ]);
+
+        Assert.Equal("Evidence", cut.Find("h2").TextContent.Trim());
+        var entries = cut.FindAll("[data-evidence]");
+        Assert.Equal(2, entries.Count);
+        var first = entries[0];
+        Assert.Contains("0123456789ab", first.TextContent);
+        Assert.DoesNotContain("0123456789abc", first.TextContent);
+        Assert.Contains("Not posted", first.TextContent);
+        Assert.Contains("Posted", entries[1].TextContent);
+        Assert.DoesNotContain("Not posted", entries[1].TextContent);
+        Assert.Contains("agent timed out <u>x</u>", entries[1].QuerySelector("[data-evidence-error]")!.TextContent);
+
+        Assert.Contains("<script>alert(1)</script> checkout fails", first.QuerySelector("[data-evidence-headline]")!.TextContent);
+        Assert.Contains("&lt;script&gt;", cut.Markup);
+        Assert.Empty(cut.FindAll("script"));
+        Assert.Empty(cut.FindAll("b"));
+        Assert.Empty(cut.FindAll("i"));
+        Assert.Empty(cut.FindAll("u"));
+        Assert.Contains("Guessed", first.QuerySelector("[data-evidence-guessed]")!.TextContent);
+
+        Assert.Equal(["Regressions", "Tests and coverage", "Walkthrough"],
+            first.QuerySelectorAll("h3").Select(h => h.TextContent.Trim()));
+        Assert.StartsWith("checkout", first.QuerySelectorAll("[data-regression]")[0].TextContent.Trim());
+        Assert.Contains("Unintended", first.QuerySelectorAll("[data-regression]")[0].TextContent);
+        Assert.Contains("Failed", first.QuerySelector("[data-tests]")!.TextContent);
+        Assert.Contains("no tax test", first.QuerySelector("[data-coverage]")!.TextContent);
+
+        var features = first.QuerySelectorAll("[data-feature]");
+        Assert.Equal("Cart", features[0].QuerySelector("[data-feature-name]")!.TextContent.Trim());
+        Assert.Contains("Added for this change", features[0].TextContent);
+        Assert.Contains("Config", features[1].TextContent);
+        var steps = features[0].QuerySelectorAll("[data-step]");
+        Assert.Equal(["Failed", "Passed"], steps.Select(s => s.QuerySelector("[data-step-result]")!.TextContent.Trim()));
+        Assert.Contains("<i>500</i>", steps[0].TextContent);
+        var images = features[0].QuerySelectorAll("img");
+        Assert.Equal(["Pay", "Open cart"], images.Select(i => i.GetAttribute("alt")));
+        Assert.Equal($"/evidence/orders/ORD-1/{Stamp}/pay.png", images[0].GetAttribute("src"));
+        Assert.Empty(features[1].QuerySelectorAll("img"));
+    }
+
+    [Fact]
+    public void Evidence_panel_offers_use_for_project_when_proposed()
+    {
+        var proposed = EvidenceOf(Report(new EvidenceRun([], "npm start", "http://localhost:3000", null, null),
+            [new EvidenceFeature("Cart", "Open the cart")]), Now);
+        var plain = EvidenceOf(Report(), Now.AddHours(-1));
+
+        var cut = RenderPanel([proposed, plain]);
+
+        var link = Assert.Single(cut.FindAll("a[data-use-evidence]"));
+        Assert.Equal("Use for this project", link.TextContent.Trim());
+        Assert.Equal("/projects/orders/setup?evidenceFrom=ORD-1", link.GetAttribute("href"));
+        Assert.Empty(RenderPanel([proposed], known: false).FindAll("a[data-use-evidence]"));
+    }
+
+    [Fact]
+    public async Task Detail_shows_evidence_after_gate_reviews()
+    {
+        var t = await Seed("ORD-1", "implement", StageStatus.AwaitingApproval);
+        await store.AddEvidenceAsync(EvidenceOf(Report(), Now) with { TicketId = t.Id }, default);
+
+        var cut = Loaded(Render());
+
+        var headings = cut.FindAll("h2").Select(h => h.TextContent.Trim()).ToList();
+        Assert.Equal(headings.IndexOf("Gate reviews") + 1, headings.IndexOf("Evidence"));
+        Assert.Single(cut.FindAll("[data-evidence]"));
+        Assert.Contains("Evidence: issues found", cut.Find("[data-evidence-issues]").TextContent);
     }
 }

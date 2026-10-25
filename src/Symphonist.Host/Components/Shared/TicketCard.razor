@@ -10,7 +10,7 @@
     <div class="card-top">
         <a class="card-key" href="@DetailUrl">@Card.Key</a>
         <RiskBadge Risk="Card.Risk" />
-        <span class="status-label"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
+        <span class="status-label" data-card-evidence="@(Card.GatheringEvidence ? "" : null)"><span class="status-dot" aria-hidden="true"></span>@StatusText</span>
     </div>
     <p class="card-title">@Card.Title</p>
     @if (ProjectName is not null)
@@ -31,6 +31,10 @@
                 <div class="progress-fill" style="width: @ProgressPercent%"></div>
             </div>
         </div>
+    }
+    @if (Card.EvidenceIssues)
+    {
+        <p class="card-evidence-issues" data-evidence-issues>Evidence: issues found</p>
     }
     @if (Card.BlockedReason is { Length: > 0 } reason)
     {
@@ -77,8 +81,12 @@
 
     private string StatusText => StatusLabel(Card);
 
-    /// <summary>The card's status; "Reviewing" while an active auto gate is still with the reviewer.</summary>
-    public static string StatusLabel(BoardCard card) => card.Reviewing ? "Reviewing" : StatusLabel(card.Status);
+    /// <summary>
+    /// The card's status; "Reviewing" while an active auto gate is still with the reviewer, "Gathering evidence" while
+    /// the gate's evidence is still owed (the card still waits on the developer).
+    /// </summary>
+    public static string StatusLabel(BoardCard card) =>
+        card.Reviewing ? "Reviewing" : card.GatheringEvidence ? "Gathering evidence" : StatusLabel(card.Status);
 
     public static string StatusLabel(StageStatus status) => status switch
     {

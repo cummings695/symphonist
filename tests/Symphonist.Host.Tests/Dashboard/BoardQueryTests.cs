@@ -429,6 +429,40 @@ public sealed class BoardQueryTests : IDisposable
         Assert.Equal("gone", gone.ProjectName);
     }
 
+    private static EvidenceRecord EvidenceAt(Ticket t, DateTimeOffset at, bool hasIssues) =>
+        new(t.Id, t.ProjectId, t.StageId, at, at, "abc", null, hasIssues, null, [], false);
+
+    [Fact]
+    public async Task Card_flags_gathering_evidence_and_latest_issues()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, with: t =>
+        {
+            t.WaitingSince = Now;
+            t.EvidenceDue = true;
+        });
+        var fixedNow = await Seed("ORD-2", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
+        var broken = await Seed("ORD-3", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
+        await store.AddEvidenceAsync(EvidenceAt(fixedNow, Now.AddHours(-1), true), default);
+        await store.AddEvidenceAsync(EvidenceAt(fixedNow, Now, false), default); // the latest has none
+        await store.AddEvidenceAsync(EvidenceAt(broken, Now, true), default);
+
+        var board = await query.LoadBoardAsync(null, default);
+        var cards = board.Columns.SelectMany(c => c.Cards).ToDictionary(c => c.Key);
+
+        Assert.True(cards["ORD-1"].GatheringEvidence);
+        Assert.True(cards["ORD-1"].WaitingOnYou);
+        Assert.False(cards["ORD-2"].GatheringEvidence);
+        Assert.False(cards["ORD-2"].EvidenceIssues);
+        Assert.True(cards["ORD-3"].EvidenceIssues);
+        Assert.Equal(3, board.Counts.WaitingOnYou);
+
+        var detail = await query.LoadTicketAsync("orders", "ORD-2", default);
+        Assert.False(detail!.Card.EvidenceIssues);
+        Assert.Equal([Now, Now.AddHours(-1)], detail.Evidence.Select(e => e.At));
+        Assert.True((await query.LoadTicketAsync("orders", "ORD-1", default))!.Card.GatheringEvidence);
+        Assert.True((await query.LoadTicketAsync("orders", "ORD-3", default))!.Card.EvidenceIssues);
+    }
+
     [Fact]
     public async Task Missing_ticket_detail_is_null()
     {
