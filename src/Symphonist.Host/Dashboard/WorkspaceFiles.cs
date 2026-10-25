@@ -18,7 +18,9 @@ public sealed record WorkspaceFileResult(string? Text, string? Problem, bool Pat
 /// resolve inside the workspace. Neither the file nor any folder from the workspace down to it may be a link (which could
 /// point anywhere on the host). The agent may still be running in the workspace and could swap a folder or the file for a
 /// link after those checks, so the file is opened first and the real path of the open handle must be inside the
-/// workspace's real path; the text is then read from that same handle.
+/// workspace's real path; the text is then read from that same handle. Where the handle's path cannot be obtained
+/// (macOS), the real path of the requested name, resolved after opening, must be inside instead (see
+/// <see cref="CheckOpened"/>).
 /// </remarks>
 public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log = null)
 {
@@ -33,6 +35,12 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
 
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    /// <summary>Whether this system tells the real path of an open file (Windows, Linux); macOS does not.</summary>
+    internal static readonly bool HandlePathSupported = OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+
+    /// <summary>Check the open handle's real path (default where supported), else the requested name's; a test switch.</summary>
+    internal bool UseHandlePath { get; init; } = HandlePathSupported;
 
     private static readonly HashSet<string> DeviceNames = new(
         ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
@@ -73,12 +81,12 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
             if (!file.Exists) return new(null, Missing);
             if (file.Length > MaxBytes) return new(null, TooLarge);
 
-            if (RealDirectoryPath(workspace) is not { } realWorkspace) return new(null, CannotVerify);
+            if (RealPath(workspace) is not { } realWorkspace) return new(null, CannotVerify);
             await using var stream = new FileStream(full, new FileStreamOptions
             {
                 Mode = FileMode.Open, Access = FileAccess.Read, Share = FileShare.Read, Options = FileOptions.Asynchronous,
             });
-            if (CheckOpened(stream.SafeFileHandle, realWorkspace) is { } problem) return new(null, problem);
+            if (CheckOpened(stream.SafeFileHandle, full, realWorkspace, UseHandlePath) is { } problem) return new(null, problem);
 
             // Read at most one byte past the limit, in case the file grew since it was measured.
             var buffer = new byte[MaxBytes + 1];
@@ -108,9 +116,15 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
     /// Why the open file must not be shown, or null when its real location is inside <paramref name="realWorkspace"/> and
     /// (where the system tells) it has no other hard link.
     /// </summary>
-    internal static string? CheckOpened(SafeFileHandle handle, string realWorkspace)
+    /// <param name="requestedPath">The path the file was opened by.</param>
+    /// <param name="useHandlePath">
+    /// True: the real path of the open handle, which no later swap can change. False (macOS): the real path of
+    /// <paramref name="requestedPath"/>, resolved after opening. That narrows the race but does not close it: a folder could
+    /// be swapped for a link before the open and swapped back before this check.
+    /// </param>
+    internal static string? CheckOpened(SafeFileHandle handle, string requestedPath, string realWorkspace, bool useHandlePath)
     {
-        if (RealPathOf(handle) is not { } real) return CannotVerify;
+        if ((useHandlePath ? RealPathOf(handle) : RealPath(requestedPath)) is not { } real) return CannotVerify;
         if (!IsInside(realWorkspace, real)) return Linked;
         // A second hard link could be a file outside the workspace. Only Windows is checked: the link count on Linux
         // and macOS needs fstat, whose struct layout differs per platform. (Container agents cannot link to host files.)
@@ -126,19 +140,19 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
             return new FileInfo($"/proc/self/fd/{handle.DangerousGetHandle()}").LinkTarget is { } target && Path.IsPathRooted(target)
                 ? target
                 : null;
-        // macOS would need fcntl(F_GETPATH), a variadic call P/Invoke cannot make safely on arm64: refuse (fail closed).
+        // macOS would need fcntl(F_GETPATH), a variadic call P/Invoke cannot make safely on arm64.
         return null;
     }
 
-    /// <summary>The real path (links resolved) of an existing directory, or null when this system cannot tell.</summary>
-    internal static string? RealDirectoryPath(string directory)
+    /// <summary>The real path (links resolved) of an existing file or directory, or null when it cannot be resolved.</summary>
+    internal static string? RealPath(string path)
     {
         if (OperatingSystem.IsWindows())
         {
-            using var handle = Windows.OpenDirectory(directory);
+            using var handle = Windows.OpenForAttributes(path);
             return handle.IsInvalid ? null : Windows.FinalPath(handle);
         }
-        return Unix.RealPath(directory);
+        return Unix.RealPath(path);
     }
 
     /// <summary>One path segment (a project id or ticket key) that cannot climb or name a root.</summary>
@@ -175,7 +189,7 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
         private const uint OpenExisting = 3;
         private const uint FileFlagBackupSemantics = 0x02000000; // required to open a directory
 
-        public static SafeFileHandle OpenDirectory(string path) =>
+        public static SafeFileHandle OpenForAttributes(string path) =>
             CreateFileW(path, FileReadAttributes, (uint)(FileShare.ReadWrite | FileShare.Delete), IntPtr.Zero, OpenExisting,
                 FileFlagBackupSemantics, IntPtr.Zero);
 
