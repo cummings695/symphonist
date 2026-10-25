@@ -126,9 +126,10 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
 
         if (t.PullRequestId is { } existingPr)
         {
+            // The tracker comment first: if it throws the stage is retried, and replies already posted would be posted again.
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
             string? replyEvent = null;
             if (fixRun) replyEvent = await ReplyAsync(io.SourceControl, existingPr, feedback, run, ct);
-            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
             return new ExecutionResult(ExecutionStatus.Completed, Event: replyEvent);
         }
 

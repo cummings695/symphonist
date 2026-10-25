@@ -803,6 +803,25 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(TrackerComments.Sign("PR updated"), Assert.Single(tracker.Comments).Markdown);
     }
 
+    [Fact] public async Task Tracker_failure_before_replies_does_not_duplicate_them()
+    {
+        tracker.CommentError = new HttpRequestException("tracker down");
+        agent.Results.Enqueue(FixResult(("issue:1", "a")));
+        var t = FixTicket(Mine("issue:1"));
+
+        var failed = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Failed, failed.Status);
+        Assert.Empty(scm.Replies); // nothing posted yet: the retry posts each reply once
+
+        tracker.CommentError = null;
+        agent.Results.Enqueue(FixResult(("issue:1", "a")));
+        var retried = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, retried.Status);
+        Assert.Equal("issue:1", Assert.Single(scm.Replies).CommentId);
+    }
+
     [Fact] public async Task Without_pr_feedback_implement_is_unchanged()
     {
         var t = At("implement");
