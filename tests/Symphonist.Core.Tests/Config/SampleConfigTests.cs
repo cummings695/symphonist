@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+using Symphonist.Integrations.GitHub;
 using Symphonist.Integrations;
 using Symphonist.Core.Config;
 
@@ -24,5 +26,36 @@ public class SampleConfigTests
         Assert.Equal(ReviewMode.Off, p.Review.Mode);
         Assert.All(p.Pipeline, s => Assert.True(s.Gate is GatePolicy.None or GatePolicy.Human));
         Assert.Equal("In Review", p.Stage("implement").OnGateStatus);
+    }
+
+    [Fact]
+    public void GitHub_example_project_loads()
+    {
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders-github.example.yaml"), BuiltInProviders.Registry);
+        var tracker = Assert.IsType<GitHubProjectsTrackerConfig>(p.Tracker);
+        var repo = Assert.IsType<GitHubRepoConfig>(p.Repo);
+        Assert.IsType<GitHubActionsConfig>(p.Build);
+        Assert.Equal(tracker.TokenSecret, repo.TokenSecret);
+        Assert.Equal(StageKind.Done, p.Pipeline[^1].Kind);
+    }
+
+    [Fact]
+    public void Jira_tracker_with_github_repo_loads()
+    {
+        var text = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"));
+        const string github = "repo:\n  type: github\n  owner: acme\n  repo: orders\n  localPath: C:/src/acme-orders\n"
+            + "  tokenSecret: github-acme\n\nbuild:\n  type: github-actions\n\nagent:";
+        var swapped = Regex.Replace(text, @"(?ms)^repo:.*?^agent:", github);
+        Assert.NotEqual(text, swapped);
+        var path = Path.Combine(Path.GetTempPath(), $"symphonist-mixed-{Guid.NewGuid():N}.yaml");
+        File.WriteAllText(path, swapped);
+        try
+        {
+            var p = ProjectConfigLoader.Load(path, BuiltInProviders.Registry);
+            Assert.Equal("jira", p.Tracker.Type);
+            Assert.IsType<GitHubRepoConfig>(p.Repo);
+            Assert.IsType<GitHubActionsConfig>(p.Build);
+        }
+        finally { File.Delete(path); }
     }
 }

@@ -1,0 +1,68 @@
+# Example Symphonist project that uses GitHub for everything: a GitHub Projects board, a GitHub repository and GitHub
+# Actions. Copy to ~/.symphonist/projects/<anything>.yaml (or $SYMPHONIST_HOME/projects/) and replace the placeholder
+# values. Field names are camelCase. Invalid files are logged and skipped by the host. See orders.example.yaml for the
+# Jira + Bitbucket version and for the fields not repeated here (review, prompts, ...). The three slots can be mixed
+# (for example Jira with a GitHub repo); build.type: github-actions needs repo.type: github.
+
+id: orders-github               # unique project id; used in CLI commands (symphonist show orders-github orders-123)
+name: Orders (Acme, GitHub)     # display name (defaults to id)
+
+tracker:
+  type: github-projects         # "jira" or "github-projects"
+  owner: acme                   # organization or user that owns the Project
+  project: 7                    # Project (v2) number, from the board URL: github.com/orgs/acme/projects/7
+  tokenSecret: github-acme      # secret holding the GitHub token: symphonist secret set github-acme
+  # Issues Symphonist works on: open issues on the board, assigned to the token's user, carrying this label. An issue
+  # that stops matching (closed, unassigned, label removed, moved to another column) is Blocked
+  # ("no longer matches tracker query").
+  label: Claude
+  # assignee: me                # default: me (the token's user); the only supported value
+  # statusField: Status         # single-select board field used as the status; default: Status
+  # Columns to pick up. Default (also when this is empty: "statuses: []" falls back to the default): every status the
+  # pipeline below names, except the done stage's onEnterStatus. Every status the pipeline names must be an option of
+  # statusField, or the query fails naming the missing ones.
+  # statuses: [Backlog, Planned, In Progress, In Review]
+  # Issue repositories to pick up, as owner/repo. Default: this project's repo (repo.owner/repo.repo).
+  # repositories: [acme/orders]
+
+repo:
+  type: github                  # "bitbucket" or "github"
+  owner: acme                   # user or organization that owns the repository
+  repo: orders                  # repository name
+  # Existing local clone (placeholder: replace with yours). Use an absolute path: a relative path resolves against the
+  # projects folder (the folder holding this file), and "~" is not expanded.
+  localPath: C:/src/acme-orders
+  mainBranch: main              # default: main (feature PRs target it)
+  productionBranch: production  # default: production (release PRs target it)
+  tokenSecret: github-acme      # the same secret can serve the tracker and the repo (one token for all of GitHub)
+  # mergeStrategy: merge        # merge | squash | rebase; default: merge
+
+build:
+  type: github-actions          # build/release status is read from GitHub Actions runs of the repo above
+  # timeoutMinutes: 45          # default: 45
+  # Optional workflow files (names under .github/workflows) that count for each stage. Each listed workflow must have
+  # a run on the commit, or the stage keeps waiting until the timeout. Default: every workflow run on the commit counts.
+  # buildWorkflows: [ci.yml]      # build stage (the merge commit on mainBranch)
+  # deployWorkflows: [deploy.yml] # deploy stage (the merge commit on productionBranch)
+
+agent:
+  type: claude-code             # only "claude-code" is supported
+  # isolation: container        # default: container (Docker sandbox). "host" runs claude directly on this machine;
+  #                             # host isolation REQUIRES allowedTools, e.g. allowedTools: [Read, Edit, "Bash(git:*)"]
+  # Extra hosts the container may reach, on top of the built-in Claude Code ones. HTTPS/HTTP (TCP 443/80) only.
+  allowedDomains: [api.nuget.org, registry.npmjs.org]
+  # timeoutMinutes: 60          # per agent run; default: 60
+
+# Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
+# maxAttemptsPerStage: 3
+
+# Stages run in order; the last one must be kind "done". The status names below must exist as options of the board's
+# status field (tracker.statusField). The fields are explained in orders.example.yaml.
+pipeline:
+  - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
+  - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
+  - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
+  - { id: build,     kind: build }
+  - { id: release,   kind: release,   gate: human }
+  - { id: deploy,    kind: deploy }
+  - { id: done,      kind: done,      onEnterStatus: Done }

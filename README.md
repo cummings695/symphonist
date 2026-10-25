@@ -12,7 +12,8 @@ the `symphonist` CLI talks to it over a local API.
 - The `claude` CLI, logged in (used once to create a long-lived token).
 - git, with credentials for Bitbucket already working on this machine. Symphonist pushes from the host with your git
   credentials; they are never given to the agent.
-- A Jira Cloud account and a Bitbucket Cloud account for the project you want to automate.
+- A Jira Cloud account and a Bitbucket Cloud account for the project you want to automate, or a GitHub account (github.com)
+  if the project uses GitHub Projects, a GitHub repository and GitHub Actions. The slots can be mixed, see step 4.
 
 ## One-time setup
 
@@ -44,12 +45,37 @@ is never taken from arguments.
    The names `jira-<id>` and `bitbucket-<id>` are whatever you put in `tracker.tokenSecret` and `repo.tokenSecret` of the
    project file; `claude-code-token` is fixed.
 
-4. Project file: copy `samples/projects/orders.example.yaml` to `~/.symphonist/projects/<name>.yaml` and edit it. The
+4. GitHub (instead of, or next to, Jira and Bitbucket): create one GitHub token and store it. One token and one
+   `tokenSecret` can serve all three GitHub slots (the Projects board, the repository and Actions).
+
+   ```
+   symphonist secret set github-<id>
+   ```
+
+   - Personal access token (classic): scopes `repo` and `project`. This works for everything, including boards owned by a
+     user account, and is the simplest choice.
+   - Fine-grained personal access token: works for boards owned by an organization. Set the resource owner to the
+     organization and grant these repository permissions on the repo: Issues read/write, Pull requests read/write,
+     Contents read/write (merging a pull request needs Contents write), Actions read, plus the organization permission
+     Projects read/write. GitHub's docs list "access Projects owned by a user account" as a fine-grained token gap, so a
+     board under a personal account needs a classic token.
+
+   GitHub's docs on these gaps say they are not permanent, so re-check them if you want a fine-grained token for a
+   personal board.
+
+5. Project file: copy `samples/projects/orders.example.yaml` (Jira and Bitbucket) or
+   `samples/projects/orders-github.example.yaml` (all GitHub) to `~/.symphonist/projects/<name>.yaml` and edit it. The
    example documents every field. The host reads `*.yaml` / `*.yml` from the `projects` folder of `$SYMPHONIST_HOME`
    (default `~/.symphonist`). An invalid file is logged and skipped, as are all files declaring the same project `id`;
    other projects still load. Projects are loaded when the host starts, so restart it after editing.
 
-5. The CLI is packaged as a .NET tool named `symphonist`. Either run it from source,
+   Each of `tracker`, `repo` and `build` picks its provider with `type`, and you can mix them: for example a Jira
+   tracker with a GitHub repository, or a GitHub Projects board with a Bitbucket repository. The one rule is that the
+   build provider is tied to the repo host: `build.type: github-actions` needs `repo.type: github`, and
+   `bitbucket-pipelines` needs `repo.type: bitbucket`. Types: tracker `jira` | `github-projects`; repo `bitbucket` |
+   `github`; build `bitbucket-pipelines` | `github-actions`.
+
+6. The CLI is packaged as a .NET tool named `symphonist`. Either run it from source,
    `dotnet run --project src/Symphonist.Cli -- <command>`, or pack and install it:
 
    ```
