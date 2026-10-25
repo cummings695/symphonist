@@ -664,9 +664,16 @@ public sealed class OrchestratorTests : IDisposable
         Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: A, B"));
         time.Advance(TimeSpan.FromMinutes(10));
         var o = Create();
-        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ =>
+        {
+            started.TrySetResult();
+            return new TaskCompletionSource<AgentRunResult>().Task;
+        };
 
         await o.TickAsync(CancellationToken.None);
+        // The run is started by the tick but proceeds after a yield: wait for it to reach the agent.
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         var t = store.Single("ORD-1");
         Assert.Equal(("triage", StageStatus.Running, "answers: A, B"), (t.StageId, t.Status, t.Feedback));
