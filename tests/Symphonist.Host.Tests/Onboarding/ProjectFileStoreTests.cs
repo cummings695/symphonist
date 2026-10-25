@@ -126,6 +126,39 @@ public sealed class ProjectFileStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Save_refuses_an_id_differing_only_by_case()
+    {
+        home.WriteProject("acme.yaml", TestHome.ProjectYaml("Orders"));
+        home.WriteProject("Billing.yaml", "not a project yet");
+        registry.Reload();
+
+        var orders = await SaveNew(Form("orders"));
+        var billing = await SaveNew(Form("billing"));
+
+        Assert.Equal(["project 'orders' differs only by case from the existing 'Orders'; pick another id"], orders.Errors);
+        Assert.False(File.Exists(PathOf("orders.yaml")));
+        Assert.False(billing.Saved);
+        Assert.Single(billing.Errors, e => e.StartsWith("project 'billing' ", StringComparison.Ordinal));
+        Assert.Equal("not a project yet", File.ReadAllText(PathOf("Billing.yaml")));
+    }
+
+    [Fact]
+    public async Task Changed_on_disk_is_reported_even_when_the_new_text_cannot_be_spliced()
+    {
+        var loaded = ProjectYamlWriter.NewFile(Form("orders"), Providers);
+        var original = Existing("orders.yaml", loaded);
+        var handEdited = loaded + "\nname: Second name\n"; // a repeated key the splicer refuses
+        File.WriteAllText(PathOf("orders.yaml"), handEdited);
+        var edited = original.Clone();
+        edited.MaxAttemptsPerStage = 5;
+
+        var result = await SaveExisting("orders.yaml", original, edited, loaded);
+
+        Assert.Equal(["the file changed on disk since you opened it; reload the page"], result.Errors);
+        Assert.Equal(handEdited, File.ReadAllText(PathOf("orders.yaml")));
+    }
+
+    [Fact]
     public async Task Save_refuses_when_file_changed_since_loaded()
     {
         var loaded = ProjectYamlWriter.NewFile(Form("orders"), Providers);

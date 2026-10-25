@@ -194,8 +194,29 @@ public class ProjectConfigLoaderTests
     }
 
     [Theory]
+    [InlineData("CON")]
+    [InlineData("con")]
+    [InlineData("Prn")]
+    [InlineData("aux")]
+    [InlineData("NUL")]
+    [InlineData("com0")]
+    [InlineData("COM9")]
+    [InlineData("lpt1")]
+    [InlineData("CONIN$")]
+    [InlineData("conout$")]
+    public void Windows_device_name_id_is_rejected(string id)
+    {
+        Assert.False(ProjectConfigLoader.IsValidProjectId(id));
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(WithId(id)));
+        Assert.Contains($"invalid id '{id}': a reserved device name on Windows", ex.Message);
+    }
+
+    [Theory]
     [InlineData("orders")]
     [InlineData("Acme_Orders-2")]
+    [InlineData("console")]
+    [InlineData("com10")]
+    [InlineData("lpt")]
     [InlineData("orders-github")]
     public void Safe_project_id_is_accepted(string id) => Assert.Equal(id, LoadYaml(WithId(id)).Id);
 

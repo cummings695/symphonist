@@ -60,6 +60,9 @@ public sealed class ProjectFileStore(ProjectRegistry registry, ITicketStore stor
             try
             {
                 current = File.ReadAllText(file);
+                // Before Update: a changed file may not splice, and that message would hide the real reason.
+                if (current != request.LoadedText)
+                    return Refused("the file changed on disk since you opened it; reload the page");
                 text = ProjectYamlWriter.Update(current, request.Original, edited, providers);
             }
             catch (ProjectYamlEditException e)
@@ -70,7 +73,6 @@ public sealed class ProjectFileStore(ProjectRegistry registry, ITicketStore stor
             {
                 return Refused($"cannot read {Path.GetFileName(file)}: {e.Message}");
             }
-            if (current != request.LoadedText) return Refused("the file changed on disk since you opened it; reload the page");
         }
         else
         {
@@ -97,9 +99,19 @@ public sealed class ProjectFileStore(ProjectRegistry registry, ITicketStore stor
             return Refused(e.Message);
         }
 
-        if (request.ExistingFile is null
-            && (registry.Projects.Any(p => p.Id == config.Id) || File.Exists(file)))
-            return Refused($"project '{config.Id}' already exists");
+        if (request.ExistingFile is null)
+        {
+            if (registry.Projects.Any(p => p.Id == config.Id) || File.Exists(file))
+                return Refused($"project '{config.Id}' already exists");
+            // Ids differing only by case would share folders and files on Windows and macOS.
+            var similar = registry.Projects.FirstOrDefault(p => string.Equals(p.Id, config.Id, StringComparison.OrdinalIgnoreCase))?.Id
+                ?? (Directory.Exists(directory)
+                    ? Directory.EnumerateFiles(directory).Select(Path.GetFileName)
+                        .FirstOrDefault(f => string.Equals(f, fileName, StringComparison.OrdinalIgnoreCase))
+                    : null);
+            if (similar is not null)
+                return Refused($"project '{config.Id}' differs only by case from the existing '{similar}'; pick another id");
+        }
 
         var stages = config.Pipeline.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
         var stranded = (await store.ListAsync(config.Id, ct))

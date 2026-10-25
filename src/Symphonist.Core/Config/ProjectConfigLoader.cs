@@ -46,7 +46,16 @@ public static partial class ProjectConfigLoader
     private static partial Regex ProjectId();
 
     /// <summary>The id keys every stored ticket and names work and log folders, so only plain names are accepted.</summary>
-    public static bool IsValidProjectId(string id) => ProjectId().IsMatch(id);
+    public static bool IsValidProjectId(string id) => ProjectId().IsMatch(id) && !IsReservedDeviceName(id);
+
+    /// <summary>
+    /// Windows device names (CON, PRN, AUX, NUL, COM0-9, LPT0-9, CONIN$, CONOUT$; any case): the id names the project's
+    /// file and folders, which Windows cannot create under these names.
+    /// </summary>
+    public static bool IsReservedDeviceName(string id) =>
+        id.ToUpperInvariant() is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$"
+        || (id.Length == 4 && (id.StartsWith("COM", StringComparison.OrdinalIgnoreCase)
+            || id.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) && char.IsAsciiDigit(id[3]));
 
     public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory, ProviderRegistry providers) =>
         ProjectFiles(projectsDirectory).Select(f => Load(f, providers)).ToList();
@@ -65,6 +74,8 @@ public static partial class ProjectConfigLoader
     private static ProjectConfig Map(Dto d, string dir, ProviderRegistry providers)
     {
         var id = Required(d.Id, "id");
+        if (IsReservedDeviceName(id))
+            throw new ProjectConfigException($"invalid id '{id}': a reserved device name on Windows; pick another id");
         if (!IsValidProjectId(id))
             throw new ProjectConfigException(
                 $"invalid id '{id}': use letters, digits, '-' and '_', starting with a letter or digit (at most 64)");
