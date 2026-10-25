@@ -132,6 +132,27 @@ public sealed class DockerStartupTests : IDisposable
     }
 
     [Fact]
+    public async Task Image_of_a_project_added_after_startup_is_refused_until_a_check_enables_it()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        var hash = DockerLauncher.ContextHash(context);
+        processes.OnRun = s => Verb(s) switch
+        {
+            "image inspect" => new ProcessResult(0, hash, "", false),
+            _ => new ProcessResult(0, "", "", false),
+        };
+
+        await StartAsync();
+
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request()).FileName);
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request("acme/agent:9")));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        launcher.EnableImage("acme/agent:9");
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request("acme/agent:9")).FileName);
+    }
+
+    [Fact]
     public async Task Leftover_cleanup_failure_does_not_stop_startup()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
