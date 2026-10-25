@@ -13,3 +13,7 @@ While a ticket waits at a gate (`AwaitingApproval`), a new tracker comment from 
 - Each comment triggers at most one rerun (remember the last processed comment id/timestamp per ticket).
 - Works for every gate, including triage (which today has no Jira-only way to rerun: it has no `onEnterStatus` and no earlier stage).
 - Approval still follows the gate's policy; deciding "the answers are sufficient, move on" automatically belongs with the risk reviewer (plan 3).
+
+## "Save the lesson" on send-back / risk override (tabled 2026-10-25)
+
+Roadmap plan 5 item, tabled by the developer until Symphonist has been used longer: real send-backs will show what kinds of corrections repeat (new risk area, prompt note, something else), which decides what a saved lesson turns into. Spec reference: `specs/2026-10-21-symphonist-design.md` section 8, "Feedback sticks".
