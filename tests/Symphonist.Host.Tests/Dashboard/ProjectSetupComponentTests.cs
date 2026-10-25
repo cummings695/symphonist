@@ -1,6 +1,8 @@
 using System.Text.Json;
 using AngleSharp.Dom;
 using Bunit;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -402,6 +404,25 @@ public sealed class ProjectSetupComponentTests : IDisposable
         cut.Find("#tracker-jql").Change("labels = Mine");
         cut.Find("#tracker-projectKey").Change("ORD");
         Assert.Equal("labels = Mine", cut.Find("#tracker-jql").GetAttribute("value"));
+    }
+
+    [Fact]
+    public async Task Prerendering_shows_loading_and_opens_no_session()
+    {
+        WriteProject("orders");
+        var existing = service.Open(null);
+        // Static rendering, as during prerender: OnAfterRender never runs.
+        await using var renderer = new HtmlRenderer(ctx.Services, NullLoggerFactory.Instance);
+
+        var html = await renderer.Dispatcher.InvokeAsync(async () =>
+            (await renderer.RenderComponentAsync<ProjectSetup>(
+                ParameterView.FromDictionary(new Dictionary<string, object?> { ["Id"] = "orders" }))).ToHtmlString());
+
+        Assert.Contains("Loading the setup", html);
+        Assert.Same(existing, service.Current); // not replaced by a page the browser never connected to
+        var cut = Render("orders");
+        Assert.Equal("orders", service.Current!.ProjectId);
+        Assert.Empty(cut.FindAll("[data-loading]"));
     }
 
     [Fact]

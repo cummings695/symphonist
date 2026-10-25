@@ -305,6 +305,10 @@
             </div>
         </div>
     }
+    else
+    {
+        <p class="hint" role="status" data-loading>Loading the setup…</p>
+    }
 </div>
 
 @code {
@@ -327,6 +331,7 @@
     private OnboardingSession? session;
     private bool opened;
     private string? openedFor;
+    private bool openPending; // the session is opened once the circuit is interactive, never while prerendering
     private bool notFound;
     private string? openError;
     private string? ended;
@@ -387,6 +392,23 @@
         secretStates.Clear();
         Chrome.ClearForNavigation(); // the previous page's message and errors
         Chrome.SetPage(Id is null ? "Add project" : $"Set up {Id}", Id);
+        openPending = true;
+    }
+
+    /// <summary>
+    /// Opens the session after the first interactive render: prerendering (which never runs this) must not start,
+    /// replace or reload a session for a page the browser has not connected to yet.
+    /// </summary>
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!openPending) return;
+        openPending = false;
+        Open();
+        StateHasChanged();
+    }
+
+    private void Open()
+    {
         try
         {
             session = Service.Open(Id);
