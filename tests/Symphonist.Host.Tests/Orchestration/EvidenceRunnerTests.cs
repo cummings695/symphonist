@@ -280,27 +280,31 @@ public sealed class EvidenceRunnerTests : IDisposable
         tempDirs.Add(ws);
         git.WorkspacePath = ws;
         var shots = Path.Combine(ws, EvidenceRunner.OutputFolder, "screenshots");
-        Directory.CreateDirectory(Path.Combine(shots, "sub"));
-        for (var i = 1; i <= 25; i++) File.WriteAllBytes(Path.Combine(shots, $"s{i:00}.png"), [1, 2, (byte)i]);
-        File.WriteAllBytes(Path.Combine(shots, "big.png"), new byte[6 * 1024 * 1024]);
-        File.WriteAllText(Path.Combine(shots, "notes.txt"), "not an image");
-        File.WriteAllBytes(Path.Combine(shots, "-dash.png"), [1]);
-        File.WriteAllBytes(Path.Combine(shots, "sub", "a.png"), [1]);
         var secret = Path.Combine(ws, "secret.txt");
-        File.WriteAllText(secret, "secret");
         var symlinked = false;
-        try
+        // What the evidence agent writes during its run (the folder is cleared before the run).
+        agent.OnRun = _ =>
         {
-            File.CreateSymbolicLink(Path.Combine(shots, "a-link.png"), secret);
-            symlinked = true;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            // Windows without developer mode cannot create symlinks; the rest of the test still runs.
-        }
-        agent.Results.Enqueue(Evidence(ReportJson(
-            ("first", "s01.png"), ("big", "big.png"), ("over limit", "s25.png"), ("link", "a-link.png"),
-            ("never written", "missing.png"), ("no shot", null))));
+            Directory.CreateDirectory(Path.Combine(shots, "sub"));
+            for (var i = 1; i <= 25; i++) File.WriteAllBytes(Path.Combine(shots, $"s{i:00}.png"), [1, 2, (byte)i]);
+            File.WriteAllBytes(Path.Combine(shots, "big.png"), new byte[6 * 1024 * 1024]);
+            File.WriteAllText(Path.Combine(shots, "notes.txt"), "not an image");
+            File.WriteAllBytes(Path.Combine(shots, "-dash.png"), [1]);
+            File.WriteAllBytes(Path.Combine(shots, "sub", "a.png"), [1]);
+            File.WriteAllText(secret, "secret");
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(shots, "a-link.png"), secret);
+                symlinked = true;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                // Windows without developer mode cannot create symlinks; the rest of the test still runs.
+            }
+            return Evidence(ReportJson(
+                ("first", "s01.png"), ("big", "big.png"), ("over limit", "s25.png"), ("link", "a-link.png"),
+                ("never written", "missing.png"), ("no shot", null)));
+        };
 
         var outcome = await Gather(Implement(RiskLevel.High));
 
@@ -322,6 +326,68 @@ public sealed class EvidenceRunnerTests : IDisposable
         Assert.Null(steps["link"]);
         Assert.Null(steps["never written"]);
         Assert.Null(steps["no shot"]);
+    }
+
+    private string TempWorkspace()
+    {
+        var ws = Path.Combine(Path.GetTempPath(), "symphonist-evidence-ws-" + Guid.NewGuid().ToString("N"));
+        tempDirs.Add(ws);
+        Directory.CreateDirectory(ws);
+        git.WorkspacePath = ws;
+        return ws;
+    }
+
+    [Fact]
+    public async Task Screenshots_committed_on_the_branch_are_not_copied()
+    {
+        var ws = TempWorkspace();
+        var shots = Path.Combine(ws, EvidenceRunner.OutputFolder, "screenshots");
+        Directory.CreateDirectory(shots);
+        File.WriteAllBytes(Path.Combine(shots, "home.png"), [9, 9, 9]); // planted by the implement agent's branch
+        agent.OnRun = _ =>
+        {
+            // The evidence agent writes its own screenshot during the run.
+            Assert.False(File.Exists(Path.Combine(shots, "home.png")));
+            Directory.CreateDirectory(shots);
+            File.WriteAllBytes(Path.Combine(shots, "real.png"), [1]);
+            return Evidence(ReportJson(("planted", "home.png"), ("taken", "real.png")));
+        };
+
+        var outcome = await Gather(Implement(RiskLevel.High));
+
+        Assert.Equal(EvidenceStatus.Gathered, outcome.Status);
+        Assert.Equal([$"{Stamp}/real.png"], outcome.Screenshots);
+        Assert.False(File.Exists(SymphonistPaths.Resolve("evidence", "orders", "ORD-1", Stamp, "home.png")));
+        var steps = outcome.Report!.Walkthrough.Features.Single().Steps.ToDictionary(s => s.Action, s => s.Screenshot);
+        Assert.Null(steps["planted"]);
+        Assert.Equal("real.png", steps["taken"]);
+    }
+
+    [Fact]
+    public async Task Output_folder_link_on_the_branch_is_removed_not_followed()
+    {
+        var ws = TempWorkspace();
+        var outside = Path.Combine(ws + "-outside");
+        tempDirs.Add(outside);
+        Directory.CreateDirectory(Path.Combine(outside, "screenshots"));
+        File.WriteAllBytes(Path.Combine(outside, "screenshots", "home.png"), [9]);
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(ws, EvidenceRunner.OutputFolder), outside);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return; // this OS refuses symlinks (Windows without developer mode)
+        }
+        agent.OnRun = _ => Evidence(ReportJson(("planted", "home.png")));
+
+        var outcome = await Gather(Implement(RiskLevel.High));
+
+        Assert.Equal(EvidenceStatus.Gathered, outcome.Status);
+        Assert.Empty(outcome.Screenshots);
+        Assert.False(Path.Exists(Path.Combine(ws, EvidenceRunner.OutputFolder)));
+        Assert.True(File.Exists(Path.Combine(outside, "screenshots", "home.png"))); // the target is untouched
+        Assert.Null(outcome.Report!.Walkthrough.Features.Single().Steps.Single().Screenshot);
     }
 
     [Fact]

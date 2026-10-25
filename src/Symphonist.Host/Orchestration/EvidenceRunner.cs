@@ -82,6 +82,9 @@ public sealed class EvidenceRunner(IGitWorkspace git, IAgentRunners agents, ITic
         // Always a fresh clone at the pushed head: whatever an earlier run left behind is gone.
         await git.RemoveAsync(p, key, ct);
         var workspace = await git.PrepareAsync(p, key, branch, ct);
+        // The branch was written by the implement agent: anything it committed in the output folder must not pass for
+        // the evidence agent's own screenshots.
+        ClearOutputFolder(workspace);
 
         // Full ref names: a tag or local branch called "origin/main" must not shadow the remote-tracking branch.
         var baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/origin/{p.Repo.MainBranch}", ct);
@@ -281,6 +284,32 @@ public sealed class EvidenceRunner(IGitWorkspace git, IAgentRunners agents, ITic
         }
         TryDelete(target);
         return false;
+    }
+
+    /// <summary>
+    /// Deletes <see cref="OutputFolder"/> from the checkout. A link (or a file) at that path is deleted itself, never
+    /// followed. Throws when it cannot be removed: evidence is not gathered over planted files.
+    /// </summary>
+    private static void ClearOutputFolder(string workspace)
+    {
+        var path = Path.Combine(workspace, OutputFolder);
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(path); }  // the entry itself, not a link's target
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return; }
+
+        if (attributes.HasFlag(FileAttributes.ReparsePoint) || new FileInfo(path).LinkTarget is not null)
+        {
+            // Remove the link only. Directory links need a directory delete on Windows; either way, never recursive.
+            try { File.Delete(path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Directory.Delete(path); }
+        }
+        else if (attributes.HasFlag(FileAttributes.Directory))
+            Directory.Delete(path, recursive: true);  // does not follow links inside the folder
+        else
+            File.Delete(path);
+
+        if (Path.Exists(path) || new FileInfo(path).LinkTarget is not null)
+            throw new IOException($"could not clear {OutputFolder} in the evidence workspace");
     }
 
     private static bool IsLink(FileSystemInfo info) =>
