@@ -72,7 +72,9 @@ is never taken from arguments.
    the board); the setup screen reloads by itself. A ticket whose stage you removed is blocked until you send it back
    to an existing stage. Docker images are prepared when the host starts, so after adding a container project or
    changing its `agent` image or packages by hand, run the container check on the project's setup screen (or restart
-   the host) before its first agent run.
+   the host) before its first agent run. If the host could not prepare images at startup (Docker was down, or no
+   project used containers yet), such a project's runs are refused with "agent image not prepared" until its check
+   passes.
 
    Each of `tracker`, `repo` and `build` picks its provider with `type`, and you can mix them: for example a Jira
    tracker with a GitHub repository, or a GitHub Projects board with a Bitbucket repository. The one rule is that the

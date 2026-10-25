@@ -309,6 +309,44 @@ public sealed class ContainerCheckTests : IDisposable
         Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
     }
 
+    private Task StartupAsync() =>
+        new DockerStartup(new ProjectRegistry(NullLogger<ProjectRegistry>.Instance), docker, launcher,
+            NullLogger<DockerStartup>.Instance).StartAsync(CancellationToken.None);
+
+    [Fact]
+    public async Task After_docker_down_start_a_project_added_later_stays_refused_until_its_own_check()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        var dockerUp = processes.OnRun;
+        processes.OnRun = _ => new ProcessResult(1, "", "cannot connect", false);
+        await StartupAsync();
+        processes.OnRun = dockerUp;
+        // billing is added after startup (hand edit + reload); orders' check passes.
+        var billing = Draft(TestHome.ProjectYaml("billing", image: "acme/agent:7"));
+
+        await check.RunAsync(draft, null, CancellationToken.None);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request(billing.Agent)));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        await check.RunAsync(billing, null, CancellationToken.None);
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(billing.Agent)).FileName);
+    }
+
+    [Fact]
+    public async Task Without_container_projects_at_start_a_project_added_later_is_refused_until_its_check()
+    {
+        home.WriteProject("hr.yaml", TestHome.ProjectYaml("hr", TestHome.HostAgent));
+        await StartupAsync();
+        Assert.Empty(processes.Calls);
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request(draft.Agent)));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        await check.RunAsync(draft, null, CancellationToken.None);
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(draft.Agent)).FileName);
+    }
+
     [Fact]
     public async Task Exception_details_are_one_bounded_line()
     {

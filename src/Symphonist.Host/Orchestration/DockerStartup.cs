@@ -22,7 +22,12 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
             .Select(p => p.Agent)
             .DistinctBy(TryImageFor, StringComparer.Ordinal)
             .ToList();
-        if (images.Count == 0) return;
+        if (images.Count == 0)
+        {
+            // Nothing was prepared: a container project added later runs only once its image has been ensured.
+            launcher.RequirePreparedImages();
+            return;
+        }
 
         if (!await docker.IsAvailableAsync(cancellationToken))
         {
@@ -30,12 +35,8 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
                 IsolationLauncher.DockerNotAvailable);
             launcher.DisableContainers(IsolationLauncher.DockerNotAvailable);
             // A container check later re-enables containers for every project, but only the image it ensured: the
-            // others stay refused rather than running a stale local image (old firewall or entrypoint).
-            foreach (var settings in images)
-            {
-                try { launcher.DisableImage(DockerLauncher.ImageFor(settings), IsolationLauncher.ImageNotPrepared); }
-                catch (ArgumentException) { } // invalid image name: EnsureImage reports it once Docker is back
-            }
+            // others (including those of projects added later) stay refused rather than running a stale local image.
+            launcher.RequirePreparedImages();
             return;
         }
 
@@ -56,6 +57,7 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
             {
                 log.LogInformation("Checking agent image {Image} (first build can take several minutes)", image);
                 await docker.EnsureImageAsync(settings, cancellationToken);
+                launcher.EnableImage(image);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {

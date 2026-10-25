@@ -15,10 +15,19 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
 {
     public const string DockerNotAvailable = "Docker not available";
     public const string ImageNotPrepared =
-        "agent image not prepared (Docker was not running at startup); run the container check";
+        "agent image not prepared since the host started; run the container check on the setup screen";
 
     private readonly ConcurrentDictionary<string, string> imageProblems = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> preparedImages = new(StringComparer.Ordinal);
     private volatile string? containersProblem;
+    private volatile bool onlyPreparedImages;
+
+    /// <summary>
+    /// Fail closed: from now on a container run fails with <see cref="ImageNotPrepared"/> unless its image was
+    /// <see cref="EnableImage">ensured</see> since the host started. Used when startup could not prepare the images
+    /// (Docker was down, or no project used containers yet), so a project added later never runs a stale local image.
+    /// </summary>
+    public void RequirePreparedImages() => onlyPreparedImages = true;
 
     /// <summary>Makes every container run fail with <paramref name="reason"/> (e.g. Docker is not running).</summary>
     public void DisableContainers(string reason) => containersProblem = reason;
@@ -32,8 +41,15 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
     /// <summary>Clears <see cref="DisableContainers"/> (e.g. Docker was started after the host and a check found it).</summary>
     public void EnableContainers() => containersProblem = null;
 
-    /// <summary>Clears <see cref="DisableImage"/> for <paramref name="image"/> (e.g. a check has built it since).</summary>
-    public void EnableImage(string image) => imageProblems.TryRemove(image, out _);
+    /// <summary>
+    /// Records <paramref name="image"/> as ensured (built or verified current) and clears <see cref="DisableImage"/>
+    /// for it (e.g. startup or a check has built it).
+    /// </summary>
+    public void EnableImage(string image)
+    {
+        preparedImages[image] = 0;
+        imageProblems.TryRemove(image, out _);
+    }
 
     public bool ProvidesIsolation(AgentRunRequest request) => For(request).ProvidesIsolation(request);
 
@@ -42,8 +58,11 @@ public sealed class IsolationLauncher(IAgentLauncher host, IAgentLauncher contai
         if (request.Settings.Isolation == Isolation.Container)
         {
             if (containersProblem is { } problem) throw new InvalidOperationException(problem);
-            if (imageProblems.TryGetValue(DockerLauncher.ImageFor(request.Settings), out var imageProblem))
+            var image = DockerLauncher.ImageFor(request.Settings);
+            if (imageProblems.TryGetValue(image, out var imageProblem))
                 throw new InvalidOperationException(imageProblem);
+            if (onlyPreparedImages && !preparedImages.ContainsKey(image))
+                throw new InvalidOperationException(ImageNotPrepared);
         }
         return For(request).Wrap(agentCommand, request);
     }

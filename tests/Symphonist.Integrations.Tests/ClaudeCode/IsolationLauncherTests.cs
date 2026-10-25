@@ -153,4 +153,18 @@ public class IsolationLauncherTests
             () => launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)));
         Assert.Equal("build failed", ex.Message);
     }
+
+    [Fact]
+    public void Required_prepared_images_refuse_others_until_enabled()
+    {
+        var launcher = Real();
+        launcher.RequirePreparedImages();
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        Assert.Equal("claude", launcher.Wrap(new ProcessSpec("claude", ["-p"]), Request(Isolation.Host)).FileName);
+        launcher.EnableImage(DockerLauncher.DefaultImage);
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)).FileName);
+    }
 }
