@@ -2048,6 +2048,276 @@ public sealed class OrchestratorTests : IDisposable
         await reload;
     }
 
+    #region PrComments_*
+
+    private void PrComments(long pr, params PullRequestComment[] comments) => scm.Comments[pr] = [.. comments];
+
+    private static PullRequestComment PrComment(int minutes, string body, bool mine = true, string author = "me",
+        string id = "issue:1") =>
+        new(id, author, mine, Now.AddMinutes(minutes), body);
+
+    private void AllowPrCommentsFromOthers()
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path) + "\nprComments: { fromOthers: true }\n");
+        registry.Reload();
+        Assert.True(registry.Get("orders").PrComments.FromOthers);
+    }
+
+    private Task SeedImplementGate(Action<Ticket>? with = null) =>
+        Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review", t =>
+        {
+            t.PullRequestId = 7;
+            with?.Invoke(t);
+        });
+
+    private const string MergedFirst =
+        "Merged before this could be addressed; open a follow-up ticket if it still needs a change.";
+
+    [Fact] public async Task Pr_comment_reruns_implement_with_pr_feedback()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo to Bar") with { Path = "src/Foo.cs", Line = 3 });
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Running, ""), (t.StageId, t.Status, t.Feedback));
+        var feedback = Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson));
+        Assert.Equal(new PrFeedbackComment("issue:1", "me", true, "rename Foo to Bar", "src/Foo.cs", 3, null), feedback);
+        Assert.Equal(Now.AddMinutes(5), t.PrCommentsHandledAt);
+        Assert.Null(t.ClaudeCommentsHandledAt);
+        var events = store.EventMessages("ORD-1");
+        Assert.Equal(["@claude PR comment from me: rerunning implement", "sent back to implement"], events.Take(2));
+        var decision = Assert.Single(store.GateDecisions);
+        Assert.Equal(("implement", GateDecision.SentBack, false), (decision.StageId, decision.Decision, decision.Auto));
+    }
+
+    [Fact] public async Task Pr_comment_triggers_once()
+    {
+        // The host's clock is ahead: the comment is later than the rerun's StageStartedAt, so only PrCommentsHandledAt
+        // keeps it from triggering again.
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status); // the rerun reached its gate
+        Assert.Null(store.Single("ORD-1").PrFeedbackJson); // used up by the run
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.Single(store.EventMessages("ORD-1"), m => m.StartsWith("@claude PR comment", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Others_comments_ignored_by_default()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude use v3", mine: false, author: "ann"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, null, null), (t.Status, t.PrFeedbackJson, t.PrCommentsHandledAt));
+        Assert.Empty(agent.Requests);
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Others_comments_rerun_without_decision_when_allowed()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7,
+            PrComment(5, "@claude use v3", mine: false, author: "ann"),
+            PrComment(6, "@claude and v4", mine: false, author: "bob", id: "issue:2"),
+            PrComment(7, "@claude also v5", mine: false, author: "ann", id: "issue:3"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, ""), (t.Status, t.Feedback));
+        Assert.Equal(["issue:1", "issue:2", "issue:3"], PrFeedback.FromJson(t.PrFeedbackJson).Select(c => c.Id));
+        Assert.Contains("@claude PR comment from ann, bob: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Empty(store.GateDecisions); // a teammate's comment is not the developer's decision
+    }
+
+    [Fact] public async Task Signed_pr_comment_never_triggers()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude ...\n\n— posted by Symphonist"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(agent.Requests);
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Pr_comment_during_run_applies_at_gate()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.PullRequestId = 7);
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : Task.FromResult(StageResult);
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        PrComments(7, PrComment(1, "@claude also cover refunds"));
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal((StageStatus.Running, null), (store.Single("ORD-1").Status, store.Single("ORD-1").PrFeedbackJson));
+
+        release.SetResult(StageResult);
+        await o.WhenIdleAsync();
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Equal(Now.AddMinutes(1), t.PrCommentsHandledAt);
+        Assert.Contains("@claude PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Tracker_and_pr_comments_combine_into_one_run()
+    {
+        await SeedImplementGate();
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude also cover refunds"));
+        PrComments(7, PrComment(6, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, "also cover refunds"), (t.Status, t.Feedback));
+        Assert.Equal("rename Foo", Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson)).Request);
+        Assert.Equal((Now.AddMinutes(5), Now.AddMinutes(6)), (t.ClaudeCommentsHandledAt, t.PrCommentsHandledAt));
+        var events = store.EventMessages("ORD-1");
+        Assert.Single(events, m => m == "sent back to implement");
+        Assert.Single(events, m => m.StartsWith("@claude", StringComparison.Ordinal));
+        Assert.Contains("@claude PR comment from me: rerunning implement", events);
+        Assert.Single(store.GateDecisions);
+        Assert.Single(agent.Requests);
+    }
+
+    [Fact] public async Task Pr_comment_while_approved_waits_then_merged_first_reply()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Approved, "In Review", t => t.PullRequestId = 7);
+        scm.AddOpen(7, "symphonist/ORD-1");
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "needs 1 approval"));
+        PrComments(7,
+            PrComment(5, "@claude rename Foo"),
+            PrComment(6, "thanks", id: "issue:2"),
+            PrComment(7, TrackerComments.Sign("@claude quoted"), id: "issue:3"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o); // the merge waits: the comment does not rerun an approved stage
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+        Assert.Empty(scm.Replies);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o); // merged
+
+        var t = store.Single("ORD-1");
+        Assert.Equal("build", t.StageId);
+        Assert.Equal([(7L, "issue:1", TrackerComments.Sign(MergedFirst))], scm.Replies);
+        Assert.Equal(Now.AddMinutes(5), t.PrCommentsHandledAt);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o);
+        Assert.Single(scm.Replies);
+    }
+
+    [Fact] public async Task Pr_comment_after_merge_hold_applies()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Approved, "In Review", t =>
+        {
+            t.PullRequestId = 7;
+            t.ApprovedBranch = "symphonist/ORD-1";
+            t.ApprovedHead = "head-old"; // auto-approved on an older commit
+        });
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.AddOpen(7, "symphonist/ORD-1");
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o); // merge held: waits again
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.Contains("@claude PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Empty(scm.Replies);
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Pr_comments_error_does_not_stop_tracker_comments()
+    {
+        await SeedImplementGate();
+        scm.CommentsError = new HttpRequestException("bad paging link");
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(["could not read PR comments: bad paging link"], store.EventMessages("ORD-1")); // once
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude also cover refunds"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, "also cover refunds", null), (t.Status, t.Feedback, t.PrFeedbackJson));
+        Assert.Contains("@claude comment: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Single(store.GateDecisions);
+    }
+
+    [Fact] public async Task Pr_comment_cancels_running_evidence()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the evidence run is in progress
+
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        await o.TickAsync(CancellationToken.None);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        var events = store.EventMessages("ORD-1");
+        Assert.Contains("@claude PR comment from me: rerunning implement", events);
+        Assert.Contains("evidence for implement cancelled: the gate was decided", events);
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(store.Evidence);
+    }
+
+    #endregion
+
     #region Evidence_*
 
     /// <summary><see cref="Configure"/>, with evidence gathered in <paramref name="evidenceMode"/>.</summary>

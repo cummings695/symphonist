@@ -389,33 +389,107 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     /// <summary>
     /// Developer "@claude" comments made since the stage started rerun it, with the comments as feedback, once it waits
-    /// at its gate or is blocked; comments made while it is pending or running wait for that. Returns whether it reran.
+    /// at its gate or is blocked; comments made while it is pending or running wait for that. At implement, "@claude"
+    /// comments on its pull request do too (from teammates as well when the project allows it), combined with the
+    /// tracker's into one run. Returns whether it reran.
     /// </summary>
     private async Task<bool> HandleClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket s,
         DateTimeOffset now, CancellationToken ct)
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Blocked)) return false;
-        var since = t.ClaudeCommentsHandledAt is { } handled && (t.StageStartedAt is not { } started || handled > started)
-            ? handled
-            : t.StageStartedAt; // the later of the two: entering a stage leaves earlier comments behind
+        var since = Later(t.ClaudeCommentsHandledAt, t.StageStartedAt);
         var comments = s.Comments
             .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
             .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body)))
             .Where(c => c.Request is not null)
             .OrderBy(c => c.Created)
             .ToList();
-        if (comments.Count == 0) return false;
+        var prComments = await PrClaudeCommentsAsync(p, io, t, ct);
+        if (comments.Count == 0 && prComments.Count == 0) return false;
 
         var requests = comments.Select(c => c.Request!).Where(r => r.Length > 0).ToList();
-        var feedback = requests.Count > 0 ? string.Join("\n\n", requests) : "(no details given)";
-        await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct); // the cause before its effects
+        var feedback = requests.Count > 0 ? string.Join("\n\n", requests)
+            : comments.Count > 0 ? "(no details given)"
+            : "";
+        await AddEventAsync(t, prComments.Count == 0 // the cause before its effects
+            ? $"@claude comment: rerunning {t.StageId}"
+            : $"@claude PR comment from {string.Join(", ", prComments.Select(c => c.Author).Distinct(StringComparer.Ordinal))}: rerunning {t.StageId}",
+            ct);
         var stageId = t.StageId;
         var outcome = PipelineEngine.SendBack(p, t, feedback, stageId, now);
-        t.ClaudeCommentsHandledAt = comments[^1].Created;
+        // Only the developer's own comments decide the gate round; a teammate's request reruns without deciding it.
+        if (comments.Count == 0 && !prComments.Any(c => c.IsMine)) outcome = outcome with { Decision = null };
+        if (prComments.Count > 0)
+        {
+            t.PrFeedbackJson = PrFeedback.ToJson(prComments.Select(PrFeedback.From).ToList()); // after the send-back clears it
+            t.PrCommentsHandledAt = prComments[^1].Created;
+        }
+        if (comments.Count > 0) t.ClaudeCommentsHandledAt = comments[^1].Created;
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, stageId, outcome, ct);
         return true;
     }
+
+    /// <summary>
+    /// The "@claude" comments on the implement stage's pull request not yet acted on, oldest first; none at other stages.
+    /// A listing error is recorded once and counts as none.
+    /// </summary>
+    private async Task<IReadOnlyList<PullRequestComment>> PrClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io,
+        Ticket t, CancellationToken ct)
+    {
+        if (p.Stage(t.StageId).Kind != StageKind.Implement || t.PullRequestId is not { } prId) return [];
+        try
+        {
+            return PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct),
+                Later(t.PrCommentsHandledAt, t.StageStartedAt), p.PrComments.FromOthers);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Comments of pull request {Id} for {Key} could not be read", prId, t.Key);
+            await AddEventOnceAsync(t, $"could not read PR comments: {e.Message}", ct);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// After implement's pull request merged, tells each "@claude" comment that arrived too late (while the stage was
+    /// approved) that it was not addressed. Best effort: failures are only logged.
+    /// </summary>
+    private async Task ReplyMergedFirstAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, DateTimeOffset? since,
+        CancellationToken ct)
+    {
+        if (t.PullRequestId is not { } prId) return;
+        IReadOnlyList<PullRequestComment> late;
+        try
+        {
+            late = PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct), since,
+                p.PrComments.FromOthers);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Comments of merged pull request {Id} for {Key} could not be read", prId, t.Key);
+            return;
+        }
+        foreach (var c in late)
+        {
+            try
+            {
+                await io.SourceControl.ReplyToPullRequestCommentAsync(prId, c, TrackerComments.Sign(MergedFirst), ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Reply to comment {Comment} on pull request {Id} for {Key} failed", c.Id, prId, t.Key);
+            }
+        }
+        if (late.Count > 0) t.PrCommentsHandledAt = late[^1].Created;
+    }
+
+    private const string MergedFirst =
+        "Merged before this could be addressed; open a follow-up ticket if it still needs a change.";
+
+    /// <summary>The later of the two: entering a stage leaves earlier comments behind.</summary>
+    private static DateTimeOffset? Later(DateTimeOffset? handled, DateTimeOffset? stageStarted) =>
+        handled is { } h && (stageStarted is not { } started || h > started) ? h : stageStarted;
 
     private async Task AdvanceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source, CancellationToken ct)
     {
@@ -511,6 +585,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 switch (result.Status)
                 {
                     case ExecutionStatus.Completed:
+                        if (p.Stage(fromStageId).Kind == StageKind.Implement)
+                        {
+                            // Before advancing: entering the next stage moves StageStartedAt, which the window starts at.
+                            var since = Later(t.PrCommentsHandledAt, t.StageStartedAt);
+                            await ReplyMergedFirstAsync(p, io, t, since, ct);
+                        }
                         outcome = PipelineEngine.PostApprovalCompleted(p, t, now);
                         break;
                     case ExecutionStatus.Failed:
