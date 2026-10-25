@@ -29,7 +29,7 @@ public sealed class OnboardingSession
     /// <summary>Null for a new project.</summary>
     public string? ProjectId { get; }
 
-    /// <summary>Edited by the page.</summary>
+    /// <summary>Edited by the page, on the page's thread only.</summary>
     public ProjectForm Form { get; }
 
     /// <summary><see cref="ProjectForm.From"/> of the loaded config for an existing project; null for a new one.</summary>
@@ -51,6 +51,20 @@ public sealed class OnboardingSession
     /// <summary>Why the last step did not run or did not finish; one bounded line.</summary>
     public string? LastError { get; internal set; }
 
+    /// <summary>
+    /// The host's spelling of the repository name, found by the last connection check and not applied yet
+    /// (see <see cref="OnboardingService.ApplyPendingAdoption"/>).
+    /// </summary>
+    public string? PendingFullName => PendingAdoption?.FullName;
+
+    internal PendingAdoption? PendingAdoption { get; set; }
+
+    /// <summary>The tracker section the last connection check ran with, as the writer renders it.</summary>
+    internal string? CheckedTracker { get; set; }
+
+    /// <summary>Why the session is no longer current; null while it is.</summary>
+    internal string? Ended { get; set; }
+
     internal DateTimeOffset LastUsed { get; set; }
 
     internal bool Saving { get; set; }
@@ -60,12 +74,22 @@ public sealed class OnboardingSession
     internal bool Busy => RunningStep is not null || Saving;
 }
 
+/// <summary>A repository name to adopt, with the repository type and full-name values the check ran with.</summary>
+internal sealed record PendingAdoption(string FullName, string RepoType, IReadOnlyDictionary<string, string?> CheckedValues);
+
+/// <summary>
+/// The session passed in was replaced by another one, saved, or expired; the page must reload. The message says which.
+/// </summary>
+public sealed class OnboardingSessionEndedException(string message) : InvalidOperationException(message);
+
 /// <summary>
 /// The single setup session of this host (one signed-in user): opens a new or existing project's form, runs the
 /// connection checks, the proposal agent and the container check one at a time on the thread pool, writes secrets
 /// straight to <see cref="ISecretStore"/> and saves through <see cref="ProjectFileStore"/>. Nothing reaches the projects
 /// folder or the orchestrator before <see cref="SaveAsync"/>. Only one session is kept, and it is dropped after
-/// <see cref="IdleTimeout"/> without use.
+/// <see cref="IdleTimeout"/> without use (see <see cref="Touch"/>). Actions take the caller's session and throw
+/// <see cref="OnboardingSessionEndedException"/> when it is no longer the current one, so a stale tab never acts on
+/// another tab's form.
 /// </summary>
 public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry providers, SetupChecks checks,
     OnboardingProposer proposer, ContainerCheck container, ProjectFileStore files, ISecretStore secrets,
@@ -74,6 +98,9 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     public static readonly TimeSpan IdleTimeout = TimeSpan.FromHours(8);
 
     private const string Busy = "another setup step is running";
+    private const string Replaced = "this setup was replaced by another one; reload the page";
+    private const string Expired = "this setup expired after 8 hours without use; reload the page";
+    private const string Saved = "this setup was saved; reload the page to edit the project again";
     private const string DraftSource = "setup draft";
 
     private readonly TimeProvider clock = time ?? TimeProvider.System;
@@ -116,6 +143,7 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
             }
             if (current is { Busy: true }) throw new InvalidOperationException(Busy);
             session = projectId is null ? NewSession() : ExistingSession(projectId);
+            if (current is not null) current.Ended = Replaced;
             current = session;
         }
         Changed?.Invoke();
@@ -137,40 +165,102 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
             file, text, clock.GetUtcNow());
     }
 
-    /// <summary>Builds the draft from the form; on a draft error, <see cref="OnboardingSession.LastError"/> is the loader's message.</summary>
-    public Task CheckConnectionsAsync() => StartStep("connections", null, async (session, form, draft, ct) =>
-        session.Connections = await checks.CheckAsync(draft, fullName => AdoptFullName(session, form, fullName), ct));
+    /// <summary>
+    /// Builds the draft from the form; on a draft error, <see cref="OnboardingSession.LastError"/> is the loader's
+    /// message. A repository name the host spells differently (case only) becomes
+    /// <see cref="OnboardingSession.PendingFullName"/>, for the page to apply with <see cref="ApplyPendingAdoption"/>.
+    /// </summary>
+    /// <exception cref="OnboardingSessionEndedException">The session is no longer the current one.</exception>
+    public Task CheckConnectionsAsync(OnboardingSession session) => StartStep(session, "connections", null,
+        async (form, draft, ct) =>
+        {
+            var report = await checks.CheckAsync(draft, fullName => RecordAdoption(session, form, fullName), ct);
+            lock (sync)
+            {
+                session.Connections = report;
+                session.CheckedTracker = TrackerSection(form);
+            }
+        });
 
-    /// <summary>Needs the tracker reached by the connection checks; else LastError "check connections first".</summary>
-    public Task ProposeAsync() => StartStep("proposal",
-        session => session.Connections?.Tracker is null ? "check connections first" : null,
-        async (session, form, draft, ct) =>
+    /// <summary>
+    /// Needs the tracker reached by the connection checks, with the tracker section unchanged since; else LastError
+    /// "check connections first" or "the tracker changed since the connection check; check connections again".
+    /// </summary>
+    /// <exception cref="OnboardingSessionEndedException">The session is no longer the current one.</exception>
+    public Task ProposeAsync(OnboardingSession session) => StartStep(session, "proposal",
+        form => session.Connections?.Tracker is null ? "check connections first"
+            : session.CheckedTracker != TrackerSection(form)
+                ? "the tracker changed since the connection check; check connections again"
+                : null,
+        async (form, draft, ct) =>
             session.Proposal = await proposer.ProposeAsync(draft, form, session.Connections!.Tracker!, ct));
 
-    public Task CheckContainerAsync() => StartStep("container", null, async (session, _, draft, ct) =>
-    {
-        session.ContainerSteps = [];
-        session.ContainerSteps = await container.RunAsync(draft, new StepProgress(steps =>
+    /// <exception cref="OnboardingSessionEndedException">The session is no longer the current one.</exception>
+    public Task CheckContainerAsync(OnboardingSession session) => StartStep(session, "container", null,
+        async (_, draft, ct) =>
         {
-            session.ContainerSteps = steps;
-            Changed?.Invoke();
-        }), ct);
-    });
+            session.ContainerSteps = [];
+            session.ContainerSteps = await container.RunAsync(draft, new StepProgress(steps =>
+            {
+                session.ContainerSteps = steps;
+                Changed?.Invoke();
+            }), ct);
+        });
 
-    /// <summary>Cancels the running step, if any.</summary>
-    public void Cancel()
+    /// <summary>Cancels the session's running step, if any.</summary>
+    public void Cancel(OnboardingSession session)
     {
-        lock (sync) current?.Cancellation?.Cancel();
+        lock (sync) session.Cancellation?.Cancel();
     }
 
-    /// <summary>Saves through <see cref="ProjectFileStore"/>; on success <see cref="Current"/> is null. Refused while a step runs.</summary>
-    public async Task<ProjectSaveResult> SaveAsync()
+    /// <summary>
+    /// Marks the session used (the page calls it on form edits), so editing without running a step does not expire it.
+    /// </summary>
+    /// <exception cref="OnboardingSessionEndedException">The session is no longer the current one.</exception>
+    public void Touch(OnboardingSession session)
     {
-        OnboardingSession session;
+        lock (sync)
+        {
+            EnsureCurrent(session);
+            session.LastUsed = clock.GetUtcNow();
+        }
+    }
+
+    /// <summary>
+    /// Writes <see cref="OnboardingSession.PendingFullName"/> into the form's full-name keys, unless the developer
+    /// changed the repository type or name since the check ran. Call it on the page's own thread: the form is not
+    /// thread-safe. True when the form changed.
+    /// </summary>
+    public bool ApplyPendingAdoption(OnboardingSession session)
+    {
+        PendingAdoption? pending;
+        lock (sync)
+        {
+            pending = session.PendingAdoption;
+            session.PendingAdoption = null;
+        }
+        if (pending is null) return false;
+        var live = session.Form.Repo;
+        if (live.Type != pending.RepoType
+            || pending.CheckedValues.Any(e => !string.Equals(live.Values.GetValueOrDefault(e.Key), e.Value, StringComparison.Ordinal)))
+            return false;
+        var keys = pending.CheckedValues.Keys.ToList();
+        var slash = pending.FullName.IndexOf('/');
+        live.Values[keys[0]] = pending.FullName[..slash];
+        live.Values[keys[1]] = pending.FullName[(slash + 1)..];
+        return true;
+    }
+
+    /// <summary>
+    /// Saves through <see cref="ProjectFileStore"/>; on success <see cref="Current"/> is null. Refused while a step runs.
+    /// </summary>
+    /// <exception cref="OnboardingSessionEndedException">The session is no longer the current one.</exception>
+    public async Task<ProjectSaveResult> SaveAsync(OnboardingSession session)
+    {
         ProjectForm form;
         lock (sync)
         {
-            session = current ?? throw new InvalidOperationException("no setup session is open");
+            EnsureCurrent(session);
             if (session.Busy) return new ProjectSaveResult(false, [$"{Busy}; cancel it or wait for it to finish"], null);
             session.Saving = true;
             session.LastUsed = clock.GetUtcNow();
@@ -190,19 +280,23 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
             lock (sync)
             {
                 session.Saving = false;
-                if (saved && current == session) current = null;
+                if (saved && current == session)
+                {
+                    session.Ended = Saved;
+                    current = null;
+                }
             }
             Changed?.Invoke();
         }
     }
 
     /// <summary>
-    /// The distinct Secret-kind values of the tracker, repo and build sections, plus the agent token in container mode.
+    /// The distinct Secret-kind values of the session's tracker, repo and build sections, plus the agent token in
+    /// container mode.
     /// </summary>
-    public IReadOnlyList<string> SecretNamesInUse()
+    public IReadOnlyList<string> SecretNamesInUse(OnboardingSession session)
     {
-        var form = Current?.Form;
-        if (form is null) return [];
+        var form = session.Form;
         var names = new List<string>();
         Add(form.Tracker, providers.AllTrackers.FirstOrDefault(p => p.Type == form.Tracker.Type)?.Fields);
         Add(form.Repo, providers.AllRepos.FirstOrDefault(p => p.Type == form.Repo.Type)?.Fields);
@@ -226,7 +320,9 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     /// <exception cref="InvalidOperationException">The credential store refused it.</exception>
     public void SetSecret(string name, string value)
     {
-        if (!SecretNames.IsValid(name)) throw new ArgumentException($"invalid secret name '{name}'", nameof(name));
+        // The name is not quoted: a token pasted into the name field must not be echoed back.
+        if (!SecretNames.IsValid(name))
+            throw new ArgumentException("invalid secret name; use lowercase letters, digits and '-'", nameof(name));
         var trimmed = value.Trim();
         if (trimmed.Length == 0) throw new ArgumentException("the secret value must not be empty", nameof(value));
         try
@@ -266,19 +362,17 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     /// Runs <paramref name="work"/> on the thread pool with a draft built from a copy of the form taken now, so the
     /// draft and the form given to the step describe the same config whatever the page edits meanwhile.
     /// </summary>
-    private Task StartStep(string name, Func<OnboardingSession, string?>? precondition,
-        Func<OnboardingSession, ProjectForm, ProjectConfig, CancellationToken, Task> work)
+    private Task StartStep(OnboardingSession session, string name, Func<ProjectForm, string?>? precondition,
+        Func<ProjectForm, ProjectConfig, CancellationToken, Task> work)
     {
-        OnboardingSession session;
         ProjectForm form = null!;
         ProjectConfig draft = null!;
         CancellationTokenSource? cancellation = null;
         lock (sync)
         {
-            DropIfExpired();
-            session = current ?? throw new InvalidOperationException("no setup session is open");
+            EnsureCurrent(session);
             session.LastUsed = clock.GetUtcNow();
-            var refusal = session.Busy ? Busy : precondition?.Invoke(session) ?? TryDraft(session, out form, out draft);
+            var refusal = session.Busy ? Busy : TryDraft(session, out form, out draft) ?? precondition?.Invoke(form);
             if (refusal is not null)
             {
                 session.LastError = refusal;
@@ -298,16 +392,20 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
         {
             try
             {
-                await work(session, form, draft, cancellation.Token);
-            }
-            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-            {
-                session.LastError = "cancelled";
+                await work(form, draft, cancellation.Token);
             }
             catch (Exception e)
             {
-                log?.LogWarning(e, "Setup step {Step} failed", name);
-                session.LastError = Bounded(e.Message);
+                // After a cancel, whatever the dependency threw (not always OperationCanceledException) means "cancelled".
+                if (cancellation.IsCancellationRequested)
+                {
+                    session.LastError = "cancelled";
+                }
+                else
+                {
+                    log?.LogWarning(e, "Setup step {Step} failed", name);
+                    session.LastError = Bounded(e.Message);
+                }
             }
             finally
             {
@@ -343,30 +441,35 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     }
 
     /// <summary>
-    /// Writes the host's spelling into the form's full-name keys, unless the developer changed the repository type or
-    /// name since the check started.
+    /// Records the host's spelling for <see cref="ApplyPendingAdoption"/>; the form itself is left to the page's thread.
     /// </summary>
-    private void AdoptFullName(OnboardingSession session, ProjectForm checkedForm, string fullName)
+    private void RecordAdoption(OnboardingSession session, ProjectForm checkedForm, string fullName)
     {
         var slash = fullName.IndexOf('/');
         if (slash <= 0 || slash == fullName.Length - 1) return;
         var keys = providers.Repo(checkedForm.Repo.Type).FullNameKeys;
         if (keys.Count != 2) return;
-        lock (sync)
-        {
-            var live = session.Form.Repo;
-            if (live.Type != checkedForm.Repo.Type) return;
-            if (keys.Any(k => !string.Equals(live.Values.GetValueOrDefault(k), checkedForm.Repo.Values.GetValueOrDefault(k),
-                    StringComparison.Ordinal)))
-                return;
-            live.Values[keys[0]] = fullName[..slash];
-            live.Values[keys[1]] = fullName[(slash + 1)..];
-        }
+        var values = keys.ToDictionary(k => k, k => checkedForm.Repo.Values.GetValueOrDefault(k), StringComparer.Ordinal);
+        lock (sync) session.PendingAdoption = new PendingAdoption(fullName, checkedForm.Repo.Type, values);
+    }
+
+    private string? TrackerSection(ProjectForm form) =>
+        ProjectYamlWriter.Sections(form, providers).GetValueOrDefault("tracker");
+
+    /// <summary>Call under the lock.</summary>
+    private void EnsureCurrent(OnboardingSession session)
+    {
+        DropIfExpired();
+        if (current != session) throw new OnboardingSessionEndedException(session.Ended ?? Replaced);
     }
 
     private void DropIfExpired()
     {
-        if (current is { Busy: false } session && clock.GetUtcNow() - session.LastUsed > IdleTimeout) current = null;
+        if (current is { Busy: false } session && clock.GetUtcNow() - session.LastUsed > IdleTimeout)
+        {
+            session.Ended = Expired;
+            current = null;
+        }
     }
 
     private static string Bounded(string text) => ReviewerText.Line(text, ReviewerText.MaxSummaryChars);

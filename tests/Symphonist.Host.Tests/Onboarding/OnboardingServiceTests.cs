@@ -76,7 +76,7 @@ public sealed class OnboardingServiceTests : IDisposable
 
     private void SetSecretsOf(OnboardingSession session)
     {
-        foreach (var name in service.SecretNamesInUse()) secrets.Set(name, "s3cret-value");
+        foreach (var name in service.SecretNamesInUse(session)) secrets.Set(name, "s3cret-value");
         Assert.NotEmpty(session.Form.Tracker.Values["tokenSecret"]);
     }
 
@@ -153,9 +153,15 @@ public sealed class OnboardingServiceTests : IDisposable
 
         time.Advance(OnboardingService.IdleTimeout - TimeSpan.FromMinutes(1));
         Assert.Same(first, service.Open("orders"));
-        time.Advance(OnboardingService.IdleTimeout + TimeSpan.FromMinutes(1));
+        time.Advance(OnboardingService.IdleTimeout - TimeSpan.FromMinutes(1));
+        service.Touch(first); // editing the form counts as use
+        time.Advance(OnboardingService.IdleTimeout - TimeSpan.FromMinutes(1));
+        Assert.Same(first, service.Current);
+        time.Advance(TimeSpan.FromMinutes(2));
 
         Assert.Null(service.Current);
+        var e = Assert.Throws<OnboardingSessionEndedException>(() => service.Touch(first));
+        Assert.Equal("this setup expired after 8 hours without use; reload the page", e.Message);
         Assert.NotSame(first, service.Open("orders"));
     }
 
@@ -169,13 +175,95 @@ public sealed class OnboardingServiceTests : IDisposable
         SetSecretsOf(session);
         discovery.Repository = new RepositoryDiscovery("Acme/Orders", "main", true);
 
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
 
         Assert.Null(session.LastError);
         Assert.NotNull(session.Connections);
+        Assert.Equal("Acme/Orders", session.PendingFullName);
+        Assert.Equal("acme", session.Form.Repo.Values[ownerKey]); // not touched off the page's thread
+
+        Assert.True(service.ApplyPendingAdoption(session));
+
         Assert.Equal("Acme", session.Form.Repo.Values[ownerKey]);
         Assert.Equal("Orders", session.Form.Repo.Values[nameKey]);
+        Assert.Null(session.PendingFullName);
         Assert.Equal("acme", session.Original!.Repo.Values[ownerKey]); // the loaded form is not touched
+        Assert.False(service.ApplyPendingAdoption(session));
+    }
+
+    [Fact]
+    public async Task Adoption_is_skipped_when_the_name_was_edited_since_the_check()
+    {
+        WriteProject("orders");
+        var session = service.Open("orders");
+        SetSecretsOf(session);
+        discovery.Repository = new RepositoryDiscovery("Acme/Orders", "main", true);
+        await service.CheckConnectionsAsync(session);
+
+        session.Form.Repo.Values["slug"] = "billing";
+
+        Assert.False(service.ApplyPendingAdoption(session));
+        Assert.Equal("acme", session.Form.Repo.Values["workspace"]);
+        Assert.Equal("billing", session.Form.Repo.Values["slug"]);
+    }
+
+    [Fact]
+    public async Task Proposal_is_refused_when_the_tracker_changed_since_the_check()
+    {
+        WriteProject("orders");
+        var session = service.Open("orders");
+        SetSecretsOf(session);
+        await service.CheckConnectionsAsync(session);
+
+        session.Form.Tracker.Values["projectKey"] = "BILL";
+        await service.ProposeAsync(session);
+
+        Assert.Equal("the tracker changed since the connection check; check connections again", session.LastError);
+        Assert.Empty(agent.Requests);
+
+        session.Form.Tracker.Values.Remove("projectKey");
+        session.Form.Name = "renamed"; // other sections do not matter
+        agent.Results.Enqueue(Proposal(new { stages = Array.Empty<object>(), risk_areas = Array.Empty<object>() }));
+        await service.ProposeAsync(session);
+
+        Assert.Null(session.LastError);
+        Assert.Single(agent.Requests);
+    }
+
+    [Fact]
+    public async Task Replaced_session_cannot_act()
+    {
+        WriteProject("orders");
+        WriteProject("billing");
+        var orders = service.Open("orders");
+        orders.Form.Name = "edited in the first tab";
+        var billing = service.Open("billing");
+        var billingText = File.ReadAllText(PathOf("billing.yaml"));
+        var ordersText = File.ReadAllText(PathOf("orders.yaml"));
+
+        var save = await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.SaveAsync(orders));
+        var check = await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.CheckConnectionsAsync(orders));
+        await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.ProposeAsync(orders));
+        await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.CheckContainerAsync(orders));
+        Assert.Throws<OnboardingSessionEndedException>(() => service.Touch(orders));
+
+        Assert.Equal("this setup was replaced by another one; reload the page", save.Message);
+        Assert.Equal(save.Message, check.Message);
+        Assert.Equal(billingText, File.ReadAllText(PathOf("billing.yaml")));
+        Assert.Equal(ordersText, File.ReadAllText(PathOf("orders.yaml")));
+        Assert.Same(billing, service.Current);
+        Assert.Equal(0, discovery.Calls);
+    }
+
+    [Fact]
+    public async Task Saved_session_cannot_act()
+    {
+        WriteProject("orders");
+        var session = service.Open("orders");
+        Assert.True((await service.SaveAsync(session)).Saved);
+
+        var e = await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.SaveAsync(session));
+        Assert.Equal("this setup was saved; reload the page to edit the project again", e.Message);
     }
 
     [Fact]
@@ -183,7 +271,7 @@ public sealed class OnboardingServiceTests : IDisposable
     {
         var session = service.Open(null);
 
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
 
         Assert.StartsWith("setup draft: ", session.LastError);
         Assert.Null(session.Connections);
@@ -198,30 +286,30 @@ public sealed class OnboardingServiceTests : IDisposable
         WriteProject("billing");
         var session = service.Open("orders");
         SetSecretsOf(session);
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
         var started = BlockAgent();
         var changes = 0;
         service.Changed += () => Interlocked.Increment(ref changes);
 
-        var proposal = service.ProposeAsync();
+        var proposal = service.ProposeAsync(session);
         await started;
         Assert.Equal("proposal", session.RunningStep);
 
-        await service.CheckContainerAsync();
+        await service.CheckContainerAsync(session);
         Assert.Equal("another setup step is running", session.LastError);
         Assert.Equal("proposal", session.RunningStep);
         Assert.Empty(session.ContainerSteps);
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
         Assert.Equal("proposal", session.RunningStep);
         var opened = Assert.Throws<InvalidOperationException>(() => service.Open("billing"));
         Assert.Equal("another setup step is running", opened.Message);
         Assert.Same(session, service.Open("orders"));
-        var save = await service.SaveAsync();
+        var save = await service.SaveAsync(session);
         Assert.False(save.Saved);
         Assert.Equal(["another setup step is running; cancel it or wait for it to finish"], save.Errors);
         Assert.Single(agent.Requests);
 
-        service.Cancel();
+        service.Cancel(session);
         await proposal;
         Assert.True(changes > 0);
     }
@@ -232,7 +320,7 @@ public sealed class OnboardingServiceTests : IDisposable
         WriteProject("orders");
         var session = service.Open("orders");
 
-        await service.ProposeAsync();
+        await service.ProposeAsync(session);
 
         Assert.Equal("check connections first", session.LastError);
         Assert.Null(session.Proposal);
@@ -245,14 +333,14 @@ public sealed class OnboardingServiceTests : IDisposable
         WriteProject("orders");
         var session = service.Open("orders");
         SetSecretsOf(session);
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
         agent.Results.Enqueue(Proposal(new
         {
             stages = new[] { new { id = "plan", approved_when_status = "In Progress", reason = "next column" } },
             risk_areas = Array.Empty<object>(),
         }));
 
-        await service.ProposeAsync();
+        await service.ProposeAsync(session);
 
         Assert.Null(session.LastError);
         Assert.Null(session.Proposal!.Error);
@@ -266,13 +354,13 @@ public sealed class OnboardingServiceTests : IDisposable
         WriteProject("orders");
         var session = service.Open("orders");
         SetSecretsOf(session);
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
         var cancelled = false;
         var started = BlockAgent(() => cancelled = true);
 
-        var proposal = service.ProposeAsync();
+        var proposal = service.ProposeAsync(session);
         await started;
-        service.Cancel();
+        service.Cancel(session);
         await proposal;
 
         Assert.True(cancelled);
@@ -282,15 +370,45 @@ public sealed class OnboardingServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Cancelled_step_reports_cancelled_whatever_the_dependency_throws()
+    {
+        WriteProject("orders");
+        var session = service.Open("orders");
+        SetSecretsOf(session);
+        await service.CheckConnectionsAsync(session);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunCancellableAsync = async (_, ct) =>
+        {
+            started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            throw new InvalidOperationException("docker: container killed");
+        };
+
+        var proposal = service.ProposeAsync(session);
+        await started.Task;
+        service.Cancel(session);
+        await proposal;
+
+        Assert.Equal("cancelled", session.LastError);
+        Assert.Null(session.RunningStep);
+    }
+
+    [Fact]
     public async Task Host_stopping_cancels_running_step()
     {
         WriteProject("orders");
         var session = service.Open("orders");
         SetSecretsOf(session);
-        await service.CheckConnectionsAsync();
+        await service.CheckConnectionsAsync(session);
         var started = BlockAgent();
 
-        var proposal = service.ProposeAsync();
+        var proposal = service.ProposeAsync(session);
         await started;
         lifetime.StopApplication();
         await proposal;
@@ -302,6 +420,10 @@ public sealed class OnboardingServiceTests : IDisposable
     public void Set_secret_validates_name_and_value()
     {
         Assert.Throws<ArgumentException>(() => service.SetSecret("Bad Name", "value"));
+        // A token pasted into the name field is not echoed back.
+        var pasted = Assert.Throws<ArgumentException>(() => service.SetSecret("ghp_PastedToken123", "value"));
+        Assert.DoesNotContain("ghp_PastedToken123", pasted.Message);
+        Assert.StartsWith("invalid secret name; use lowercase letters, digits and '-'", pasted.Message);
         Assert.Throws<ArgumentException>(() => service.SetSecret("jira-orders", ""));
         Assert.Throws<ArgumentException>(() => service.SetSecret("jira-orders", "   "));
         Assert.Empty(secrets.Values);
@@ -328,10 +450,10 @@ public sealed class OnboardingServiceTests : IDisposable
         WriteProject("orders", "github-projects", "github");
         var session = service.Open("orders");
 
-        Assert.Equal(["github-orders", DockerLauncher.TokenSecretName], service.SecretNamesInUse());
+        Assert.Equal(["github-orders", DockerLauncher.TokenSecretName], service.SecretNamesInUse(session));
 
         session.Form.Agent.Isolation = Isolation.Host;
-        Assert.Equal(["github-orders"], service.SecretNamesInUse());
+        Assert.Equal(["github-orders"], service.SecretNamesInUse(session));
     }
 
     [Fact]
@@ -348,8 +470,8 @@ public sealed class OnboardingServiceTests : IDisposable
             risk_areas = new[] { new { name = "payments", description = "Money", paths = new[] { "src/Payments/**" }, reason = "r" } },
         }));
 
-        await service.CheckConnectionsAsync();
-        await service.ProposeAsync();
+        await service.CheckConnectionsAsync(session);
+        await service.ProposeAsync(session);
         session.Proposal!.ApplyTo(session.Form, new HashSet<string>());
 
         Assert.Equal(projectsBefore, Directory.GetFiles(home.Projects).Order().ToList());
@@ -357,7 +479,7 @@ public sealed class OnboardingServiceTests : IDisposable
         Assert.Same(loadedBefore, registry.Projects);
         Assert.Equal(0, factory.Created);
 
-        var saved = await service.SaveAsync();
+        var saved = await service.SaveAsync(session);
 
         Assert.True(saved.Saved, string.Join("; ", saved.Errors));
         Assert.Null(service.Current);
@@ -373,7 +495,7 @@ public sealed class OnboardingServiceTests : IDisposable
         var session = service.Open("orders");
         session.Form.Pipeline.Add(new StageForm { Id = "plan", Kind = StageKind.Plan });
 
-        var result = await service.SaveAsync();
+        var result = await service.SaveAsync(session);
 
         Assert.False(result.Saved);
         Assert.Same(session, service.Current);
