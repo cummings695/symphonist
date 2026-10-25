@@ -1,5 +1,6 @@
 using Symphonist.Core.Integrations.Providers;
 using Symphonist.Integrations.Bitbucket;
+using Symphonist.Integrations.GitHub;
 using Symphonist.Integrations.Jira;
 
 namespace Symphonist.Integrations;
@@ -9,6 +10,6 @@ public static class BuiltInProviders
 {
     public static ProviderRegistry Registry { get; } = new(
         [new JiraProvider()],
-        [new BitbucketProvider()],
+        [new BitbucketProvider(), new GitHubRepoProvider()],
         [new BitbucketPipelinesProvider()]);
 }
