@@ -114,6 +114,17 @@ public class PromptRendererTests
     }
 
     [Fact]
+    public void Pr_comments_prompt_validates_and_has_fence()
+    {
+        var prompt = PromptLibrary.GetPrComments();
+
+        PromptRenderer.Validate(prompt);
+        foreach (var placeholder in new[] { "{{pr.fence_id}}", "{{pr.comments}}", "{{pr.code}}", "{{feedback}}", "{{branch}}",
+                     "{{ticket.key}}" })
+            Assert.Contains(placeholder, prompt);
+    }
+
+    [Fact]
     public void Evidence_prompt_validates_and_has_fence()
     {
         var prompt = PromptLibrary.GetEvidence(ConfigWithoutOverrides());

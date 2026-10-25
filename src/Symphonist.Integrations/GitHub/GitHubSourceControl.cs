@@ -147,6 +147,14 @@ public sealed class GitHubSourceControl(HttpClient http, GitHubRepoConfig config
         const string review = "review:";
         if (comment.Id.StartsWith(review, StringComparison.Ordinal) && long.TryParse(comment.Id[review.Length..], out var reviewId))
         {
+            // GitHub only accepts replies to top-level review comments: reply to the thread's root.
+            // ParentId is "review:{n}" or a bare number.
+            if (comment.ParentId is { } parent)
+            {
+                var number = parent.StartsWith(review, StringComparison.Ordinal) ? parent[review.Length..] : parent;
+                if (long.TryParse(number, out var rootId)) reviewId = rootId;
+            }
+
             using var _ = await _api.SendAsync(HttpMethod.Post, $"{RepoPath}/pulls/{id}/comments/{reviewId}/replies",
                 new { body = markdown }, ct);
             return;

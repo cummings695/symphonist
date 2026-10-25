@@ -180,7 +180,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         && !name.Split('/').Any(part => part.StartsWith('.') || part.EndsWith(".lock", StringComparison.Ordinal));
 
     /// <summary>Single-line, repo-relative, no "..", at most <see cref="MaxPathLength"/> characters.</summary>
-    private static bool IsSafeRepoPath(string path) =>
+    internal static bool IsSafeRepoPath(string path) =>
         path.Length <= MaxPathLength
         && !path.Any(char.IsControl)
         && !path.StartsWith('/') && !path.StartsWith('\\') && !path.Contains(':') && !Path.IsPathRooted(path)

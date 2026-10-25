@@ -302,6 +302,19 @@ public class GitHubSourceControlTests
         Assert.Equal("done", body.RootElement.GetProperty("body").GetString());
     }
 
+    [Theory]
+    [InlineData("review:20")]
+    [InlineData("20")]
+    public async Task Reply_to_a_reply_goes_to_the_thread_root(string parentId)
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pulls/7/comments/20/replies", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("review:21", "ann", false, DateTimeOffset.UnixEpoch, "x", "a.cs", 3, parentId);
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        Assert.EndsWith("/pulls/7/comments/20/replies", Assert.Single(stub.Requests).PathAndQuery);
+    }
+
     [Fact]
     public async Task Reply_to_issue_comment_quotes_it()
     {

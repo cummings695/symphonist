@@ -23,6 +23,9 @@ public static class PromptLibrary
     /// <summary>The embedded container check (build and test) prompt; there is no override. The result is validated.</summary>
     public static string GetContainerCheck() => Load(null, "container-check", "no container check prompt template");
 
+    /// <summary>The embedded PR comments (fix run) prompt; there is no override. The result is validated.</summary>
+    public static string GetPrComments() => Load(null, "pr-comments", "no pr-comments prompt template");
+
     private static string Load(string? overridePath, string defaultName, string missing)
     {
         string template;

@@ -1,10 +1,13 @@
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Prompts;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
@@ -108,7 +111,12 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<ExecutionResult> ImplementAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Implement, ct);
+        var feedback = PrFeedback.FromJson(t.PrFeedbackJson);
+        var fixRun = feedback.Count > 0 && t.PullRequestId is not null;
+        var run = fixRun
+            ? await RunAgentAsync(p, t, source, StageKind.Implement, ct, PromptLibrary.GetPrComments(),
+                PrFixOutputSchema.Json, (workspace, values) => AddPrValues(values, feedback, workspace))
+            : await RunAgentAsync(p, t, source, StageKind.Implement, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
@@ -116,10 +124,12 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         if (!await CommitAsync(p, run.Workspace, title, ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
 
-        if (t.PullRequestId is not null)
+        if (t.PullRequestId is { } existingPr)
         {
+            string? replyEvent = null;
+            if (fixRun) replyEvent = await ReplyAsync(io.SourceControl, existingPr, feedback, run, ct);
             await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
-            return Completed;
+            return new ExecutionResult(ExecutionStatus.Completed, Event: replyEvent);
         }
 
         var description = output.PrDescription ?? output.Summary;
@@ -128,6 +138,100 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         t.PullRequestId = pr.Id;
         await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"PR ready for review: {pr.WebUrl}"), ct);
         return Completed;
+    }
+
+    /// <summary>Replies, signed, to each comment the fix run addressed. Failures are returned as an event, not thrown.</summary>
+    private async Task<string?> ReplyAsync(ISourceControl sc, long prId, IReadOnlyList<PrFeedbackComment> comments,
+        AgentStep run, CancellationToken ct)
+    {
+        string? head = null;
+        try { head = await git.ResolveCommitAsync(run.Workspace, $"refs/remotes/origin/{run.Branch}", ct); }
+        catch (Exception) when (!ct.IsCancellationRequested) { }
+        var fallback = $"Addressed in {(string.IsNullOrEmpty(head) ? "the latest commit" : head[..Math.Min(7, head.Length)])}";
+        var replies = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var r in PrFixOutputSchema.ReadReplies(run.Structured)) replies.TryAdd(r.CommentId, r.Reply);
+
+        var failures = new List<string>();
+        foreach (var c in comments)
+        {
+            var original = new PullRequestComment(c.Id, c.Author, c.IsMine, default, c.Request, c.Path, c.Line, c.ParentId);
+            try
+            {
+                await sc.ReplyToPullRequestCommentAsync(prId, original,
+                    TrackerComments.Sign(replies.GetValueOrDefault(c.Id) ?? fallback), ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                failures.Add($"{c.Id}: {ReviewerText.Line(e.Message, ReviewerText.MaxItemChars)}");
+            }
+        }
+        return failures.Count == 0 ? null : $"could not reply to PR comments: {string.Join("; ", failures)}";
+    }
+
+    private const int CodeContextLines = 10, MaxCodeLineChars = 400;
+
+    private static void AddPrValues(Dictionary<string, string?> values, IReadOnlyList<PrFeedbackComment> comments,
+        string workspace)
+    {
+        var nonce = UntrustedFence.NewNonce();
+        values["pr.fence_id"] = nonce;
+
+        var blocks = new List<string>();
+        var code = new List<string>();
+        foreach (var c in comments)
+        {
+            var safePath = c.Path is not null && GateReviewer.IsSafeRepoPath(c.Path);
+            var location = c.Path is null ? null
+                : !safePath ? "(invalid path)"
+                : c.Line is { } l ? $"{c.Path}:{l}" : c.Path;
+            var text = new StringBuilder()
+                .Append("id: ").Append(c.Id).Append('\n')
+                .Append("author: ").Append(c.Author).Append(c.IsMine ? "" : " (not the developer)").Append('\n');
+            if (location is not null) text.Append("location: ").Append(location).Append('\n');
+            text.Append("request: ").Append(c.Request.Length == 0 ? "(no text after the tag)" : c.Request);
+            blocks.Add(UntrustedFence.Wrap(nonce, text.ToString()));
+
+            if (safePath && c.Line is { } line && ReadCodeContext(workspace, c.Path!, line) is { } snippet)
+                code.Add(UntrustedFence.Wrap(nonce, $"comment {c.Id}: {c.Path}:{line}\n{snippet}"));
+        }
+        values["pr.comments"] = string.Join("\n\n", blocks);
+        values["pr.code"] = code.Count == 0 ? "(none)" : string.Join("\n\n", code);
+    }
+
+    /// <summary>Up to 10 numbered lines either side of <paramref name="line"/>; null when the file or line is missing or the path goes through a link.</summary>
+    private static string? ReadCodeContext(string workspace, string path, int line)
+    {
+        try
+        {
+            if (line < 1) return null;
+            var current = Path.GetFullPath(workspace);
+            FileSystemInfo info = new DirectoryInfo(current);
+            foreach (var part in path.Split('/', '\\'))
+            {
+                if (part.Length == 0) continue;
+                current = Path.Combine(current, part);
+                info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
+                if (!info.Exists || info.LinkTarget is not null) return null;
+            }
+            if (info is not FileInfo) return null;
+
+            var first = Math.Max(1, line - CodeContextLines);
+            var last = line + CodeContextLines;
+            var sb = new StringBuilder();
+            var n = 0;
+            foreach (var text in File.ReadLines(info.FullName))
+            {
+                n++;
+                if (n < first) continue;
+                if (n > last) break;
+                sb.Append(n).Append(": ").Append(text.Length > MaxCodeLineChars ? text[..MaxCodeLineChars] : text).Append('\n');
+            }
+            return n < line ? null : sb.ToString().TrimEnd();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -233,20 +337,24 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         return Completed;
     }
 
-    private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure);
+    private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure,
+        JsonElement? Structured = null);
 
     private async Task<AgentStep> RunAgentAsync(ProjectConfig p, Ticket t, SourceTicket? source, StageKind kind,
-        CancellationToken ct)
+        CancellationToken ct, string? template = null, string schema = StageOutputSchema.Json,
+        Action<string, Dictionary<string, string?>>? extra = null)
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
-        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind), PromptValues.For(p, t, source, branch, t.Feedback ?? ""));
+        var values = PromptValues.For(p, t, source, branch, t.Feedback ?? "");
+        extra?.Invoke(workspace, values);
+        var prompt = PromptRenderer.Render(template ?? PromptLibrary.Get(p, kind), values);
 
         var startedAt = time.GetUtcNow();
         AgentRunResult result;
         try
         {
-            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent), ct);
+            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent, schema), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -261,11 +369,14 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, result.Output?.Summary), ct);
 
+        // The runner only fills Output for the stage schema; other schemas carry the stage fields in Structured.
+        var output = schema == StageOutputSchema.Json ? result.Output : StageOutputSchema.Read(result.Structured);
         ExecutionResult? failure =
             !result.Succeeded ? Failed(result.Error ?? "agent run failed")
-            : result.Output is null ? Failed("agent returned no structured output")
+            : output is null ? Failed("agent returned no structured output")
+            : output.Status != "completed" ? Failed(string.IsNullOrWhiteSpace(output.Summary) ? $"stage status '{output.Status}'" : output.Summary)
             : null;
-        return new AgentStep(workspace, branch, result.Output, failure);
+        return new AgentStep(workspace, branch, output, failure, result.Structured);
     }
 
     private static ExecutionResult Failed(string error) => new(ExecutionStatus.Failed, error);

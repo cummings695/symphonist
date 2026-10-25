@@ -99,6 +99,9 @@ public sealed class FakeSourceControl : ISourceControl
     public List<(long Pr, string Body)> PostedComments { get; } = [];
     public List<(long Pr, string CommentId, string Body)> Replies { get; } = [];
 
+    /// <summary>Thrown from ReplyToPullRequestCommentAsync when it returns an exception for the comment id.</summary>
+    public Func<string, Exception?>? ReplyError { get; set; }
+
     /// <summary>Thrown from ListPullRequestCommentsAsync when set.</summary>
     public Exception? CommentsError { get; set; }
 
@@ -121,6 +124,7 @@ public sealed class FakeSourceControl : ISourceControl
 
     public Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct)
     {
+        if (ReplyError?.Invoke(comment.Id) is { } error) throw error;
         Replies.Add((id, comment.Id, markdown));
         return Task.CompletedTask;
     }

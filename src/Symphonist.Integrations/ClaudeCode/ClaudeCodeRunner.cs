@@ -16,8 +16,6 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
     public static readonly IReadOnlyList<string> ReadOnlyDeniedTools =
         ["Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch"];
 
-    private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
-
     public async Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
     {
         var settings = request.Settings;
@@ -97,7 +95,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         if (root.TryGetProperty("structured_output", out var so) && so.ValueKind == JsonValueKind.Object)
             structured = so.Clone();
         var isStage = request.OutputSchema == StageOutputSchema.Json;
-        var output = isStage ? ReadOutput(structured) : null;
+        var output = isStage ? StageOutputSchema.Read(structured) : null;
 
         if (result.ExitCode != 0 || isError)
             return Fail(FirstNonEmpty(Tail(result.StandardError), resultText,
@@ -113,18 +111,6 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         return new AgentRunResult(true, output, cost, duration, null, rawLog, structured);
     }
 
-    /// <summary>Stage output comes only from schema-validated <c>structured_output</c>, never from free text.</summary>
-    private static StageOutput? ReadOutput(JsonElement? structured)
-    {
-        try
-        {
-            if (structured is { } so) return Validate(so.Deserialize<StageOutput>(Options));
-        }
-        catch (JsonException) { }
-        return null;
-    }
-
-    private static StageOutput? Validate(StageOutput? o) => o is { Status: not null, Summary: not null } ? o : null;
 
     private static string? Tail(string s)
     {

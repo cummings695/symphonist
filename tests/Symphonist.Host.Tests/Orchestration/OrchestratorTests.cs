@@ -73,7 +73,7 @@ public sealed class OrchestratorTests : IDisposable
         Directory.CreateDirectory(Path.Combine(home, "projects"));
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
-        agent.OnRun = _ => StageResult;
+        agent.OnRun = r => r.OutputSchema == PrFixOutputSchema.Json ? FakeAgentRunner.PrFix() : StageResult;
         evidenceGit.WorkspacePath = Path.Combine(home, "evidence-ws");
     }
 
@@ -2169,7 +2169,7 @@ public sealed class OrchestratorTests : IDisposable
     {
         await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.PullRequestId = 7);
         var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : Task.FromResult(StageResult);
+        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : Task.FromResult(FakeAgentRunner.PrFix());
         var o = Create();
         await o.TickAsync(CancellationToken.None);
         Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
@@ -2267,7 +2267,7 @@ public sealed class OrchestratorTests : IDisposable
 
         Assert.Single(agent.Requests);
         Assert.Contains("@claude PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
-        Assert.Empty(scm.Replies);
+        Assert.Equal("issue:1", Assert.Single(scm.Replies).CommentId); // the fix run answers the comment
         Assert.Empty(scm.MergeCalls);
     }
 
