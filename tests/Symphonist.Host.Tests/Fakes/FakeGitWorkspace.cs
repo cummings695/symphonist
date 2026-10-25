@@ -89,4 +89,18 @@ public sealed class FakeGitWorkspace : IGitWorkspace
 
     public Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct) =>
         Task.FromResult(RemoteCommits.GetValueOrDefault(rev));
+
+    /// <summary>Returned by OriginUrlAsync for any path; default null (not a checkout).</summary>
+    public string? OriginUrl { get; set; }
+
+    public Task<string?> OriginUrlAsync(string checkoutPath, CancellationToken ct) => Task.FromResult(OriginUrl);
+
+    /// <summary>(project id, key) of each RemoveAsync call.</summary>
+    public List<(string ProjectId, string Key)> Removed { get; } = [];
+
+    public Task RemoveAsync(ProjectConfig project, string key, CancellationToken ct)
+    {
+        Removed.Add((project.Id, key));
+        return Task.CompletedTask;
+    }
 }

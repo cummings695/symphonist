@@ -25,6 +25,12 @@ public interface ITrackerProvider
 
     ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers);
 
+    /// <summary>
+    /// Read-only: the signed-in account, the status source's statuses and an approximate ticket count. Throws
+    /// <see cref="HttpRequestException"/> (or a subclass) on sign-in or source failures.
+    /// </summary>
+    Task<TrackerDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct);
+
     Uri? IssueUrl(ProjectConfig project, string key);
 }
 
@@ -50,6 +56,9 @@ public interface IRepoProvider
 
     ISourceControl Create(ProjectConfig project, HttpClient http, string token);
 
+    /// <summary>Read-only: the repository's name, main branch and whether the production branch exists.</summary>
+    Task<RepositoryDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct);
+
     Uri PullRequestUrl(ProjectConfig project, long id);
 }
 
@@ -73,4 +82,8 @@ public interface IBuildProvider
 
     /// <param name="http">The repo provider's client.</param>
     IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken);
+
+    /// <summary>Read-only: a summary of the build host's state for the repository.</summary>
+    /// <param name="http">The repo provider's client, as in <see cref="Create"/>.</param>
+    Task<BuildDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string repoToken, CancellationToken ct);
 }

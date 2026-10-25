@@ -17,6 +17,7 @@ public class ProviderRegistryTests
         public IReadOnlyDictionary<string, object?> ToValues(TrackerConfig config) => new Dictionary<string, object?>();
         public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) => throw new NotSupportedException();
         public Uri? IssueUrl(ProjectConfig project, string key) => null;
+        public Task<TrackerDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed class FakeRepo(string type, string client) : IRepoProvider
@@ -30,6 +31,7 @@ public class ProviderRegistryTests
         public IReadOnlyList<string> FullNameKeys => ["owner", "name"];
         public ISourceControl Create(ProjectConfig project, HttpClient http, string token) => throw new NotSupportedException();
         public Uri PullRequestUrl(ProjectConfig project, long id) => throw new NotSupportedException();
+        public Task<RepositoryDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed class FakeBuild(string type, string repoType) : IBuildProvider
@@ -41,6 +43,7 @@ public class ProviderRegistryTests
         public IReadOnlyList<ProviderField> Fields => [];
         public IReadOnlyDictionary<string, object?> ToValues(BuildConfig config) => new Dictionary<string, object?>();
         public IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken) => throw new NotSupportedException();
+        public Task<BuildDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string repoToken, CancellationToken ct) => throw new NotSupportedException();
     }
 
     [Fact]

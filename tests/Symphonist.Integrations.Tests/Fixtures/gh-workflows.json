@@ -1,0 +1,7 @@
+{
+  "total_count": 2,
+  "workflows": [
+    { "id": 161335, "node_id": "MDg6V29ya2Zsb3cxNjEzMzU=", "name": "CI", "path": ".github/workflows/ci.yml", "state": "active" },
+    { "id": 269289, "node_id": "MDE4OldvcmtmbG93MjY5Mjg5", "name": "Deploy", "path": ".github/workflows/deploy.yml", "state": "active" }
+  ]
+}

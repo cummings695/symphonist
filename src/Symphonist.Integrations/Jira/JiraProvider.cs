@@ -53,6 +53,12 @@ public sealed partial class JiraProvider : ITrackerProvider
     public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new JiraTracker(http, Config(project), token);
 
+    public Task<TrackerDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct)
+    {
+        var config = Config(draft);
+        return new JiraTracker(http, config, token).DiscoverAsync(config.ProjectKey, ct);
+    }
+
     public Uri? IssueUrl(ProjectConfig project, string key) =>
         new(Config(project).Site, "browse/" + Uri.EscapeDataString(key));
 

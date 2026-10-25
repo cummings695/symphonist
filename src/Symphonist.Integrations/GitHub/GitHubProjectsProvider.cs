@@ -72,6 +72,10 @@ public sealed class GitHubProjectsProvider : ITrackerProvider
         new GitHubProjectsTracker(http, Config(project), token, PickupStatuses(project), RequiredStatuses(project),
             Repositories(project), loggers.CreateLogger<GitHubProjectsTracker>());
 
+    public Task<TrackerDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct) =>
+        new GitHubProjectsTracker(http, Config(draft), token, PickupStatuses(draft), RequiredStatuses(draft),
+            Repositories(draft)).DiscoverAsync(ct);
+
     /// <summary>Key = <c>{repository name}-{issue number}</c>; the owner is that of the matching repositories entry.</summary>
     public Uri? IssueUrl(ProjectConfig project, string key)
     {

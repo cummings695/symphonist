@@ -78,6 +78,38 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Origin_url_of_non_repo_is_null()
+    {
+        var plain = Path.Combine(root, "plain");
+        Directory.CreateDirectory(plain);
+        Assert.Null(await git.OriginUrlAsync(plain, default));
+        Assert.Null(await git.OriginUrlAsync(Path.Combine(root, "missing"), default));
+
+        var noOrigin = Path.Combine(root, "no origin");
+        Run(root, "init", "-b", "main", noOrigin);
+        Assert.Null(await git.OriginUrlAsync(noOrigin, default));
+
+        Assert.Equal(Norm(bare), Norm((await git.OriginUrlAsync(dev, default))!));
+        Run(dev, "remote", "set-url", "origin", CredentialUrl);
+        Assert.Equal("https://bitbucket.org/acme/orders.git", await git.OriginUrlAsync(dev, default));
+    }
+
+    [Fact]
+    public async Task Remove_deletes_workspace_and_ignores_missing()
+    {
+        var ws = await git.PrepareAsync(project, "_onboarding", "main", default);
+        Assert.True(Directory.Exists(ws));
+
+        await git.RemoveAsync(project, "_onboarding", default);
+
+        Assert.False(Directory.Exists(ws));
+        await git.RemoveAsync(project, "_onboarding", default);
+        await git.RemoveAsync(project, "_container-check", default);
+        await Assert.ThrowsAsync<ArgumentException>(() => git.RemoveAsync(project, "..", default));
+        Assert.True(Directory.Exists(dev));
+    }
+
+    [Fact]
     public async Task Prepare_twice_reuses_workspace_and_keeps_changes()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);

@@ -1,0 +1,25 @@
+[
+  {
+    "self": "https://example.atlassian.net/rest/api/3/issuetype/10001",
+    "id": "10001",
+    "name": "Task",
+    "subtask": false,
+    "statuses": [
+      { "self": "https://example.atlassian.net/rest/api/3/status/10000", "description": "Not yet looked at", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "Backlog", "untranslatedName": "Backlog", "id": "10000", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "new", "colorName": "blue-gray", "name": "new" } },
+      { "self": "https://example.atlassian.net/rest/api/3/status/10003", "description": "Being built", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "In Progress", "untranslatedName": "In Progress", "id": "10003", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "indeterminate", "colorName": "blue-gray", "name": "indeterminate" } },
+      { "self": "https://example.atlassian.net/rest/api/3/status/10001", "description": "Plan approved", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "Planned", "untranslatedName": "Planned", "id": "10001", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "new", "colorName": "blue-gray", "name": "new" } },
+      { "self": "https://example.atlassian.net/rest/api/3/status/10005", "description": "Shipped", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "Done", "untranslatedName": "Done", "id": "10005", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "done", "colorName": "blue-gray", "name": "done" } }
+    ]
+  },
+  {
+    "self": "https://example.atlassian.net/rest/api/3/issuetype/10002",
+    "id": "10002",
+    "name": "Bug",
+    "subtask": false,
+    "statuses": [
+      { "self": "https://example.atlassian.net/rest/api/3/status/10003", "description": "Being built", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "IN PROGRESS", "untranslatedName": "IN PROGRESS", "id": "10003", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "indeterminate", "colorName": "blue-gray", "name": "indeterminate" } },
+      { "self": "https://example.atlassian.net/rest/api/3/status/10004", "description": "Pull request open", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "In Review", "untranslatedName": "In Review", "id": "10004", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "indeterminate", "colorName": "blue-gray", "name": "indeterminate" } },
+      { "self": "https://example.atlassian.net/rest/api/3/status/10005", "description": "Shipped", "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png", "name": "Done", "untranslatedName": "Done", "id": "10005", "statusCategory": { "self": "https://example.atlassian.net/rest/api/3/statuscategory/x", "id": 2, "key": "done", "colorName": "blue-gray", "name": "done" } }
+    ]
+  }
+]

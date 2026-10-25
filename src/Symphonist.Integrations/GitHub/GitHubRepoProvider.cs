@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text.Json;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -65,6 +67,33 @@ public sealed class GitHubRepoProvider : IRepoProvider
 
     public ISourceControl Create(ProjectConfig project, HttpClient http, string token) =>
         new GitHubSourceControl(http, Config(project), token);
+
+    public async Task<RepositoryDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token,
+        CancellationToken ct)
+    {
+        var config = Config(draft);
+        var api = new GitHubApi(http, token);
+        var repoPath = $"repos/{Uri.EscapeDataString(config.Owner)}/{Uri.EscapeDataString(config.Repo)}";
+        string fullName, mainBranch;
+        using (var doc = await api.SendAsync(HttpMethod.Get, repoPath, null, ct))
+        {
+            fullName = Text(doc.RootElement, "full_name") is { Length: > 0 } name ? name : config.FullName;
+            mainBranch = Text(doc.RootElement, "default_branch");
+        }
+
+        var branchPath = $"{repoPath}/branches/{GitHubApi.EscapeRef(config.ProductionBranch)}";
+        var (status, text) = await api.SendRawAsync(HttpMethod.Get, branchPath, null, ct);
+        var exists = status switch
+        {
+            HttpStatusCode.OK => true,
+            HttpStatusCode.NotFound => false,
+            _ => throw GitHubApi.Failure(HttpMethod.Get, branchPath, status, text),
+        };
+        return new RepositoryDiscovery(fullName, mainBranch, exists);
+    }
+
+    private static string Text(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
 
     public Uri PullRequestUrl(ProjectConfig project, long id) => GitHubSourceControl.PullRequestUrl(Config(project), id);
 

@@ -25,6 +25,26 @@ internal static class GitHubProjectsQueries
         }
         """;
 
+    /// <summary>
+    /// Read-only, for the setup screen: the board's title and the status field's options with descriptions, in board
+    /// order. Variables: <c>owner</c> (String!), <c>number</c> (Int!), <c>field</c> (String!).
+    /// </summary>
+    public const string Discover = """
+        query Discover($owner: String!, $number: Int!, $field: String!) {
+          repositoryOwner(login: $owner) {
+            ... on ProjectV2Owner {
+              projectV2(number: $number) {
+                id
+                title
+                field(name: $field) {
+                  ... on ProjectV2SingleSelectField { options { name description } }
+                }
+              }
+            }
+          }
+        }
+        """;
+
     /// <summary>Variables: <c>project</c> (ID!), <c>field</c> (String!), <c>after</c> (String, null for page one).</summary>
     public const string Items = """
         query Items($project: ID!, $field: String!, $after: String) {

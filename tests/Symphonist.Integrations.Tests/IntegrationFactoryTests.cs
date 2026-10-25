@@ -14,7 +14,7 @@ namespace Symphonist.Integrations.Tests;
 
 public class IntegrationFactoryTests
 {
-    private sealed class FakeHttpClientFactory : IHttpClientFactory
+    internal sealed class FakeHttpClientFactory : IHttpClientFactory
     {
         public List<string> Names { get; } = [];
         public HttpMessageHandler? Handler { get; init; }
@@ -27,7 +27,7 @@ public class IntegrationFactoryTests
         }
     }
 
-    private sealed class DictionarySecretStore : ISecretStore
+    internal sealed class DictionarySecretStore : ISecretStore
     {
         public Dictionary<string, string> Values { get; } = [];
         public List<string> Reads { get; } = [];

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 using Symphonist.Integrations.Bitbucket;
 using Symphonist.Tests.Http;
 
@@ -300,5 +301,59 @@ public class BitbucketTests
         Assert.Equal(expected, await watcher.GetStatusAsync(hash, BuildPurpose.Build, CancellationToken.None));
         Assert.Contains("sort=-created_on", stub.Requests[0].PathAndQuery);
         Assert.Contains("pagelen=50", stub.Requests[0].PathAndQuery);
+    }
+
+    private static ProjectConfig Draft() => new("orders", "Orders", null!, Repo,
+        new BitbucketPipelinesConfig("bitbucket-pipelines", 45), null!, 3, [], new Dictionary<StageKind, string>(), "/cfg");
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, false)]
+    [InlineData(HttpStatusCode.OK, true)]
+    public async Task Bitbucket_discover_reads_full_name_main_branch_and_production(HttpStatusCode branch, bool exists)
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, RepoPrefix + "/refs/branches/production", branch, "{\"name\":\"production\"}")
+            .On(HttpMethod.Get, RepoPrefix, HttpStatusCode.OK, Fixture("bb-repo.json"));
+
+        var result = await new BitbucketProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token, CancellationToken.None);
+
+        Assert.Equal(new RepositoryDiscovery("Acme/Orders", "main", exists), result);
+        Assert.All(stub.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
+        var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("dev@example.com:" + Token));
+        Assert.All(stub.Authorizations, a => Assert.Equal(expected, a));
+    }
+
+    [Fact]
+    public async Task Bitbucket_discover_throws_when_branch_check_fails()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, RepoPrefix + "/refs/branches/production", HttpStatusCode.Forbidden, "{}")
+            .On(HttpMethod.Get, RepoPrefix, HttpStatusCode.OK, Fixture("bb-repo.json"));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            new BitbucketProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token, CancellationToken.None));
+
+        Assert.Equal(HttpStatusCode.Forbidden, ex.StatusCode);
+        Assert.DoesNotContain(Token, ex.Message);
+    }
+
+    [Fact]
+    public async Task Pipelines_discover_reports_latest_run_or_none()
+    {
+        const string latest = RepoPrefix + "/pipelines/?pagelen=1&sort=-created_on";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.OK, Fixture("bb-pipelines-latest.json"));
+        var result = await new BitbucketPipelinesProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token,
+            CancellationToken.None);
+        Assert.Equal("latest pipeline #57 (COMPLETED)", result.Summary);
+        Assert.Empty(result.Workflows);
+        Assert.Equal(latest, Assert.Single(stub.Requests).PathAndQuery);
+
+        var none = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.OK, "{\"pagelen\":1,\"values\":[]}");
+        Assert.Equal("no pipeline runs yet", (await new BitbucketPipelinesProvider().DiscoverAsync(Draft(),
+            new HttpClient(none), Token, CancellationToken.None)).Summary);
+
+        var failing = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.Unauthorized, "{}");
+        await Assert.ThrowsAsync<HttpRequestException>(() => new BitbucketPipelinesProvider().DiscoverAsync(Draft(),
+            new HttpClient(failing), Token, CancellationToken.None));
     }
 }

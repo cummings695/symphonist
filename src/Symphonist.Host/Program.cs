@@ -7,6 +7,7 @@ using Microsoft.Extensions.Http.Resilience;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Api;
 using Symphonist.Host.Dashboard;
@@ -56,6 +57,7 @@ builder.Services.AddSingleton(new OrchestratorOptions());
 builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
 builder.Services.AddSingleton(BuiltInProviders.Registry);
 builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
+builder.Services.AddSingleton<IProjectDiscovery, ProjectDiscovery>();
 builder.Services.AddSingleton<BoardNotifier>();
 builder.Services.AddSingleton(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));
 builder.Services.AddSingleton<ITicketStore>(sp =>

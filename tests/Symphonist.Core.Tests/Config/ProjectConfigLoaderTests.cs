@@ -72,6 +72,8 @@ public class ProjectConfigLoaderTests
         public BuildConfig Parse(BuildSection section) => new BitbucketPipelinesConfig(section.Type, section.TimeoutMinutes);
         public IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken) =>
             throw new NotSupportedException();
+        public Task<BuildDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string repoToken,
+            CancellationToken ct) => throw new NotSupportedException();
     }
 
     [Fact]

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 
 namespace Symphonist.Integrations.Jira;
 
@@ -13,6 +14,7 @@ public sealed partial class JiraTracker(HttpClient http, JiraTrackerConfig confi
     private const int PageSize = 50;
     private readonly SemaphoreSlim _myselfLock = new(1, 1);
     private string? _myAccountId;
+    private string? _myDisplayName;
 
     public async Task<IReadOnlyList<SourceTicket>> QueryAsync(CancellationToken ct)
     {
@@ -131,22 +133,100 @@ public sealed partial class JiraTracker(HttpClient http, JiraTrackerConfig confi
     [GeneratedRegex(@"([+-]\d{2})(\d{2})$")]
     private static partial Regex OffsetNoColon();
 
-    private async Task<string> GetMyAccountIdAsync(CancellationToken ct)
+    private async Task<string> GetMyAccountIdAsync(CancellationToken ct) => (await GetMyselfAsync(ct)).AccountId;
+
+    private async Task<(string AccountId, string DisplayName)> GetMyselfAsync(CancellationToken ct)
     {
-        if (_myAccountId is not null) return _myAccountId;
+        if (_myAccountId is not null) return (_myAccountId, _myDisplayName!);
         await _myselfLock.WaitAsync(ct);
         try
         {
-            if (_myAccountId is not null) return _myAccountId;
+            if (_myAccountId is not null) return (_myAccountId, _myDisplayName!);
             using var doc = await SendAsync(HttpMethod.Get, "rest/api/3/myself", null, ct);
-            _myAccountId = doc.RootElement.GetProperty("accountId").GetString()!;
-            return _myAccountId;
+            var accountId = doc.RootElement.GetProperty("accountId").GetString()!;
+            _myDisplayName = doc.RootElement.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String
+                ? dn.GetString()! : accountId;
+            _myAccountId = accountId;
+            return (_myAccountId, _myDisplayName);
         }
         finally
         {
             _myselfLock.Release();
         }
     }
+
+    /// <summary>
+    /// Read-only: the signed-in user, the statuses of <paramref name="projectKey"/> across its issue types (merged by
+    /// status id, first-seen spelling, ordered To Do, In Progress, Done, other) and the approximate JQL match count.
+    /// </summary>
+    internal async Task<TrackerDiscovery> DiscoverAsync(string? projectKey, CancellationToken ct)
+    {
+        var (_, displayName) = await GetMyselfAsync(ct);
+        var notes = new List<string>();
+        IReadOnlyList<SourceStatus> statuses = [];
+        string? source = null;
+        if (projectKey is null)
+            notes.Add("set tracker.projectKey to read the project's statuses");
+        else
+        {
+            statuses = await ProjectStatusesAsync(projectKey, ct);
+            source = $"Jira project {projectKey}";
+        }
+
+        return new TrackerDiscovery(displayName, source, statuses, await ApproximateCountAsync(ct), notes);
+    }
+
+    private async Task<IReadOnlyList<SourceStatus>> ProjectStatusesAsync(string projectKey, CancellationToken ct)
+    {
+        using var doc = await SendAsync(HttpMethod.Get,
+            $"rest/api/3/project/{Uri.EscapeDataString(projectKey)}/statuses", null, ct);
+        var seen = new Dictionary<string, SourceStatus>(StringComparer.Ordinal);
+        var order = new List<string>();
+        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            foreach (var issueType in doc.RootElement.EnumerateArray())
+            {
+                if (!issueType.TryGetProperty("statuses", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+                foreach (var status in list.EnumerateArray())
+                {
+                    var name = Text(status, "name");
+                    if (name.Length == 0) continue;
+                    var id = Text(status, "id") is { Length: > 0 } i ? i : name;
+                    if (seen.ContainsKey(id)) continue;
+                    var category = status.TryGetProperty("statusCategory", out var c) && c.ValueKind == JsonValueKind.Object
+                        ? Text(c, "key") switch
+                        {
+                            "new" => StatusCategory.ToDo,
+                            "indeterminate" => StatusCategory.InProgress,
+                            "done" => StatusCategory.Done,
+                            _ => StatusCategory.Unknown,
+                        }
+                        : StatusCategory.Unknown;
+                    seen[id] = new SourceStatus(name, category, Text(status, "description"));
+                    order.Add(id);
+                }
+            }
+
+        // OrderBy is stable: within a category, first appearance wins.
+        return order.Select(id => seen[id]).OrderBy(s => s.Category).ToList();
+    }
+
+    /// <summary>The approximate number of issues the JQL matches, or null when Jira refuses or fails.</summary>
+    private async Task<int?> ApproximateCountAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await SendAsync(HttpMethod.Post, "rest/api/3/search/approximate-count",
+                new { jql = config.Jql }, ct);
+            return doc.RootElement.TryGetProperty("count", out var count) && count.TryGetInt32(out var n) ? n : null;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    private static string Text(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
 
     private async Task<JsonDocument> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct)
     {

@@ -1,0 +1,9 @@
+{
+  "type": "repository",
+  "full_name": "Acme/Orders",
+  "name": "Orders",
+  "slug": "orders",
+  "is_private": true,
+  "mainbranch": { "name": "main", "type": "branch" },
+  "links": { "html": { "href": "https://bitbucket.org/acme/orders" } }
+}
