@@ -249,6 +249,8 @@ comment it addressed.
   follow-up ticket.
 - A comment from you reruns the gate round like an `@claude` tracker comment. A teammate's comment (with `fromOthers`)
   reruns it without deciding the gate.
+- Upgrading: on the first poll after you upgrade to a version with PR comments, `@claude` PR comments made since the
+  implement stage started, on tickets already waiting at the implement gate, are acted on.
 
 ```yaml
 prComments:
@@ -299,14 +301,17 @@ review:
 ### Evidence on high-risk PRs
 
 Before a gated implement round waits on you, an agent can run the app from the pushed branch and report what it saw, so
-you review a result instead of a diff alone. It runs once per pushed head and only when it is due:
+you review a result instead of a diff alone. It runs once per pushed head, only once the round has a pull request, and
+only when it is due:
 
-- `mode: high-risk` (the default): the reviewer said `high`, or the change touches a `riskAreas` path.
+- `mode: high-risk` (the default): with the risk reviewer on, when its verdict is `high` (a change that touches a
+  `riskAreas` path is always `high`); a `low` verdict gathers nothing. With the reviewer off, when the change touches a
+  `riskAreas` path; without `riskAreas` it never runs.
 - `mode: always`: every gated implement round. `mode: off`: never.
 
-The report has three parts: whether the project's tests and checks passed, what the agent saw when it exercised the
-app and your listed features (with screenshots), and which of its steps were guesses rather than taken from your
-config. It appears as a signed comment on the PR, as a line on the ticket in the tracker, and on the dashboard, where
+The report has three parts: a regression analysis (what the change could break, especially areas it was not meant to
+touch), test coverage of the affected areas with the result of the test suite, and a walkthrough of the app's major
+features with screenshots. It also says which of its steps were guesses rather than taken from your config. It appears as a signed comment on the PR, as a line on the ticket in the tracker, and on the dashboard, where
 the card and ticket detail show the states in words (Passed, Failed, Not run, Guessed) and the screenshots. A card
 whose evidence is due shows "Gathering evidence" and still counts as waiting on you.
 
@@ -326,7 +331,7 @@ evidence:
     notes: Sign in as demo@example.com
   features:                        # at most 20 things to exercise, in your own words
     - { name: Checkout, steps: Add an item to the basket and pay with the test card }
-  agent: { timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from `agent`
+  agent: { timeoutMinutes: 30 }   # only timeoutMinutes and model (default: agent.model) here; the rest comes from `agent`
 ```
 
 Onboarding can propose `run` and `features` for you.
