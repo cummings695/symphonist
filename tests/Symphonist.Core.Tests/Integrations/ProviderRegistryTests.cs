@@ -13,6 +13,8 @@ public class ProviderRegistryTests
         public string DisplayName => type;
         public string HttpClientName => client;
         public TrackerConfig Parse(TrackerSection section) => throw new NotSupportedException();
+        public IReadOnlyList<ProviderField> Fields => [];
+        public IReadOnlyDictionary<string, object?> ToValues(TrackerConfig config) => new Dictionary<string, object?>();
         public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) => throw new NotSupportedException();
         public Uri? IssueUrl(ProjectConfig project, string key) => null;
     }
@@ -21,9 +23,37 @@ public class ProviderRegistryTests
     {
         public string Type => type;
         public string HttpClientName => client;
+        public string DisplayName => type;
         public RepoConfig Parse(RepoSection section) => throw new NotSupportedException();
+        public IReadOnlyList<ProviderField> Fields => [];
+        public IReadOnlyDictionary<string, object?> ToValues(RepoConfig config) => new Dictionary<string, object?>();
+        public IReadOnlyList<string> FullNameKeys => ["owner", "name"];
         public ISourceControl Create(ProjectConfig project, HttpClient http, string token) => throw new NotSupportedException();
         public Uri PullRequestUrl(ProjectConfig project, long id) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeBuild(string type, string repoType) : IBuildProvider
+    {
+        public string Type => type;
+        public string RepoType => repoType;
+        public string DisplayName => type;
+        public BuildConfig Parse(BuildSection section) => throw new NotSupportedException();
+        public IReadOnlyList<ProviderField> Fields => [];
+        public IReadOnlyDictionary<string, object?> ToValues(BuildConfig config) => new Dictionary<string, object?>();
+        public IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void Registry_lists_providers_and_builds_for_repo()
+    {
+        var registry = new ProviderRegistry([new FakeTracker("jira", "j"), new FakeTracker("github-projects", "g")],
+            [new FakeRepo("github", "g"), new FakeRepo("bitbucket", "b")],
+            [new FakeBuild("github-actions", "github"), new FakeBuild("bitbucket-pipelines", "bitbucket")]);
+        Assert.Equal(["github-projects", "jira"], registry.AllTrackers.Select(p => p.Type));
+        Assert.Equal(["bitbucket", "github"], registry.AllRepos.Select(p => p.Type));
+        Assert.Equal(["bitbucket-pipelines", "github-actions"], registry.AllBuilds.Select(p => p.Type));
+        Assert.Equal(["github-actions"], registry.BuildsFor("github").Select(p => p.Type));
+        Assert.Empty(registry.BuildsFor("nope"));
     }
 
     [Fact]

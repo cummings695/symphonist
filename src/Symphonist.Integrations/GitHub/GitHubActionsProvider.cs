@@ -1,3 +1,4 @@
+using System.Globalization;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -13,6 +14,27 @@ public sealed class GitHubActionsProvider : IBuildProvider
     public string Type => "github-actions";
 
     public string RepoType => "github";
+
+    public string DisplayName => "GitHub Actions";
+
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("timeoutMinutes", "Timeout (minutes)", ProviderFieldKind.Number, Default: "45", Help: "How long to wait for a build or deployment"),
+        new("buildWorkflows", "Build workflows", ProviderFieldKind.List, Help: "Workflow file names that build; empty = all"),
+        new("deployWorkflows", "Deploy workflows", ProviderFieldKind.List, Help: "Workflow file names that deploy; empty = none"),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(BuildConfig config)
+    {
+        var c = (GitHubActionsConfig)config;
+        var values = new Dictionary<string, object?>
+        {
+            ["timeoutMinutes"] = c.TimeoutMinutes.ToString(CultureInfo.InvariantCulture),
+        };
+        if (c.BuildWorkflows.Count > 0) values["buildWorkflows"] = c.BuildWorkflows;
+        if (c.DeployWorkflows.Count > 0) values["deployWorkflows"] = c.DeployWorkflows;
+        return values;
+    }
 
     public BuildConfig Parse(BuildSection section)
     {

@@ -17,7 +17,39 @@ public sealed class BitbucketProvider : IRepoProvider
 {
     public string Type => "bitbucket";
 
+    public string DisplayName => "Bitbucket";
+
     public string HttpClientName => "bitbucket";
+
+    public IReadOnlyList<string> FullNameKeys { get; } = ["workspace", "slug"];
+
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("workspace", "Workspace", ProviderFieldKind.Text, Required: true, Help: "Bitbucket workspace id"),
+        new("slug", "Repository slug", ProviderFieldKind.Text, Required: true),
+        new("localPath", "Local clone path", ProviderFieldKind.Path, Required: true, Help: "Existing local clone; use an absolute path"),
+        new("mainBranch", "Main branch", ProviderFieldKind.Text, Default: "main", Help: "Feature PRs target it"),
+        new("productionBranch", "Production branch", ProviderFieldKind.Text, Default: "production", Help: "Release PRs target it"),
+        new("email", "Account email", ProviderFieldKind.Text, Required: true, Help: "Bitbucket account email"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the Bitbucket API token"),
+        new("mergeStrategy", "Merge strategy", ProviderFieldKind.Text, Default: "merge_commit"),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(RepoConfig config)
+    {
+        var c = (BitbucketRepoConfig)config;
+        return new Dictionary<string, object?>
+        {
+            ["workspace"] = c.Workspace,
+            ["slug"] = c.Slug,
+            ["localPath"] = c.LocalPath,
+            ["mainBranch"] = c.MainBranch,
+            ["productionBranch"] = c.ProductionBranch,
+            ["email"] = c.Email,
+            ["tokenSecret"] = c.TokenSecret,
+            ["mergeStrategy"] = c.MergeStrategy,
+        };
+    }
 
     public RepoConfig Parse(RepoSection section)
     {

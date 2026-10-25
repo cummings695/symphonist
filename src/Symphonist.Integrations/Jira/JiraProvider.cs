@@ -27,6 +27,29 @@ public sealed partial class JiraProvider : ITrackerProvider
             section.Required(dto.Email, "email"), section.Required(dto.Jql, "jql"), dto.ProjectKey);
     }
 
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("site", "Site URL", ProviderFieldKind.Url, Required: true, Help: "Jira Cloud base URL, e.g. https://acme.atlassian.net"),
+        new("email", "Account email", ProviderFieldKind.Text, Required: true, Help: "Atlassian account email (basic auth with the API token)"),
+        new("projectKey", "Project key", ProviderFieldKind.Text, Help: "Optional; the setup screen reads statuses from it"),
+        new("jql", "JQL", ProviderFieldKind.Text, Required: true, Help: "Tickets Symphonist works on"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the Atlassian API token"),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(TrackerConfig config)
+    {
+        var c = (JiraTrackerConfig)config;
+        var values = new Dictionary<string, object?>
+        {
+            ["site"] = c.Site.ToString(),
+            ["email"] = c.Email,
+        };
+        if (c.ProjectKey is not null) values["projectKey"] = c.ProjectKey;
+        values["jql"] = c.Jql;
+        values["tokenSecret"] = c.TokenSecret;
+        return values;
+    }
+
     public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new JiraTracker(http, Config(project), token);
 

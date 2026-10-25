@@ -19,7 +19,37 @@ public sealed class GitHubRepoProvider : IRepoProvider
 
     public string Type => "github";
 
+    public string DisplayName => "GitHub";
+
     public string HttpClientName => "github";
+
+    public IReadOnlyList<string> FullNameKeys { get; } = ["owner", "repo"];
+
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("owner", "Owner", ProviderFieldKind.Text, Required: true, Help: "User or organization that owns the repository"),
+        new("repo", "Repository", ProviderFieldKind.Text, Required: true, Help: "Repository name"),
+        new("localPath", "Local clone path", ProviderFieldKind.Path, Required: true, Help: "Existing local clone; use an absolute path"),
+        new("mainBranch", "Main branch", ProviderFieldKind.Text, Default: "main", Help: "Feature PRs target it"),
+        new("productionBranch", "Production branch", ProviderFieldKind.Text, Default: "production", Help: "Release PRs target it"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the GitHub token"),
+        new("mergeStrategy", "Merge strategy", ProviderFieldKind.Choice, Default: "merge", Options: MergeStrategies),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(RepoConfig config)
+    {
+        var c = (GitHubRepoConfig)config;
+        return new Dictionary<string, object?>
+        {
+            ["owner"] = c.Owner,
+            ["repo"] = c.Repo,
+            ["localPath"] = c.LocalPath,
+            ["mainBranch"] = c.MainBranch,
+            ["productionBranch"] = c.ProductionBranch,
+            ["tokenSecret"] = c.TokenSecret,
+            ["mergeStrategy"] = c.MergeStrategy,
+        };
+    }
 
     public RepoConfig Parse(RepoSection section)
     {

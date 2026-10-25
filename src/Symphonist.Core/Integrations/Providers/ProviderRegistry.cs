@@ -9,6 +9,17 @@ public sealed class ProviderRegistry(IEnumerable<ITrackerProvider> trackers, IEn
     private readonly Dictionary<string, IRepoProvider> _repos = repos.ToDictionary(p => p.Type, StringComparer.Ordinal);
     private readonly Dictionary<string, IBuildProvider> _builds = builds.ToDictionary(p => p.Type, StringComparer.Ordinal);
 
+    /// <summary>Every provider of the kind, ordinal by <c>Type</c>.</summary>
+    public IReadOnlyList<ITrackerProvider> AllTrackers { get; } = trackers.OrderBy(p => p.Type, StringComparer.Ordinal).ToList();
+
+    public IReadOnlyList<IRepoProvider> AllRepos { get; } = repos.OrderBy(p => p.Type, StringComparer.Ordinal).ToList();
+
+    public IReadOnlyList<IBuildProvider> AllBuilds { get; } = builds.OrderBy(p => p.Type, StringComparer.Ordinal).ToList();
+
+    /// <summary>The build providers that read through the given repo provider type; empty when none.</summary>
+    public IReadOnlyList<IBuildProvider> BuildsFor(string repoType) =>
+        AllBuilds.Where(p => string.Equals(p.RepoType, repoType, StringComparison.Ordinal)).ToList();
+
     public ITrackerProvider Tracker(string type) => Find(_trackers, "tracker", type);
 
     public IRepoProvider Repo(string type) => Find(_repos, "repo", type);

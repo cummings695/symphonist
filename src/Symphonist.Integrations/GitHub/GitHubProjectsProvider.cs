@@ -41,6 +41,33 @@ public sealed class GitHubProjectsProvider : ITrackerProvider
             List(dto.Statuses), List(dto.Repositories));
     }
 
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("owner", "Owner", ProviderFieldKind.Text, Required: true, Help: "Organization or user that owns the Project"),
+        new("project", "Project number", ProviderFieldKind.Number, Required: true, Help: "Project (v2) number, from the board URL"),
+        new("label", "Label", ProviderFieldKind.Text, Required: true, Help: "Open issues assigned to you with this label are picked up"),
+        new("statusField", "Status field", ProviderFieldKind.Text, Default: "Status", Help: "Single-select board field used as the status"),
+        new("statuses", "Statuses", ProviderFieldKind.List, Help: "Columns to pick up; empty = the pipeline statuses without the done one"),
+        new("repositories", "Repositories", ProviderFieldKind.List, Help: "owner/repo names to pick up; empty = this project repo"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the GitHub token"),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(TrackerConfig config)
+    {
+        var c = (GitHubProjectsTrackerConfig)config;
+        var values = new Dictionary<string, object?>
+        {
+            ["owner"] = c.Owner,
+            ["project"] = c.Project.ToString(CultureInfo.InvariantCulture),
+            ["label"] = c.Label,
+            ["statusField"] = c.StatusField,
+        };
+        if (c.Statuses is { Count: > 0 }) values["statuses"] = c.Statuses;
+        if (c.Repositories is { Count: > 0 }) values["repositories"] = c.Repositories;
+        values["tokenSecret"] = c.TokenSecret;
+        return values;
+    }
+
     public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new GitHubProjectsTracker(http, Config(project), token, PickupStatuses(project), RequiredStatuses(project),
             Repositories(project), loggers.CreateLogger<GitHubProjectsTracker>());

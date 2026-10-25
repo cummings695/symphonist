@@ -66,6 +66,9 @@ public class ProjectConfigLoaderTests
     {
         public string Type => "github-actions";
         public string RepoType => "github";
+        public string DisplayName => "Fake";
+        public IReadOnlyList<ProviderField> Fields => [];
+        public IReadOnlyDictionary<string, object?> ToValues(BuildConfig config) => new Dictionary<string, object?>();
         public BuildConfig Parse(BuildSection section) => new BitbucketPipelinesConfig(section.Type, section.TimeoutMinutes);
         public IBuildWatcher Create(ProjectConfig project, HttpClient http, string repoToken) =>
             throw new NotSupportedException();
