@@ -1,3 +1,5 @@
+using Symphonist.Core.Integrations;
+
 namespace Symphonist.Core.Config;
 
 public enum StageKind { Triage, Plan, Implement, Build, Uat, Release, Deploy, Done }
@@ -79,6 +81,12 @@ public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker
     }
 
     public PrCommentsConfig PrComments { get; init; } = PrCommentsConfig.Default;
+
+    /// <summary>
+    /// What a tracker or pull request comment starts with to ask Symphonist to rerun a stage: "@" and a name, default
+    /// "@claude". Matched without regard to case.
+    /// </summary>
+    public string CommentMarker { get; init; } = TrackerComments.DefaultMarker;
 
     /// <summary>Only these stage kinds have agent-readable output for a reviewer to judge.</summary>
     public static bool IsReviewable(StageKind kind) =>

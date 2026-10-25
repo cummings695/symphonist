@@ -48,6 +48,19 @@ public class EvidenceCommentTests
     }
 
     [Fact]
+    public void Comment_marker_is_broken_too_when_given()
+    {
+        var r = Report(headline: ["@symphonist go", "and @Claude"]);
+        var text = EvidenceComment.Format(r, false, "@symphonist");
+        Assert.DoesNotContain("@symphonist", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("@claude", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("@symphonist", EvidenceComment.Failed("@symphonist x", "@symphonist"),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("@symphonist",
+            EvidenceComment.TrackerLine(Report(headline: ["@symphonist x"]), "@symphonist"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Failed_and_tracker_line()
     {
         Assert.Equal("Evidence could not be gathered: timed out", EvidenceComment.Failed("timed out"));

@@ -34,7 +34,7 @@ public sealed class Ticket
     public DateTimeOffset? StageStartedAt { get; set; }
     public DateTimeOffset? WaitingSince { get; set; }
 
-    /// <summary>The Created time of the newest developer "@claude" comment acted on; older ones are never acted on again.</summary>
+    /// <summary>The Created time of the newest developer comment (starting with the project's comment marker) acted on; older ones are never acted on again.</summary>
     public DateTimeOffset? ClaudeCommentsHandledAt { get; set; }
 
     /// <summary>
@@ -49,7 +49,7 @@ public sealed class Ticket
     /// <summary>Evidence is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
     public bool EvidenceDue { get; set; }
 
-    /// <summary>The Created time of the newest PR "@claude" comment acted on; older ones are never acted on again.</summary>
+    /// <summary>The Created time of the newest PR comment (starting with the comment marker) acted on; older ones are never acted on again.</summary>
     public DateTimeOffset? PrCommentsHandledAt { get; set; }
 
     /// <summary>PR comments (PrFeedback JSON) the next implement run addresses; cleared when that run succeeds or the stage is entered.</summary>

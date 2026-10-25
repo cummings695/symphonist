@@ -45,6 +45,16 @@ public static partial class ProjectConfigLoader
     [GeneratedRegex(@"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z")]
     private static partial Regex ProjectId();
 
+    [GeneratedRegex(@"\A@[A-Za-z0-9][A-Za-z0-9_-]{0,38}\z")]
+    private static partial Regex CommentMarkerPattern();
+
+    /// <summary>"@" and a name of letters, digits, '-' and '_' starting with a letter or digit (at most 39 characters in all).</summary>
+    public static bool IsValidCommentMarker(string marker) => CommentMarkerPattern().IsMatch(marker);
+
+    /// <summary>The error for an invalid <c>commentMarker</c>, naming the field and the rule.</summary>
+    public static string CommentMarkerRule(string marker) =>
+        $"invalid commentMarker '{marker}': it must start with '@' followed by a letter or digit, then letters, digits, '-' or '_' (at most 39 characters in all)";
+
     /// <summary>The id keys every stored ticket and names work and log folders, so only plain names are accepted.</summary>
     public static bool IsValidProjectId(string id) => ProjectId().IsMatch(id) && !IsReservedDeviceName(id);
 
@@ -104,6 +114,9 @@ public static partial class ProjectConfigLoader
         var packages = MapPackages(agent.Packages);
         var pipeline = MapPipeline(d.Pipeline);
 
+        var commentMarker = d.CommentMarker ?? Integrations.TrackerComments.DefaultMarker;
+        if (!IsValidCommentMarker(commentMarker)) throw new ProjectConfigException(CommentMarkerRule(commentMarker));
+
         var prompts = new Dictionary<StageKind, string>();
         foreach (var (kind, path) in d.Prompts ?? [])
             prompts[ParseEnum<StageKind>(kind, "prompt stage kind")] = Path.GetFullPath(Required(path, $"prompts.{kind}"), dir);
@@ -125,6 +138,7 @@ public static partial class ProjectConfigLoader
             Review = MapReview(d.Review, agent, isolation, packages, dir),
             Evidence = MapEvidence(d.Evidence, agent, isolation, packages, dir),
             PrComments = new PrCommentsConfig(d.PrComments?.FromOthers ?? false),
+            CommentMarker = commentMarker,
         };
     }
 
@@ -312,6 +326,7 @@ public static partial class ProjectConfigLoader
         public Dictionary<string, object?>? Build { get; set; }
         public AgentDto? Agent { get; set; }
         public int? MaxAttemptsPerStage { get; set; }
+        public string? CommentMarker { get; set; }
         public List<StageDto?>? Pipeline { get; set; }
         public Dictionary<string, string?>? Prompts { get; set; }
         public List<RiskAreaDto?>? RiskAreas { get; set; }

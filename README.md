@@ -231,9 +231,19 @@ comments are ignored, and a card move made in the same poll takes priority. On G
 notifies the GitHub user `claude` and triggers the Claude GitHub App if you have it installed on the repository.
 Symphonist reads only the first 20 assignees and 50 labels of an issue, so keep the assignee and label within those.
 
+The marker is `@claude` unless the project sets `commentMarker` (an `@` and a name of letters, digits, `-` and `_`, at
+most 39 characters, matched without regard to case). Quote it in the YAML, because a bare `@` starts a reserved YAML
+indicator. The same marker drives Jira, GitHub issue and PR comments, and it is also on the project setup screen:
+
+```yaml
+commentMarker: "@symphonist"
+```
+
+Symphonist breaks the marker (and `@claude`) in the comments it posts, so its own text never reads as a request.
+
 ### Answering Symphonist on the PR
 
-At the implement stage you can also steer the fix from the pull request. A PR comment that starts with `@claude` reruns
+At the implement stage you can also steer the fix from the pull request. A PR comment that starts with the comment marker (`@claude`, or the project's `commentMarker`) reruns
 implement on the same PR and branch, with the comment (minus the marker) as feedback. Symphonist replies to each
 comment it addressed.
 

@@ -8,10 +8,10 @@ public static class EvidenceComment
 {
     /// <summary>
     /// PR comment (unsigned; the caller signs it): a guessed warning first, the headline, then Regressions, Tests and
-    /// coverage and Walkthrough, failures first in each. All agent text is bounded, and every "@claude" is
-    /// broken up (it would read as a request).
+    /// coverage and Walkthrough, failures first in each. All agent text is bounded, and every "@claude" and every
+    /// <paramref name="marker"/> (the project's comment marker) is broken up (it would read as a request).
     /// </summary>
-    public static string Format(EvidenceReport report, bool hasScreenshots)
+    public static string Format(EvidenceReport report, bool hasScreenshots, string? marker = null)
     {
         var sb = new StringBuilder();
         if (report.Guessed)
@@ -51,17 +51,17 @@ public static class EvidenceComment
         }
         if (hasScreenshots) sb.AppendLine().AppendLine("Screenshots: on the Symphonist dashboard");
 
-        return Neutralise(sb.ToString().TrimEnd());
+        return TrackerComments.EscapeMentions(sb.ToString().TrimEnd(), marker);
     }
 
-    public static string Failed(string reason) =>
-        Neutralise($"Evidence could not be gathered: {ReviewerText.Line(reason, ReviewerText.MaxSummaryChars)}");
+    public static string Failed(string reason, string? marker = null) =>
+        TrackerComments.EscapeMentions(
+            $"Evidence could not be gathered: {ReviewerText.Line(reason, ReviewerText.MaxSummaryChars)}", marker);
 
-    public static string TrackerLine(EvidenceReport report) =>
-        Neutralise("Evidence posted on the PR: "
-            + (report.Headline.Count > 0 ? ReviewerText.Line(report.Headline[0], ReviewerText.MaxSummaryChars) : "(no headline)"));
+    public static string TrackerLine(EvidenceReport report, string? marker = null) =>
+        TrackerComments.EscapeMentions("Evidence posted on the PR: "
+            + (report.Headline.Count > 0 ? ReviewerText.Line(report.Headline[0], ReviewerText.MaxSummaryChars) : "(no headline)"),
+            marker);
 
     private static string Bound(string text) => ReviewerText.Line(text, ReviewerText.MaxItemChars);
-
-    private static string Neutralise(string text) => TrackerComments.EscapeMentions(text);
 }

@@ -2114,6 +2114,55 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Single(store.EventMessages("ORD-1"), m => m.StartsWith("@claude PR comment", StringComparison.Ordinal));
     }
 
+    private void UseCommentMarker(string marker)
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path) + $"\ncommentMarker: \"{marker}\"\n");
+        registry.Reload();
+        Assert.Equal(marker, registry.Get("orders").CommentMarker);
+    }
+
+    [Fact] public async Task Tracker_comment_with_the_projects_marker_reruns_and_claude_is_ignored()
+    {
+        UseCommentMarker("@symphonist");
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude ignored"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(6), "@Symphonist answers: A"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Running, "answers: A"), (t.StageId, t.Status, t.Feedback));
+        Assert.Contains("@symphonist comment: rerunning triage", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Pr_comment_with_the_projects_marker_reruns_and_claude_is_ignored()
+    {
+        UseCommentMarker("@symphonist");
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        PrComments(7, PrComment(5, "@claude rename Foo"), PrComment(6, "@symphonist rename Foo to Bar", id: "issue:2"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Running), (t.StageId, t.Status));
+        Assert.Equal("rename Foo to Bar", Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson)).Request);
+        Assert.Contains("@symphonist PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+    }
+
     [Fact] public async Task Others_comments_ignored_by_default()
     {
         await SeedImplementGate();

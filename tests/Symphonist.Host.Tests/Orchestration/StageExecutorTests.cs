@@ -778,6 +778,17 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(TrackerComments.Sign("@​claude can take it from here; or @​Claude."), Assert.Single(scm.Replies).Body);
     }
 
+    [Fact] public async Task Agent_replies_cannot_mention_the_projects_marker()
+    {
+        agent.Results.Enqueue(FixResult(("issue:1", "@Symphonist can take it from here, or @claude.")));
+
+        await executor.ExecuteAsync(project with { CommentMarker = "@symphonist" }, io, FixTicket(Mine("issue:1")), source,
+            CancellationToken.None);
+
+        Assert.Equal(TrackerComments.Sign("@\u200BSymphonist can take it from here, or @\u200Bclaude."),
+            Assert.Single(scm.Replies).Body);
+    }
+
     [Fact] public async Task No_change_fix_run_completes_and_replies()
     {
         git.OnCommit = _ => false;

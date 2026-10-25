@@ -129,7 +129,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             // The tracker comment first: if it throws the stage is retried, and replies already posted would be posted again.
             await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
             string? replyEvent = null;
-            if (fixRun) replyEvent = await ReplyAsync(io.SourceControl, existingPr, feedback, run, ct);
+            if (fixRun) replyEvent = await ReplyAsync(p, io.SourceControl, existingPr, feedback, run, ct);
             return new ExecutionResult(ExecutionStatus.Completed, Event: replyEvent);
         }
 
@@ -142,7 +142,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     }
 
     /// <summary>Replies, signed, to each comment the fix run addressed. Failures are returned as an event, not thrown.</summary>
-    private async Task<string?> ReplyAsync(ISourceControl sc, long prId, IReadOnlyList<PrFeedbackComment> comments,
+    private async Task<string?> ReplyAsync(ProjectConfig p, ISourceControl sc, long prId, IReadOnlyList<PrFeedbackComment> comments,
         AgentStep run, CancellationToken ct)
     {
         string? head = null;
@@ -159,7 +159,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             try
             {
                 await sc.ReplyToPullRequestCommentAsync(prId, original,
-                    TrackerComments.Sign(TrackerComments.EscapeMentions(replies.GetValueOrDefault(c.Id) ?? fallback)), ct);
+                    TrackerComments.Sign(TrackerComments.EscapeMentions(replies.GetValueOrDefault(c.Id) ?? fallback, p.CommentMarker)), ct);
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
             {

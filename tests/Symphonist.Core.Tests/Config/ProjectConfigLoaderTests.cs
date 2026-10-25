@@ -412,6 +412,29 @@ public class ProjectConfigLoaderTests
     }
 
     [Fact]
+    public void Comment_marker_defaults_and_parses()
+    {
+        Assert.Equal("@claude", LoadYaml(FixtureYaml()).CommentMarker);
+        Assert.Equal("@symphonist", LoadYaml(FixtureYaml() + "commentMarker: \"@symphonist\"\n").CommentMarker);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("@")]
+    [InlineData("@ claude")]
+    [InlineData("@two words")]
+    [InlineData("@-dash")]
+    [InlineData("@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("")]
+    public void Comment_marker_must_be_an_at_sign_and_a_name(string marker)
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml() + $"commentMarker: \"{marker}\"\n"));
+        Assert.Contains("commentMarker", ex.Message);
+        Assert.Contains("@", ex.Message);
+    }
+
+    [Fact]
     public void Evidence_section_parses()
     {
         var p = LoadYaml(FixtureYaml() + string.Join("\n",

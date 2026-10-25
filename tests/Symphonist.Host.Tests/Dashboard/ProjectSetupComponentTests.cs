@@ -510,6 +510,40 @@ public sealed class ProjectSetupComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Comment_marker_field_edits_saves_and_names_itself_in_the_pr_comment_texts()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        Assert.Equal("Comment marker", cut.Find("label[for='comment-marker']").TextContent.Trim());
+        Assert.Equal("@claude", cut.Find("#comment-marker").GetAttribute("value"));
+
+        cut.Find("#comment-marker").Change("@symphonist");
+
+        Assert.Equal("@symphonist", service.Current!.Form.CommentMarker);
+        Assert.Equal("Let anyone's @symphonist PR comments start a fix run",
+            cut.Find("label[for='pr-comments-others']").TextContent.Trim());
+        Assert.Contains("Your own @symphonist comments", cut.Find("[data-pr-comments]").TextContent);
+
+        await Button(cut, "Save project").ClickAsync(new());
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-saved]")));
+        Assert.Equal("@symphonist", registry.Projects.Single(p => p.Id == "orders").CommentMarker);
+    }
+
+    [Fact]
+    public async Task A_comment_marker_without_an_at_sign_is_not_saved()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        var text = File.ReadAllText(PathOf("orders.yaml"));
+
+        cut.Find("#comment-marker").Change("symphonist");
+        await Button(cut, "Save project").ClickAsync(new());
+
+        Assert.Equal(text, File.ReadAllText(PathOf("orders.yaml")));
+        Assert.Contains("commentMarker", cut.Markup);
+    }
+
+    [Fact]
     public async Task Feature_editor_removes_a_feature()
     {
         WriteProject("orders");

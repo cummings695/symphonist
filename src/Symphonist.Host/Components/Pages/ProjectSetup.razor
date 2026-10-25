@@ -210,6 +210,12 @@
             </fieldset>
             <div class="setup-fields">
                 <div class="setup-field">
+                    <label for="comment-marker">Comment marker</label>
+                    <input id="comment-marker" type="text" placeholder="@@claude" aria-describedby="comment-marker-hint"
+                           @bind="Form.CommentMarker" @bind:after="Edited" />
+                    <span class="hint" id="comment-marker-hint">Comments starting with this (e.g. @@claude) ask Symphonist to rerun a stage; must start with @@.</span>
+                </div>
+                <div class="setup-field">
                     <label for="max-attempts">Max attempts per stage</label>
                     <input id="max-attempts" type="number" min="1" inputmode="numeric" @bind="Form.MaxAttemptsPerStage" @bind:after="Edited" />
                 </div>
@@ -337,11 +343,11 @@
 
         <section class="setup-section" aria-labelledby="setup-pr-comments" data-pr-comments>
             <h2 id="setup-pr-comments">PR comments</h2>
-            <p class="hint">Your own @@claude comments on the pull request always start a fix run on the same branch.</p>
+            <p class="hint">Your own @Form.CommentMarker comments on the pull request always start a fix run on the same branch.</p>
             <div class="choice">
                 <input id="pr-comments-others" type="checkbox" checked="@Form.PrCommentsFromOthers"
                        aria-describedby="pr-comments-others-hint" @onchange="SetPrCommentsFromOthers" />
-                <label for="pr-comments-others">Let anyone's @@claude PR comments start a fix run</label>
+                <label for="pr-comments-others">Let anyone's @Form.CommentMarker PR comments start a fix run</label>
                 <span class="hint" id="pr-comments-others-hint">Off by default. When on, teammates' comments direct an agent that pushes under your account.</span>
             </div>
         </section>

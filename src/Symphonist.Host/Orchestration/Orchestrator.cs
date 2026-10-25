@@ -388,7 +388,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// Developer "@claude" comments made since the stage started rerun it, with the comments as feedback, once it waits
+    /// Developer comments starting with the project's comment marker made since the stage started rerun it, with the comments as feedback, once it waits
     /// at its gate or is blocked; comments made while it is pending or running wait for that. At implement, "@claude"
     /// comments on its pull request do too (from teammates as well when the project allows it), combined with the
     /// tracker's into one run. Returns whether it reran.
@@ -400,7 +400,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var since = Later(t.ClaudeCommentsHandledAt, t.StageStartedAt);
         var comments = s.Comments
             .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
-            .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body)))
+            .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body, p.CommentMarker)))
             .Where(c => c.Request is not null)
             .OrderBy(c => c.Created)
             .ToList();
@@ -412,8 +412,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             : comments.Count > 0 ? "(no details given)"
             : "";
         await AddEventAsync(t, prComments.Count == 0 // the cause before its effects
-            ? $"@claude comment: rerunning {t.StageId}"
-            : $"@claude PR comment from {string.Join(", ", prComments.Select(c => c.Author).Distinct(StringComparer.Ordinal))}: rerunning {t.StageId}",
+            ? $"{p.CommentMarker} comment: rerunning {t.StageId}"
+            : $"{p.CommentMarker} PR comment from {string.Join(", ", prComments.Select(c => c.Author).Distinct(StringComparer.Ordinal))}: rerunning {t.StageId}",
             ct);
         var stageId = t.StageId;
         var outcome = PipelineEngine.SendBack(p, t, feedback, stageId, now);
@@ -421,7 +421,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (comments.Count == 0 && !prComments.Any(c => c.IsMine)) outcome = outcome with { Decision = null };
         if (prComments.Count > 0)
         {
-            t.PrFeedbackJson = PrFeedback.ToJson(prComments.Select(PrFeedback.From).ToList()); // after the send-back clears it
+            t.PrFeedbackJson = PrFeedback.ToJson(prComments.Select(c => PrFeedback.From(c, p.CommentMarker)).ToList()); // after the send-back clears it
             t.PrCommentsHandledAt = prComments[^1].Created;
         }
         if (comments.Count > 0) t.ClaudeCommentsHandledAt = comments[^1].Created;
@@ -431,7 +431,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// The "@claude" comments on the implement stage's pull request not yet acted on, oldest first; none at other stages.
+    /// The marker comments on the implement stage's pull request not yet acted on, oldest first; none at other stages.
     /// A listing error is recorded once and counts as none.
     /// </summary>
     private async Task<IReadOnlyList<PullRequestComment>> PrClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io,
@@ -441,7 +441,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         try
         {
             return PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct),
-                Later(t.PrCommentsHandledAt, t.StageStartedAt), p.PrComments.FromOthers);
+                Later(t.PrCommentsHandledAt, t.StageStartedAt), p.PrComments.FromOthers, p.CommentMarker);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -452,7 +452,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// After implement's pull request merged, tells each "@claude" comment that arrived too late (while the stage was
+    /// After implement's pull request merged, tells each marker comment that arrived too late (while the stage was
     /// approved) that it was not addressed. Best effort: failures are only logged.
     /// </summary>
     private async Task ReplyMergedFirstAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, DateTimeOffset? since,
@@ -463,7 +463,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         try
         {
             late = PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct), since,
-                p.PrComments.FromOthers);
+                p.PrComments.FromOthers, p.CommentMarker);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -840,7 +840,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (!current)
                 await AddEventAsync(t, $"evidence for {run.StageId} finished after the gate was decided; not posted", ct);
             else if (t.PullRequestId is { } prId)
-                posted = await PostEvidenceAsync(io, t, prId, outcome, ct);
+                posted = await PostEvidenceAsync(p, io, t, prId, outcome, ct);
             await store.AddEvidenceAsync(new EvidenceRecord(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
                 outcome.Head, outcome.Report?.ToJson(), outcome.Report?.HasIssues ?? false, outcome.Error,
                 outcome.Screenshots, posted), ct);
@@ -857,14 +857,14 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// Posts the signed report (or failure) to the pull request, then a signed line to the tracker. Returns whether the
     /// pull request comment was posted; a failure is recorded as an event.
     /// </summary>
-    private async Task<bool> PostEvidenceAsync(ProjectIntegrations io, Ticket t, long prId, EvidenceOutcome outcome,
-        CancellationToken ct)
+    private async Task<bool> PostEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, long prId,
+        EvidenceOutcome outcome, CancellationToken ct)
     {
         var report = outcome.Report;
-        var failed = EvidenceComment.Failed(outcome.Error ?? "no evidence report");
+        var failed = EvidenceComment.Failed(outcome.Error ?? "no evidence report", p.CommentMarker);
         try
         {
-            var body = report is null ? failed : EvidenceComment.Format(report, outcome.Screenshots.Count > 0);
+            var body = report is null ? failed : EvidenceComment.Format(report, outcome.Screenshots.Count > 0, p.CommentMarker);
             await io.SourceControl.CommentOnPullRequestAsync(prId, TrackerComments.Sign(body), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -875,7 +875,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
         try
         {
-            var line = report is null ? failed : EvidenceComment.TrackerLine(report);
+            var line = report is null ? failed : EvidenceComment.TrackerLine(report, p.CommentMarker);
             await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(line), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)

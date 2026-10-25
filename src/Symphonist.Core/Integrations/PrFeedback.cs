@@ -2,12 +2,12 @@ using System.Text.Json;
 
 namespace Symphonist.Core.Integrations;
 
-/// <summary>One PR comment a fix run addresses: Request is the body with the @claude marker removed ("" when nothing followed).</summary>
+/// <summary>One PR comment a fix run addresses: Request is the body with the comment marker removed ("" when nothing followed).</summary>
 public sealed record PrFeedbackComment(string Id, string Author, bool IsMine, string Request, string? Path, int? Line,
     string? ParentId);
 
 /// <summary>
-/// The "@claude" pull request comments that rerun implement on the same PR, and their stored form
+/// The pull request comments starting with the project's comment marker (default "@claude") that rerun implement on the same PR, and their stored form
 /// (<see cref="Pipeline.Ticket.PrFeedbackJson"/>).
 /// </summary>
 public static class PrFeedback
@@ -17,15 +17,15 @@ public static class PrFeedback
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     /// <summary>
-    /// Tagged, unsigned comments newer than <paramref name="since"/>, from me (or anyone when
-    /// <paramref name="fromOthers"/>), oldest first; the newest <see cref="MaxComments"/> are kept.
+    /// Comments starting with <paramref name="marker"/>, unsigned, newer than <paramref name="since"/>, from me (or
+    /// anyone when <paramref name="fromOthers"/>), oldest first; the newest <see cref="MaxComments"/> are kept.
     /// </summary>
     public static IReadOnlyList<PullRequestComment> Select(IEnumerable<PullRequestComment> comments, DateTimeOffset? since,
-        bool fromOthers)
+        bool fromOthers, string marker = TrackerComments.DefaultMarker)
     {
         var selected = comments
             .Where(c => (c.IsMine || fromOthers) && (since is null || c.Created > since)
-                        && !TrackerComments.IsSymphonist(c.Body) && TrackerComments.ClaudeRequest(c.Body) is not null)
+                        && !TrackerComments.IsSymphonist(c.Body) && TrackerComments.ClaudeRequest(c.Body, marker) is not null)
             .OrderBy(c => c.Created)
             .ToList();
         return selected.Count > MaxComments ? selected[^MaxComments..] : selected;
@@ -51,8 +51,8 @@ public static class PrFeedback
     }
 
     /// <summary>The comment as a fix run sees it: the request after the marker, at most <see cref="MaxRequestChars"/>.</summary>
-    public static PrFeedbackComment From(PullRequestComment c) =>
-        new(c.Id, c.Author, c.IsMine, Bound(TrackerComments.ClaudeRequest(c.Body) ?? ""), c.Path, c.Line, c.ParentId);
+    public static PrFeedbackComment From(PullRequestComment c, string marker = TrackerComments.DefaultMarker) =>
+        new(c.Id, c.Author, c.IsMine, Bound(TrackerComments.ClaudeRequest(c.Body, marker) ?? ""), c.Path, c.Line, c.ParentId);
 
     private static string Bound(string text)
     {

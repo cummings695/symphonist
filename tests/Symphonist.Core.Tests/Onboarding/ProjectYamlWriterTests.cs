@@ -309,6 +309,44 @@ public class ProjectYamlWriterTests
     }
 
     [Fact]
+    public void Comment_marker_is_omitted_by_default_and_written_otherwise()
+    {
+        var form = Sample("orders.example.yaml");
+        Assert.Null(ProjectYamlWriter.Sections(form, Registry)["commentMarker"]);
+
+        form.CommentMarker = "@symphonist";
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        Assert.Contains("commentMarker:", text);
+        Assert.Equal("@symphonist", Parse(text).CommentMarker);
+        Assert.Equal("@symphonist", ProjectForm.From(Parse(text), Registry).CommentMarker);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("@")]
+    [InlineData("@two words")]
+    [InlineData("@-x")]
+    public void Form_rejects_a_bad_comment_marker(string marker)
+    {
+        var form = Filled();
+        form.CommentMarker = marker;
+        Assert.Contains(form.Validate(Registry), e => e.Contains("commentMarker") && e.Contains("@"));
+    }
+
+    [Fact]
+    public void Update_adds_a_changed_comment_marker()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml"));
+        var original = Sample("orders.example.yaml");
+        var edited = original.Clone();
+        edited.CommentMarker = "@symphonist";
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Equal("@symphonist", Parse(result).CommentMarker);
+    }
+
+    [Fact]
     public void Update_uses_the_files_line_ending()
     {
         var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\r\n");

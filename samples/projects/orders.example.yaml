@@ -54,6 +54,11 @@ agent:
 # Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
 # maxAttemptsPerStage: 3
 
+# Comments starting with this ask Symphonist to rerun a stage, on the ticket or the pull request. An "@" and a name of
+# letters, digits, "-" and "_" (at most 39 characters), matched without regard to case. Keep the quotes: a bare "@"
+# is not valid YAML. Default: "@claude".
+# commentMarker: "@claude"
+
 # Stages run in order; the last one must be kind "done".
 #   kind:                triage | plan | implement | build | uat | release | deploy | done
 #   gate:                human = wait for approval (symphonist approve, or move the card to approvedWhenStatus);

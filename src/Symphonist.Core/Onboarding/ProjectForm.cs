@@ -1,5 +1,6 @@
 using System.Globalization;
 using Symphonist.Core.Config;
+using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
 
 namespace Symphonist.Core.Onboarding;
@@ -144,6 +145,9 @@ public sealed class ProjectForm
     public ProviderSectionForm Build { get; set; } = new();
     public AgentForm Agent { get; set; } = new();
     public int MaxAttemptsPerStage { get; set; } = 3;
+
+    /// <summary>The comment marker: "@" and a name. Default "@claude".</summary>
+    public string CommentMarker { get; set; } = TrackerComments.DefaultMarker;
     public List<StageForm> Pipeline { get; set; } = [];
     public List<RiskAreaForm> RiskAreas { get; set; } = [];
     public ReviewForm Review { get; set; } = new();
@@ -219,6 +223,7 @@ public sealed class ProjectForm
                 PackagesNpm = [.. config.Agent.Packages.Npm],
             },
             MaxAttemptsPerStage = config.MaxAttemptsPerStage,
+            CommentMarker = config.CommentMarker,
             Pipeline = config.Pipeline.Select(s => new StageForm
             {
                 Id = s.Id, Kind = s.Kind, Gate = s.Gate, EntryStatuses = [.. s.EntryStatuses],
@@ -291,6 +296,7 @@ public sealed class ProjectForm
         Build = Build.Clone(),
         Agent = Agent.Clone(),
         MaxAttemptsPerStage = MaxAttemptsPerStage,
+        CommentMarker = CommentMarker,
         Pipeline = Pipeline.Select(s => s.Clone()).ToList(),
         RiskAreas = RiskAreas.Select(a => a.Clone()).ToList(),
         Review = Review.Clone(),
@@ -309,6 +315,7 @@ public sealed class ProjectForm
         var errors = new List<string>();
         Line("id", Id, errors);
         Line("name", Name, errors);
+        if (!ProjectConfigLoader.IsValidCommentMarker(CommentMarker)) errors.Add(ProjectConfigLoader.CommentMarkerRule(CommentMarker));
         ValidateSection("tracker", Tracker, providers.AllTrackers.FirstOrDefault(p => p.Type == Tracker.Type)?.Fields, errors);
         ValidateSection("repo", Repo, providers.AllRepos.FirstOrDefault(p => p.Type == Repo.Type)?.Fields, errors);
         ValidateSection("build", Build, providers.AllBuilds.FirstOrDefault(p => p.Type == Build.Type)?.Fields, errors);

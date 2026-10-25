@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Symphonist.Core.Config;
+using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
@@ -12,7 +13,7 @@ namespace Symphonist.Core.Onboarding;
 public static class ProjectYamlWriter
 {
     public static readonly IReadOnlyList<string> SectionOrder =
-        ["id", "name", "tracker", "repo", "build", "agent", "maxAttemptsPerStage", "pipeline", "riskAreas", "review", "evidence", "prComments", "prompts"];
+        ["id", "name", "tracker", "repo", "build", "agent", "maxAttemptsPerStage", "commentMarker", "pipeline", "riskAreas", "review", "evidence", "prComments", "prompts"];
 
     private static readonly string[] ProviderSlots = ["tracker", "repo", "build"];
 
@@ -37,6 +38,8 @@ public static class ProjectYamlWriter
             ["agent"] = Agent(form.Agent),
             ["maxAttemptsPerStage"] = form.MaxAttemptsPerStage == 3 ? null
                 : $"maxAttemptsPerStage: {form.MaxAttemptsPerStage.ToString(CultureInfo.InvariantCulture)}\n",
+            ["commentMarker"] = form.CommentMarker == TrackerComments.DefaultMarker ? null
+                : $"commentMarker: {Scalar(form.CommentMarker)}\n",
             ["pipeline"] = Pipeline(form.Pipeline),
             ["riskAreas"] = RiskAreas(form.RiskAreas),
             ["review"] = Review(form.Review),
@@ -260,6 +263,7 @@ public static class ProjectYamlWriter
         "agent" => ["The coding agent. isolation: container (default, Docker sandbox) or host (requires allowedTools).",
             "allowedDomains are the extra hosts the container may reach."],
         "maxAttemptsPerStage" => ["Failed attempts per stage before the ticket is Blocked. Default: 3."],
+        "commentMarker" => ["Comments starting with this (an \"@\" and a name) ask Symphonist to rerun a stage, on the ticket or the PR. Default: \"@claude\"."],
         "pipeline" =>
         [
             "Stages run in order; the last one must be kind \"done\".",
@@ -275,7 +279,7 @@ public static class ProjectYamlWriter
             "gate: auto stages judged low risk)."],
         "evidence" => ["Evidence for the developer at a gated implement round: off, high-risk (default) or always.",
             "run says how to start the app; features are walked end to end. Nothing here approves or blocks anything."],
-        "prComments" => ["fromOthers: true lets PR comments by other people tagged @claude trigger a fix run. Default: false."],
+        "prComments" => ["fromOthers: true lets PR comments by other people starting with the commentMarker trigger a fix run. Default: false."],
         "prompts" => ["Prompt overrides per stage kind, as files relative to this file."],
         _ => [],
     };

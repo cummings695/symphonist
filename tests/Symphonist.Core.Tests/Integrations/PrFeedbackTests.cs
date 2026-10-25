@@ -26,6 +26,14 @@ public class PrFeedbackTests
             .Select(c => c.Id)); // no since: every one
     }
 
+    [Fact] public void Select_and_From_use_the_given_marker()
+    {
+        var selected = PrFeedback.Select([C("1", 5, "@symphonist rename it"), C("2", 6, "@claude old marker")], T0, false,
+            "@symphonist");
+        Assert.Equal(["1"], selected.Select(c => c.Id));
+        Assert.Equal("rename it", PrFeedback.From(selected[0], "@symphonist").Request);
+    }
+
     [Fact] public void Select_with_from_others()
     {
         var selected = PrFeedback.Select([

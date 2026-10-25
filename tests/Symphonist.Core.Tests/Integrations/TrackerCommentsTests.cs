@@ -26,6 +26,30 @@ public class TrackerCommentsTests
         Assert.Equal(expected, TrackerComments.ClaudeRequest(body));
 
     [Theory]
+    [InlineData("@symphonist do it", "do it")]
+    [InlineData("  @SymPhonist\nmore", "more")]
+    [InlineData("@symphonist", "")]
+    public void ClaudeRequest_uses_the_given_marker(string body, string expected) =>
+        Assert.Equal(expected, TrackerComments.ClaudeRequest(body, "@symphonist"));
+
+    [Theory]
+    [InlineData("@claude do it")]
+    [InlineData("@symphonistx do it")]
+    [InlineData("hey @symphonist")]
+    public void ClaudeRequest_ignores_other_markers(string body) =>
+        Assert.Null(TrackerComments.ClaudeRequest(body, "@symphonist"));
+
+    [Fact]
+    public void EscapeMentions_also_breaks_the_given_marker()
+    {
+        var escaped = TrackerComments.EscapeMentions("@Symphonist and @claude and \\@SYMPHONIST", "@symphonist");
+        Assert.Equal("@\u200BSymphonist and @\u200Bclaude and \\@\u200BSYMPHONIST", escaped);
+        Assert.DoesNotContain("@symphonist", escaped, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(escaped, TrackerComments.EscapeMentions(escaped, "@symphonist"));
+        Assert.Equal("@symphonist", TrackerComments.EscapeMentions("@symphonist")); // only when given
+    }
+
+    [Theory]
     [InlineData("hey @claude")]
     [InlineData("@claudette")]
     [InlineData("note to Sam")]
