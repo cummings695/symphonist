@@ -103,8 +103,9 @@ public sealed class EvidenceRunner(IGitWorkspace git, IAgentRunners agents, ITic
         if (!needed)
             return new(EvidenceStatus.NotNeeded, head, null, [], null, $"no evidence needed for {Short(head)}: not high risk");
 
-        // One evidence run per head: a stored report for this commit is reused.
-        if ((await store.EvidenceAsync(t.Id, ct)).FirstOrDefault(r => r.Head == head && r.ReportJson is not null) is { } done)
+        // One evidence run per head: a report for this commit already on the PR is reused. One never posted (the PR
+        // comment failed, or the round was decided first) is gathered again, so the PR gets it.
+        if ((await store.EvidenceAsync(t.Id, ct)).FirstOrDefault(r => r.Head == head && r.ReportJson is not null && r.Posted) is { } done)
             return new(EvidenceStatus.AlreadyGathered, head, done.Report, done.Screenshots, null,
                 $"evidence for {Short(head)} already gathered");
 

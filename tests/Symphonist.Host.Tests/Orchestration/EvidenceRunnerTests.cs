@@ -183,6 +183,21 @@ public sealed class EvidenceRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Unposted_evidence_for_same_head_is_gathered_again()
+    {
+        var t = Implement(RiskLevel.High);
+        var report = EvidenceParser.Parse(ReportJson(("open", "home.png")))!;
+        store.Evidence.Add(new EvidenceRecord(t.Id, "orders", "implement", t.WaitingSince!.Value, Now.AddMinutes(-1),
+            "head000", report.ToJson(), false, null, [], Posted: false)); // the PR comment failed, or the round was decided
+        agent.Results.Enqueue(Evidence());
+
+        var outcome = await Gather(t);
+
+        Assert.Equal(EvidenceStatus.Gathered, outcome.Status);
+        Assert.Single(agent.Requests);
+    }
+
+    [Fact]
     public async Task Runs_writable_with_evidence_agent_and_schema()
     {
         agent.Results.Enqueue(Evidence());
