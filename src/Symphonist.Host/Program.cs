@@ -81,6 +81,7 @@ builder.Services.AddSingleton<GateReviewer>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
 builder.Services.AddSingleton<ProjectFileStore>();
+builder.Services.AddSingleton<OnboardingProposer>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
