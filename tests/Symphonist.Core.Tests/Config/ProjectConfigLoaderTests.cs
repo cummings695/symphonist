@@ -149,6 +149,62 @@ public class ProjectConfigLoaderTests
         finally { Directory.Delete(dir, true); }
     }
 
+    [Fact]
+    public void Parse_reads_yaml_text_and_resolves_paths_against_directory()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "symphonist-parse");
+        var p = ProjectConfigLoader.Parse(FixtureYaml(), dir, "draft", BuiltInProviders.Registry);
+        Assert.Equal(Path.GetFullPath("../acme-orders", dir), p.Repo.LocalPath);
+        Assert.Equal(dir, p.ConfigDirectory);
+    }
+
+    [Fact]
+    public void Parse_errors_are_prefixed_with_source_name()
+    {
+        var yaml = FixtureYaml();
+        var noTracker = yaml[..yaml.IndexOf("tracker:", StringComparison.Ordinal)]
+            + yaml[yaml.IndexOf("repo:", StringComparison.Ordinal)..];
+        var missing = Assert.Throws<ProjectConfigException>(() =>
+            ProjectConfigLoader.Parse(noTracker, Path.GetTempPath(), "draft", BuiltInProviders.Registry));
+        Assert.StartsWith("draft: missing required 'tracker'", missing.Message);
+        var unknown = Assert.Throws<ProjectConfigException>(() =>
+            ProjectConfigLoader.Parse(yaml.Replace("  tokenSecret: jira-acme\n", "  tokenSecret: jira-acme\n  nope: x\n"),
+                Path.GetTempPath(), "draft", BuiltInProviders.Registry));
+        Assert.StartsWith("draft: unknown field 'tracker.nope'", unknown.Message);
+    }
+
+    private static string WithId(string id) =>
+        System.Text.RegularExpressions.Regex.Replace(FixtureYaml(), @"(?m)^id:.*$", $"id: \"{id}\"");
+
+    [Theory]
+    [InlineData("../x")]
+    [InlineData("-x")]
+    [InlineData("a/b")]
+    [InlineData("a b")]
+    [InlineData("")]
+    public void Unsafe_project_id_is_rejected(string id)
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(WithId(id)));
+        Assert.Contains(id.Length == 0 ? "missing required 'id'" : $"invalid id '{id}'", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("orders")]
+    [InlineData("Acme_Orders-2")]
+    [InlineData("orders-github")]
+    public void Safe_project_id_is_accepted(string id) => Assert.Equal(id, LoadYaml(WithId(id)).Id);
+
+    [Fact]
+    public void Jira_project_key_is_parsed_and_validated()
+    {
+        const string anchor = "  tokenSecret: jira-acme\n";
+        Assert.Null(((JiraTrackerConfig)LoadYaml(FixtureYaml()).Tracker).ProjectKey);
+        Assert.Equal("ACME", ((JiraTrackerConfig)LoadYaml(FixtureYaml().Replace(anchor, anchor + "  projectKey: ACME\n")).Tracker).ProjectKey);
+        var ex = Assert.Throws<ProjectConfigException>(() =>
+            LoadYaml(FixtureYaml().Replace(anchor, anchor + "  projectKey: acme-1\n")));
+        Assert.Contains("invalid tracker.projectKey 'acme-1'", ex.Message);
+    }
+
     private static ProjectConfig LoadYaml(string yaml)
     {
         var dir = Directory.CreateTempSubdirectory("symphonist-cfg").FullName;

@@ -18,26 +18,35 @@ public static partial class ProjectConfigLoader
     public static ProjectConfig Load(string yamlPath, ProviderRegistry providers)
     {
         var fullPath = Path.GetFullPath(yamlPath);
-        Dto dto;
+        return Parse(File.ReadAllText(fullPath), Path.GetDirectoryName(fullPath)!, fullPath, providers);
+    }
+
+    /// <summary>
+    /// Same validation as <see cref="Load"/> for YAML text: relative paths resolve against <paramref name="configDirectory"/>
+    /// and errors are prefixed "{sourceName}: ".
+    /// </summary>
+    public static ProjectConfig Parse(string yaml, string configDirectory, string sourceName, ProviderRegistry providers)
+    {
         try
         {
-            dto = Deserializer.Deserialize<Dto?>(File.ReadAllText(fullPath))
-                  ?? throw new ProjectConfigException($"{fullPath}: file is empty");
+            var dto = Deserializer.Deserialize<Dto?>(yaml) ?? throw new ProjectConfigException("file is empty");
+            return Map(dto, configDirectory, providers);
         }
         catch (YamlException ex)
         {
-            throw new ProjectConfigException($"{fullPath}: {ex.Message}");
-        }
-
-        try
-        {
-            return Map(dto, Path.GetDirectoryName(fullPath)!, providers);
+            throw new ProjectConfigException($"{sourceName}: {ex.Message}");
         }
         catch (ProjectConfigException ex)
         {
-            throw new ProjectConfigException($"{fullPath}: {ex.Message}");
+            throw new ProjectConfigException($"{sourceName}: {ex.Message}");
         }
     }
+
+    [GeneratedRegex(@"\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z")]
+    private static partial Regex ProjectId();
+
+    /// <summary>The id keys every stored ticket and names work and log folders, so only plain names are accepted.</summary>
+    public static bool IsValidProjectId(string id) => ProjectId().IsMatch(id);
 
     public static IReadOnlyList<ProjectConfig> LoadAll(string projectsDirectory, ProviderRegistry providers) =>
         ProjectFiles(projectsDirectory).Select(f => Load(f, providers)).ToList();
@@ -56,6 +65,9 @@ public static partial class ProjectConfigLoader
     private static ProjectConfig Map(Dto d, string dir, ProviderRegistry providers)
     {
         var id = Required(d.Id, "id");
+        if (!IsValidProjectId(id))
+            throw new ProjectConfigException(
+                $"invalid id '{id}': use letters, digits, '-' and '_', starting with a letter or digit (at most 64)");
         var trackerValues = d.Tracker ?? throw Missing("tracker");
         var repoValues = d.Repo ?? throw Missing("repo");
         var buildValues = d.Build ?? throw Missing("build");

@@ -7,6 +7,7 @@ name: Orders (Acme)             # display name (defaults to id)
 tracker:
   type: jira                    # "jira" or "github-projects" (see orders-github.example.yaml)
   site: https://acme.atlassian.net
+  projectKey: ACME                # Jira project key; the setup screen reads its statuses from it (optional)
   email: dev@example.com        # Atlassian account email (basic auth with the API token)
   tokenSecret: jira-acme        # name of the secret holding the Atlassian API token: symphonist secret set jira-acme
   # Tickets Symphonist works on. A ticket that stops matching is Blocked ("no longer matches tracker query").
