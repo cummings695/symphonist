@@ -451,4 +451,29 @@ public class BitbucketTests
         Assert.Equal("**hi**", body.RootElement.GetProperty("content").GetProperty("raw").GetString());
         Assert.False(body.RootElement.TryGetProperty("parent", out _));
     }
+
+    [Theory]
+    [InlineData("https://evil.example/2.0/repositories/acme/orders/pullrequests/7/comments?page=2")]
+    [InlineData("http://api.bitbucket.org/2.0/repositories/acme/orders/pullrequests/7/comments?page=2")]
+    public async Task Refuses_paging_link_to_foreign_host(string next)
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "first") + "],\"next\":\"" + next + "\"}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None));
+
+        Assert.Equal(2, stub.Requests.Count); // /user and page 1 only
+    }
+
+    [Fact]
+    public async Task Repeating_paging_link_stops()
+    {
+        var loop = "https://api.bitbucket.org" + RepoPrefix + "/pullrequests/7/comments?pagelen=100";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[],\"next\":\"" + loop + "\"}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None));
+    }
 }

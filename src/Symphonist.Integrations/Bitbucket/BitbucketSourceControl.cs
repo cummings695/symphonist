@@ -106,10 +106,13 @@ public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig 
         var mine = await MyAccountIdAsync(ct);
         var comments = new List<PullRequestComment>();
         string? next = $"{_api.RepoPath}/pullrequests/{id}/comments?pagelen=100";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         while (next is not null)
         {
+            if (!seen.Add(next) || seen.Count > 200)
+                throw new HttpRequestException("Bitbucket comment paging did not end (repeated or too many pages)");
             using var doc = await _api.SendAsync(HttpMethod.Get, next, null, ct);
-            next = Str(doc.RootElement, "next");
+            next = Str(doc.RootElement, "next") is { } link ? SameHostPath(link) : null;
             if (!doc.RootElement.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array) break;
             foreach (var c in values.EnumerateArray())
             {
@@ -140,6 +143,16 @@ public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig 
 
         return [.. comments.OrderBy(c => c.Created)];
     }
+
+    /// <summary>
+    /// The path and query of a paging link, which must be https on api.bitbucket.org: the request carries credentials,
+    /// so a link naming any other host is refused (throws) rather than followed.
+    /// </summary>
+    private static string SameHostPath(string link) =>
+        Uri.TryCreate(link, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps
+        && string.Equals(uri.Host, "api.bitbucket.org", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort
+            ? uri.PathAndQuery
+            : throw new HttpRequestException("Bitbucket paging link names a foreign host; refusing to follow it");
 
     public async Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
     {
