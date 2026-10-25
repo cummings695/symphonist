@@ -162,7 +162,8 @@ public sealed class GitHubSourceControl(HttpClient http, GitHubRepoConfig config
 
         var firstLine = comment.Body.ReplaceLineEndings("\n").Split('\n')[0];
         if (firstLine.Length > 200) firstLine = firstLine[..200];
-        await CommentOnPullRequestAsync(id, $"> {firstLine}\n\n{markdown}", ct);
+        // The quote must not tag Claude again (the Claude GitHub App would act on it).
+        await CommentOnPullRequestAsync(id, $"> {TrackerComments.EscapeMentions(firstLine)}\n\n{markdown}", ct);
     }
 
     private static int? Int(JsonElement obj, string property) =>

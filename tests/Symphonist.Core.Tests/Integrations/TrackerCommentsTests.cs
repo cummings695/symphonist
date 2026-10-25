@@ -30,4 +30,12 @@ public class TrackerCommentsTests
     [InlineData("@claudette")]
     [InlineData("note to Sam")]
     public void ClaudeRequest_ignores_other_comments(string body) => Assert.Null(TrackerComments.ClaudeRequest(body));
+
+    [Theory]
+    [InlineData("@claude fix it", @"\@claude fix it")]
+    [InlineData("ask @Claude later\n> @CLAUDE again", "ask \\@Claude later\n> \\@CLAUDE again")]
+    [InlineData(@"already \@claude", @"already \@claude")]
+    [InlineData("no mention", "no mention")]
+    public void EscapeMentions_escapes_every_claude_mention(string text, string expected) =>
+        Assert.Equal(expected, TrackerComments.EscapeMentions(text));
 }

@@ -1,18 +1,15 @@
 using System.Text;
-using System.Text.RegularExpressions;
+using Symphonist.Core.Integrations;
 using Symphonist.Core.Risk;
 
 namespace Symphonist.Core.Evidence;
 
-public static partial class EvidenceComment
+public static class EvidenceComment
 {
-    [GeneratedRegex(@"^(\s*(?:[-*+>]\s+)*)@claude", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
-    private static partial Regex RequestLine();
-
     /// <summary>
     /// PR comment (unsigned; the caller signs it): a guessed warning first, the headline, then Regressions, Tests and
-    /// coverage and Walkthrough, failures first in each. All agent text is bounded, and no line can begin with
-    /// "@claude" (it would read as a request).
+    /// coverage and Walkthrough, failures first in each. All agent text is bounded, and every "@claude" is
+    /// escaped (it would read as a request).
     /// </summary>
     public static string Format(EvidenceReport report, bool hasScreenshots)
     {
@@ -66,5 +63,5 @@ public static partial class EvidenceComment
 
     private static string Bound(string text) => ReviewerText.Line(text, ReviewerText.MaxItemChars);
 
-    private static string Neutralise(string text) => RequestLine().Replace(text, @"$1\@claude");
+    private static string Neutralise(string text) => TrackerComments.EscapeMentions(text);
 }

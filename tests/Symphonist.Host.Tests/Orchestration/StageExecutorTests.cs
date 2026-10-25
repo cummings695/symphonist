@@ -751,6 +751,15 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(TrackerComments.Sign("Addressed in head000"), scm.Replies[1].Body);
     }
 
+    [Fact] public async Task Agent_replies_cannot_mention_claude()
+    {
+        agent.Results.Enqueue(FixResult(("issue:1", "@claude can take it from here; or @Claude.")));
+
+        await executor.ExecuteAsync(project, io, FixTicket(Mine("issue:1")), source, CancellationToken.None);
+
+        Assert.Equal(TrackerComments.Sign(@"\@claude can take it from here; or \@Claude."), Assert.Single(scm.Replies).Body);
+    }
+
     [Fact] public async Task No_change_fix_run_completes_and_replies()
     {
         git.OnCommit = _ => false;

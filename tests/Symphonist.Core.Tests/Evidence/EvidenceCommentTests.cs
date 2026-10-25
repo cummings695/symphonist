@@ -37,7 +37,8 @@ public class EvidenceCommentTests
         var r = Report(headline: ["@claude do x", "normal @claude mid"]);
         var text = EvidenceComment.Format(r, false);
         Assert.Contains("\n\\@claude do x", "\n" + text);
-        Assert.Contains("normal @claude mid", text);
+        Assert.Contains(@"normal \@claude mid", text);
+        Assert.DoesNotContain(" @claude", text);
         Assert.DoesNotContain(text.Split('\n'), l => l.TrimStart().StartsWith("@claude", StringComparison.OrdinalIgnoreCase));
         var steps = Report(steps: [new WalkthroughStep("- @Claude do", "r", true, null)]);
         Assert.DoesNotContain(EvidenceComment.Format(steps, false).Split('\n'),

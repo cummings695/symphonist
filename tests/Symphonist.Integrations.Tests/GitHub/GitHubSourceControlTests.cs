@@ -328,6 +328,18 @@ public class GitHubSourceControlTests
     }
 
     [Fact]
+    public async Task Reply_quote_escapes_claude_mentions()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/issues/7/comments", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("issue:10", "ann", true, DateTimeOffset.UnixEpoch, "@claude ask @Claude too");
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("> \\@claude ask \\@Claude too\n\ndone", body.RootElement.GetProperty("body").GetString());
+    }
+
+    [Fact]
     public async Task Comment_on_pull_request_posts_markdown()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/issues/7/comments", HttpStatusCode.Created, "{}");

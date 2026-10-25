@@ -158,7 +158,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             try
             {
                 await sc.ReplyToPullRequestCommentAsync(prId, original,
-                    TrackerComments.Sign(replies.GetValueOrDefault(c.Id) ?? fallback), ct);
+                    TrackerComments.Sign(TrackerComments.EscapeMentions(replies.GetValueOrDefault(c.Id) ?? fallback)), ct);
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
