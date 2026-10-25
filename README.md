@@ -231,6 +231,30 @@ comments are ignored, and a card move made in the same poll takes priority. On G
 notifies the GitHub user `claude` and triggers the Claude GitHub App if you have it installed on the repository.
 Symphonist reads only the first 20 assignees and 50 labels of an issue, so keep the assignee and label within those.
 
+### Answering Symphonist on the PR
+
+At the implement stage you can also steer the fix from the pull request. A PR comment that starts with `@claude` reruns
+implement on the same PR and branch, with the comment (minus the marker) as feedback. Symphonist replies to each
+comment it addressed.
+
+- Only your own comments count by default (the PR host user that Symphonist's token belongs to). To act on teammates'
+  comments too, set `prComments.fromOthers: true`. Those comments then direct an agent that pushes under your
+  account, so enable it only for a team you trust.
+- Inline code comments count too, with the lines around them passed to the agent.
+- Each comment triggers at most one run. Several made together, or together with an `@claude` tracker comment, go into
+  one run. A comment made while implement runs applies when it reaches the gate. Symphonist's own comments are signed
+  and never trigger anything.
+- A comment made while the stage is approved and waiting to merge applies if the merge is held and the gate comes
+  back. Once the PR has merged, a comment that arrived too late gets a "merged first" reply asking you to open a
+  follow-up ticket.
+- A comment from you reruns the gate round like an `@claude` tracker comment. A teammate's comment (with `fromOthers`)
+  reruns it without deciding the gate.
+
+```yaml
+prComments:
+  fromOthers: false   # the default
+```
+
 ### Risk reviewer
 
 A second agent can judge each gate, rate it `low` or `high` risk and give its reasons. It is off by default, so nothing
@@ -271,6 +295,41 @@ review:
 - `symphonist show <project> <key>` prints the latest review, `symphonist status` has a `RISK` column, and
   `symphonist projects` and the dashboard show how often you agreed with the reviewer per stage, how many low-risk
   verdicts you sent back, and how many gates were auto-approved. Look at these in `shadow` before turning on `active`.
+
+### Evidence on high-risk PRs
+
+Before a gated implement round waits on you, an agent can run the app from the pushed branch and report what it saw, so
+you review a result instead of a diff alone. It runs once per pushed head and only when it is due:
+
+- `mode: high-risk` (the default): the reviewer said `high`, or the change touches a `riskAreas` path.
+- `mode: always`: every gated implement round. `mode: off`: never.
+
+The report has three parts: whether the project's tests and checks passed, what the agent saw when it exercised the
+app and your listed features (with screenshots), and which of its steps were guesses rather than taken from your
+config. It appears as a signed comment on the PR, as a line on the ticket in the tracker, and on the dashboard, where
+the card and ticket detail show the states in words (Passed, Failed, Not run, Guessed) and the screenshots. A card
+whose evidence is due shows "Gathering evidence" and still counts as waiting on you.
+
+Evidence is advice for you. It never approves, blocks or fails a stage, and it never commits or pushes; it works in a
+throwaway copy of the branch. If you decide the gate (approve, send back, or move the card) while it runs, it is
+cancelled and nothing is posted.
+
+```yaml
+evidence:
+  mode: high-risk                  # off | high-risk (default) | always
+  # prompt: prompts/evidence.md    # optional prompt override, relative to the project file
+  run:                             # how to start the app; every field is optional
+    setup: [npm ci]                # at most 10 commands, run in order
+    start: npm start
+    url: http://localhost:3000
+    ready: /health                 # what to wait for before using the app
+    notes: Sign in as demo@example.com
+  features:                        # at most 20 things to exercise, in your own words
+    - { name: Checkout, steps: Add an item to the basket and pay with the test card }
+  agent: { timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from `agent`
+```
+
+Onboarding can propose `run` and `features` for you.
 
 ### Sandbox
 
