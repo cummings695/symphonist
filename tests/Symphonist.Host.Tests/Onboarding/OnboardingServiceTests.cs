@@ -146,6 +146,23 @@ public sealed class OnboardingServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Open_after_the_file_changed_on_disk_starts_a_fresh_session()
+    {
+        WriteProject("orders");
+        var old = service.Open("orders");
+        var changed = File.ReadAllText(PathOf("orders.yaml")) + "# hand edit\n";
+        File.WriteAllText(PathOf("orders.yaml"), changed);
+
+        var fresh = service.Open("orders");
+
+        Assert.NotSame(old, fresh);
+        Assert.Equal(changed, fresh.LoadedText);
+        Assert.Same(fresh, service.Open("orders"));
+        var e = await Assert.ThrowsAsync<OnboardingSessionEndedException>(() => service.SaveAsync(old));
+        Assert.Equal("the file changed on disk; this setup was reloaded", e.Message);
+    }
+
+    [Fact]
     public void Idle_session_expires()
     {
         WriteProject("orders");

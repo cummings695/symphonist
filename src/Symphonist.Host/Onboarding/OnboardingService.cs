@@ -101,6 +101,7 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     private const string Replaced = "this setup was replaced by another one; reload the page";
     private const string Expired = "this setup expired after 8 hours without use; reload the page";
     private const string Saved = "this setup was saved; reload the page to edit the project again";
+    private const string Reloaded = "the file changed on disk; this setup was reloaded";
     private const string DraftSource = "setup draft";
 
     private readonly TimeProvider clock = time ?? TimeProvider.System;
@@ -124,7 +125,9 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     public event Action? Changed;
 
     /// <summary>
-    /// Starts (or returns, when it is for the same project and unsaved) the session.
+    /// Starts (or returns, when it is for the same project and unsaved) the session. An idle session whose project file
+    /// changed on disk since it was opened is replaced by a fresh one with the new text, so reloading the page after
+    /// "the file changed on disk" recovers.
     /// </summary>
     /// <exception cref="InvalidOperationException">"another setup step is running" in a session for another project.</exception>
     /// <exception cref="KeyNotFoundException">Unknown project id.</exception>
@@ -136,18 +139,36 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
         lock (sync)
         {
             DropIfExpired();
+            var reload = false;
             if (current is not null && current.ProjectId == projectId)
             {
-                current.LastUsed = clock.GetUtcNow();
-                return current;
+                reload = !current.Busy && FileChangedOnDisk(current);
+                if (!reload)
+                {
+                    current.LastUsed = clock.GetUtcNow();
+                    return current;
+                }
             }
             if (current is { Busy: true }) throw new InvalidOperationException(Busy);
             session = projectId is null ? NewSession() : ExistingSession(projectId);
-            if (current is not null) current.Ended = Replaced;
+            if (current is not null) current.Ended = reload ? Reloaded : Replaced;
             current = session;
         }
         Changed?.Invoke();
         return session;
+    }
+
+    private static bool FileChangedOnDisk(OnboardingSession session)
+    {
+        if (session.ExistingFile is not { } file) return false;
+        try
+        {
+            return File.ReadAllText(file) != session.LoadedText;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return true; // gone or unreadable: reopening reports why
+        }
     }
 
     private OnboardingSession NewSession() =>
