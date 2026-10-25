@@ -24,7 +24,7 @@ public static partial class TrackerComments
     /// under the developer's account never contains the substring "@claude": it can neither read as a request nor
     /// trigger the Claude GitHub App, whether that reads the rendered or the raw text. Idempotent.
     /// </summary>
-    public static string EscapeMentions(string text) => Mention().Replace(text, "@​$1");
+    public static string EscapeMentions(string text) => Mention().Replace(text, "@\u200B$1");
 
     /// <summary>
     /// The request text of a developer "@claude" comment (marker removed, trimmed); null when the body does not start
