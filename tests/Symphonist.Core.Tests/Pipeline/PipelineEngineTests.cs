@@ -614,7 +614,7 @@ public class PipelineEngineTests
     [Fact] public void Gate_round_owes_evidence_for_gated_implement()
     {
         var on = At("implement");
-        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), on, Now);
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk, ReviewMode.Active), on, Now);
         Assert.True(on.EvidenceDue);
 
         var plan = At("plan");
@@ -626,10 +626,76 @@ public class PipelineEngineTests
         Assert.False(off.EvidenceDue);
     }
 
+    private static readonly RiskArea Pricing = new("pricing", "money", ["src/Pricing/**"]);
+
+    [Fact] public void Low_verdict_clears_evidence_due_in_high_risk_mode()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal((true, true), (t.ReviewDue, t.EvidenceDue));
+
+        PipelineEngine.ReviewCompleted(p, t, Low, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+    }
+
+    [Fact] public void High_verdict_keeps_evidence_due()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+
+        PipelineEngine.ReviewCompleted(p, t, High, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.True(t.EvidenceDue);
+        t.PullRequestId = 7;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
+    [Fact] public void Always_mode_keeps_evidence_due_after_a_low_verdict()
+    {
+        var p = Evidence(EvidenceMode.Always, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+
+        PipelineEngine.ReviewCompleted(p, t, Low, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.True(t.EvidenceDue);
+    }
+
+    [Fact] public void Review_off_owes_evidence_only_with_risk_areas_or_always()
+    {
+        var none = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), none, Now);
+        Assert.False(none.EvidenceDue);
+
+        var areas = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk) with { RiskAreas = [Pricing] }, areas, Now);
+        Assert.True(areas.EvidenceDue); // only a clone of the branch can tell
+
+        var always = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.Always), always, Now);
+        Assert.True(always.EvidenceDue);
+
+        var held = At("implement", StageStatus.Approved); held.WaitingSince = Gate;
+        PipelineEngine.MergeHeld(Evidence(EvidenceMode.HighRisk), held, "moved", Now);
+        Assert.False(held.EvidenceDue);
+    }
+
+    [Fact] public void Evidence_waits_for_a_pull_request()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.PullRequestId = 7;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
     [Fact] public void Waits_on_evidence_only_after_owed_review()
     {
         var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
-        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true; t.ReviewDue = true;
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true; t.ReviewDue = true; t.PullRequestId = 7;
         Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
         t.ReviewDue = false;
         Assert.True(PipelineEngine.WaitsOnEvidence(p, t));

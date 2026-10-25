@@ -56,7 +56,7 @@ public static class PipelineEngine
             t.UpdatedAt = now;
             t.Risk = null; // until this round's review finishes
             ClearApprovedHeads(t); // a new round
-            t.EvidenceDue = p.WantsEvidence(stage);
+            t.EvidenceDue = EvidenceOwed(p, stage, p.Reviews(stage));
             if (pending is not null && Same(stage.ApprovedWhenStatus, pending)) return Deferred(pending, Approve(p, t, now));
             t.ReviewDue = p.Reviews(stage);
             outcome = new(true, stage.OnGateStatus, $"{stage.Id} awaiting approval");
@@ -128,6 +128,8 @@ public static class PipelineEngine
         var auto = allowAutoApprove && WouldAutoApprove(p, t, v, waitingSince);
         t.Risk = v.Risk;
         t.ReviewDue = false;
+        // In high-risk mode the verdict settles it (the reviewer calls a round touching a risk area high).
+        if (p.Evidence.Mode != EvidenceMode.Always && v.Risk != RiskLevel.High) t.EvidenceDue = false;
         t.UpdatedAt = now;
         if (auto)
         {
@@ -144,11 +146,12 @@ public static class PipelineEngine
     }
 
     /// <summary>
-    /// The gate waits on evidence: it is owed for the round, review (if any) is done, and the stage still wants it.
+    /// The gate waits on evidence: it is owed for the round, a PR exists, review (if any) is done, and the stage still
+    /// wants it.
     /// </summary>
     public static bool WaitsOnEvidence(ProjectConfig p, Ticket t) =>
         t.Status == StageStatus.AwaitingApproval && t.EvidenceDue && t.WaitingSince is not null
-        && p.WantsEvidence(p.Stage(t.StageId)) && !(t.ReviewDue && p.Reviews(p.Stage(t.StageId)));
+        && t.PullRequestId is not null && p.WantsEvidence(p.Stage(t.StageId)) && !(t.ReviewDue && p.Reviews(p.Stage(t.StageId)));
 
     /// <summary>
     /// Evidence for the round (<paramref name="waitingSince"/>) finished: mark it no longer owed. Evidence never decides
@@ -187,7 +190,7 @@ public static class PipelineEngine
         t.Status = StageStatus.AwaitingApproval;
         t.WaitingSince = since;
         t.ReviewDue = !toDeveloper && p.Reviews(stage);
-        t.EvidenceDue = p.WantsEvidence(stage);
+        t.EvidenceDue = EvidenceOwed(p, stage, t.ReviewDue);
         t.Risk = null;
         t.Attempts = 0;
         t.UpdatedAt = now;
@@ -267,6 +270,14 @@ public static class PipelineEngine
         t.UpdatedAt = now;
         return new(true, null, "unblocked");
     }
+
+    /// <summary>
+    /// Whether a new round of <paramref name="stage"/> owes evidence, as far as is known without the branch: always in
+    /// always mode; in high-risk mode until the round's review (<paramref name="reviewDue"/>) gives its verdict, or,
+    /// without a review, only when risk areas are configured (the evidence run checks the changed files against them).
+    /// </summary>
+    private static bool EvidenceOwed(ProjectConfig p, StageDefinition stage, bool reviewDue) =>
+        p.WantsEvidence(stage) && (p.Evidence.Mode == EvidenceMode.Always || reviewDue || p.RiskAreas.Count > 0);
 
     public static bool HasPostApprovalAction(StageKind kind) => kind is StageKind.Implement or StageKind.Release;
 

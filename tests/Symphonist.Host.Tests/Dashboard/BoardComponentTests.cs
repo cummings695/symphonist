@@ -752,7 +752,7 @@ public sealed class BoardComponentTests : IDisposable
     [Fact]
     public async Task Card_shows_gathering_evidence_and_still_waits_on_you()
     {
-        await Seed("ORD-9", "implement", StageStatus.AwaitingApproval, with: t => t.EvidenceDue = true);
+        await Seed("ORD-9", "implement", StageStatus.AwaitingApproval, with: t => { t.EvidenceDue = true; t.PullRequestId = 7; });
 
         var cut = RenderBoard();
 

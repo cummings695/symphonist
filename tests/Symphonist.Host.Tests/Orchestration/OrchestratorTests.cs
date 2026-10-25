@@ -2445,11 +2445,32 @@ public sealed class OrchestratorTests : IDisposable
         Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
     }
 
-    [Fact] public async Task Not_needed_posts_nothing_and_clears_due()
+    [Fact] public async Task Low_verdict_owes_no_evidence()
     {
         ConfigureEvidence("active");
         Answer(Low, EvidenceReport); // human gate: a low verdict still waits on the developer
         git.ChangedFiles = ["src/Export/Csv.cs"];
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review: low
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false, RiskLevel.Low), (t.Status, t.EvidenceDue, t.Risk));
+        Assert.False(PipelineEngine.WaitsOnEvidence(registry.Get("orders"), t)); // the card is not gathering evidence
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events); // no clone
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(store.Evidence);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Not_needed_posts_nothing_and_clears_due()
+    {
+        ConfigureEvidence("off"); // no review: only the clone tells whether a risk area was touched
+        Answer(Low, EvidenceReport);
+        evidenceGit.ChangedFiles = ["src/Export/Csv.cs"];
         await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
         var o = Create();
 
@@ -2467,6 +2488,20 @@ public sealed class OrchestratorTests : IDisposable
 
         await TickIdle(o);
         Assert.Equal(1, evidenceGit.Events.Count(e => e == "prepare _evidence-ORD-1"));
+    }
+
+    [Fact] public async Task Evidence_waits_for_a_pull_request()
+    {
+        ConfigureEvidence("off", "always");
+        Answer(Low, EvidenceReport);
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review", t => t.EvidenceDue = true);
+        var o = Create();
+
+        await TickIdle(o);
+
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
     }
 
     [Fact] public async Task Evidence_failure_never_blocks()

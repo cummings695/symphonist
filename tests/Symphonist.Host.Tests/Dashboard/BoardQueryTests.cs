@@ -439,6 +439,7 @@ public sealed class BoardQueryTests : IDisposable
         {
             t.WaitingSince = Now;
             t.EvidenceDue = true;
+            t.PullRequestId = 7;
         });
         var fixedNow = await Seed("ORD-2", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
         var broken = await Seed("ORD-3", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
