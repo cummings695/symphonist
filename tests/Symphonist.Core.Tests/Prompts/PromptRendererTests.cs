@@ -114,6 +114,41 @@ public class PromptRendererTests
     }
 
     [Fact]
+    public void Evidence_prompt_validates_and_has_fence()
+    {
+        var prompt = PromptLibrary.GetEvidence(ConfigWithoutOverrides());
+
+        PromptRenderer.Validate(prompt);
+        foreach (var placeholder in new[] { "{{evidence.fence_id}}", "{{evidence.diff_range}}", "{{evidence.changed_files}}",
+                     "{{evidence.diff}}", "{{evidence.run}}", "{{evidence.features}}", "{{evidence.output_dir}}",
+                     "{{risk.areas}}", "{{ticket.title}}", "{{ticket.description}}", "{{ticket.url}}" })
+            Assert.Contains(placeholder, prompt);
+        Assert.Contains("`<untrusted-{{evidence.fence_id}}>`", prompt);
+        Assert.Contains("you did not write this change", prompt);
+        Assert.Contains("Do not commit, push or change git config", prompt);
+        Assert.Contains("`walkthrough.ran` false", prompt);
+        Assert.Contains("`proposed_config`", prompt);
+        Assert.EndsWith("Return your result in the required structured output.", prompt.TrimEnd());
+    }
+
+    [Fact]
+    public void Evidence_prompt_override_wins_and_is_validated()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"symphonist-{Guid.NewGuid():N}.md");
+        File.WriteAllText(path, "evidence {{evidence.diff}}");
+        try
+        {
+            var config = ConfigWithoutOverrides();
+            config = config with { Evidence = config.Evidence with { PromptPath = path } };
+            Assert.Equal("evidence {{evidence.diff}}", PromptLibrary.GetEvidence(config));
+
+            File.WriteAllText(path, "evidence {{nope}}");
+            Assert.Throws<PromptTemplateException>(() => PromptLibrary.GetEvidence(config));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void Onboarding_prompt_validates_and_has_fence()
     {
         var prompt = PromptLibrary.GetOnboarding();

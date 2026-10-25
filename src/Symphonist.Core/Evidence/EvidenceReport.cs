@@ -65,6 +65,9 @@ public static partial class EvidenceParser
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(png|jpg|jpeg|webp)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ScreenshotName();
 
+    /// <summary>A short, plain image file name (no directories, no leading dot or dash) the report may reference.</summary>
+    public static bool IsScreenshotName(string name) => ScreenshotName().IsMatch(name);
+
     /// <summary>Null when the shape is unusable (missing required parts); bad items are dropped, text bounded.</summary>
     public static EvidenceReport? Parse(JsonElement? structured)
     {

@@ -79,6 +79,7 @@ builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictiona
 }));
 builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<GateReviewer>();
+builder.Services.AddSingleton<EvidenceRunner>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
 builder.Services.AddSingleton<ProjectFileStore>();
