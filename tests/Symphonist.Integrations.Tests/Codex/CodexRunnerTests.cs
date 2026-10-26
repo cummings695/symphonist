@@ -494,15 +494,145 @@ public sealed class CodexRunnerTests : IDisposable
     public async Task Failed_write_back_is_noted_in_the_raw_log()
     {
         SignIn();
+        // Windows: an open handle without delete sharing blocks replacing the file. Elsewhere: a read-only Codex home
+        // blocks creating the temp file (not for root, which the check below then skips).
+        FileStream? held = null;
         fake.OnRun = dir =>
         {
             File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"new"}}""");
-            Directory.Delete(codexHome, recursive: true); // the developer's Codex home vanished mid-run
+            if (OperatingSystem.IsWindows())
+                held = new FileStream(DeveloperAuth, FileMode.Open, FileAccess.Read, FileShare.Read);
+            else
+                File.SetUnixFileMode(codexHome, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            WriteLastMessage(dir, Completed);
+        };
+        try
+        {
+            var result = await Runner().RunAsync(ChatGpt(), default);
+            Assert.True(result.Succeeded, result.Error);
+            if (File.ReadAllText(DeveloperAuth).Contains("new")) return; // running as root
+            Assert.Contains("Codex auth.json not written back:", result.RawLog);
+            Assert.Equal(["auth.json"], Directory.GetFiles(codexHome).Select(Path.GetFileName));
+        }
+        finally
+        {
+            held?.Dispose();
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(codexHome, OwnerOnlyDir);
+        }
+    }
+
+    [Fact]
+    public async Task Sign_in_changed_elsewhere_during_the_run_is_not_overwritten()
+    {
+        SignIn();
+        fake.OnRun = dir =>
+        {
+            // The developer ran `codex login` again (or another run refreshed first) while this run also refreshed.
+            File.WriteAllText(DeveloperAuth, """{"tokens":{"refresh_token":"newer-login"}}""");
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"stale-run"}}""");
             WriteLastMessage(dir, Completed);
         };
         var result = await Runner().RunAsync(ChatGpt(), default);
         Assert.True(result.Succeeded, result.Error);
-        Assert.Contains("Codex auth.json not written back:", result.RawLog);
+        Assert.Equal("""{"tokens":{"refresh_token":"newer-login"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.Contains("Codex sign-in changed elsewhere; not written back", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Sign_in_removed_during_the_run_is_not_recreated()
+    {
+        SignIn();
+        fake.OnRun = dir =>
+        {
+            File.Delete(DeveloperAuth); // `codex logout`
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"new"}}""");
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.False(File.Exists(DeveloperAuth));
+        Assert.Contains("Codex sign-in changed elsewhere; not written back", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Unreadable_run_auth_is_noted_and_not_written_back()
+    {
+        SignIn();
+        FileStream? held = null;
+        fake.OnRun = dir =>
+        {
+            var auth = Path.Combine(dir, "home", "auth.json");
+            File.WriteAllText(auth, """{"tokens":{"refresh_token":"new"}}""");
+            if (OperatingSystem.IsWindows())
+                held = new FileStream(auth, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            else
+                File.SetUnixFileMode(auth, UnixFileMode.None);
+            WriteLastMessage(dir, Completed);
+        };
+        try
+        {
+            var result = await Runner().RunAsync(ChatGpt(), default);
+            if (File.ReadAllText(DeveloperAuth).Contains("new")) return; // running as root
+            Assert.Equal("""{"tokens":{"refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+            Assert.Contains("Codex auth.json not written back: it could not be read", result.RawLog);
+        }
+        finally
+        {
+            held?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Run_directory_that_cannot_be_deleted_is_noted()
+    {
+        string? runDir = null;
+        FileStream? held = null;
+        fake.OnRun = dir =>
+        {
+            runDir = dir;
+            WriteLastMessage(dir, Completed);
+            if (OperatingSystem.IsWindows())
+                held = new FileStream(Path.Combine(dir, "schema.json"), FileMode.Open, FileAccess.Read, FileShare.None);
+            else
+                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        };
+        try
+        {
+            var result = await Runner().RunAsync(Request(), default);
+            Assert.True(result.Succeeded, result.Error);
+            if (!Directory.Exists(runDir)) return; // running as root
+            Assert.Contains("Codex run directory not deleted:", result.RawLog);
+        }
+        finally
+        {
+            held?.Dispose();
+            if (!OperatingSystem.IsWindows() && Directory.Exists(runDir)) File.SetUnixFileMode(runDir!, OwnerOnlyDir);
+        }
+    }
+
+    [Fact]
+    public void Cleanup_removes_leftover_run_directories_only()
+    {
+        var stale = Path.Combine(runFiles, "stale");
+        Directory.CreateDirectory(Path.Combine(stale, "home"));
+        File.WriteAllText(Path.Combine(stale, "home", "auth.json"), """{"tokens":{"refresh_token":"live"}}""");
+        Directory.CreateDirectory(Path.Combine(runFiles, "other"));
+        var hostDir = Path.Combine(temp, "host-dir");
+        Directory.CreateDirectory(hostDir);
+        File.WriteAllText(Path.Combine(hostDir, "keep.txt"), "x");
+        var linked = TryLink(Path.Combine(runFiles, "linked"), hostDir, directory: true);
+
+        var removed = CodexRunner.CleanupRunFiles(runFiles);
+
+        Assert.Equal(linked ? 3 : 2, removed);
+        Assert.True(Directory.Exists(runFiles));
+        RunDirsAreGone();
+        Assert.True(File.Exists(Path.Combine(hostDir, "keep.txt"))); // a link is removed, not followed
+    }
+
+    [Fact]
+    public void Cleanup_without_a_run_files_root_does_nothing()
+    {
+        Assert.Equal(0, CodexRunner.CleanupRunFiles(Path.Combine(temp, "missing")));
     }
 
     [Fact]

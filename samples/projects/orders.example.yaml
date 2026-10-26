@@ -79,7 +79,7 @@ pipeline:
   - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
   - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
   # A stage can run another provider: add  agent: { type: codex, model: "", timeoutMinutes: 30 }  to its line.
-  # Without a model, the provider's default model is used.
+  # A stage that switches provider without a model uses that provider's default model.
   - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
   - { id: build,     kind: build }
   - { id: release,   kind: release,   gate: human }

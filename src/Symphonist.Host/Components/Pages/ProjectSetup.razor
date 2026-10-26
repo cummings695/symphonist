@@ -758,6 +758,8 @@
     private void SetCodexAuth(ChangeEventArgs e)
     {
         if (Enum.TryParse<CodexAuth>(e.Value as string, out var auth)) Form.Agent.CodexAuth = auth;
+        // The secret field is hidden for ChatGPT; a custom name left in it would fail the save.
+        if (Form.Agent.CodexAuth == CodexAuth.ChatGpt) Form.Agent.CodexApiKeySecret = CodexSettings.DefaultApiKeySecret;
         Edited();
     }
 

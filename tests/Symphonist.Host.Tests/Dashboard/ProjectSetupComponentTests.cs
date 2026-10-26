@@ -703,4 +703,22 @@ public sealed class ProjectSetupComponentTests : IDisposable
         cut.Find("#agent-type").Change(AgentTypes.ClaudeCode);
         Assert.Empty(cut.FindAll("#agent-codex-auth"));
     }
+
+    [Fact]
+    public async Task Switching_to_chatgpt_after_a_custom_secret_still_saves()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        cut.Find("#agent-type").Change(AgentTypes.Codex);
+        cut.Find("#agent-codex-secret").Change("openai-orders");
+
+        cut.Find("#agent-codex-auth").Change(nameof(CodexAuth.ChatGpt));
+        Assert.Equal(CodexSettings.DefaultApiKeySecret, service.Current!.Form.Agent.CodexApiKeySecret);
+        await Button(cut, "Save project").ClickAsync(new());
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-saved]")));
+
+        var saved = registry.Projects.Single(p => p.Id == "orders");
+        Assert.Equal(CodexAuth.ChatGpt, saved.Agent.Codex.Auth);
+        Assert.Equal(CodexSettings.DefaultApiKeySecret, saved.Agent.Codex.ApiKeySecret);
+    }
 }

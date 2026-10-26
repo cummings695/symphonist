@@ -107,6 +107,11 @@ var registry = app.Services.GetRequiredService<ProjectRegistry>();
 registry.PausedChanged += notifier.Notify;
 registry.ProjectsChanged += notifier.Notify;
 
+// Per-run Codex directories left by a crash may hold live auth.json copies; no run has started yet.
+var codexRunFiles = CodexRunner.CleanupRunFiles(SymphonistPaths.Resolve("run"),
+    (dir, e) => app.Logger.LogWarning(e, "Removing leftover Codex run directory {Dir} failed", dir));
+if (codexRunFiles > 0) app.Logger.LogInformation("Removed {Count} leftover Codex run director(ies)", codexRunFiles);
+
 app.UseMiddleware<ApiTokenMiddleware>(apiToken);
 app.MapDefaultEndpoints();
 app.MapTicketsApi();

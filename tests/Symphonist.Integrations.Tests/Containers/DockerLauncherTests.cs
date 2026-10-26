@@ -207,7 +207,8 @@ public class DockerLauncherTests
         Assert.DoesNotContain("CLAUDE_CODE_OAUTH_TOKEN", spec.Arguments);
         Assert.False(spec.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
         Assert.DoesNotContain(spec.Environment.Values, v => v == "tok-123");
-        Assert.Equal("api.openai.com,auth.openai.com,chatgpt.com", spec.Environment[DockerLauncher.BaseDomainsVar]);
+        // An API key needs only the API; the ChatGPT sign-in domains stay closed.
+        Assert.Equal("api.openai.com", spec.Environment[DockerLauncher.BaseDomainsVar]);
         Assert.Equal("api.nuget.org", spec.Environment["SYMPHONIST_ALLOWED_DOMAINS"]);
     }
 

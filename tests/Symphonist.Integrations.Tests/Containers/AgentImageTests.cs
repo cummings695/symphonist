@@ -46,11 +46,14 @@ public class FirewallScriptTests
     private static readonly string Script =
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Containers", "agent", "init-firewall.sh"));
 
+    private static AgentSettings Settings(string type) => new(type, Isolation.Container, [], [], 30, null, null);
+
     [Fact]
     public void Firewall_script_takes_base_domains_from_env()
     {
-        foreach (var domain in AgentProviderInfo.BaseDomains(AgentTypes.ClaudeCode)
-                     .Concat(AgentProviderInfo.BaseDomains(AgentTypes.Codex)))
+        var chatGpt = Settings(AgentTypes.Codex) with { Codex = new(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret) };
+        foreach (var domain in AgentProviderInfo.BaseDomains(Settings(AgentTypes.ClaudeCode))
+                     .Concat(AgentProviderInfo.BaseDomains(chatGpt)))
             Assert.DoesNotContain(domain, Script);
         Assert.Contains("${SYMPHONIST_BASE_DOMAINS:-}", Script);
         Assert.Contains("add_domain \"$domain\" 1", Script);
@@ -59,6 +62,26 @@ public class FirewallScriptTests
         Assert.True(refuse > 0, "the script must refuse an empty SYMPHONIST_BASE_DOMAINS");
         Assert.Contains("exit 1", Script[refuse..(refuse + 200)]);
         Assert.True(refuse < Script.IndexOf("iptables -F", StringComparison.Ordinal));
+    }
+}
+
+public class AgentProviderInfoTests
+{
+    private static AgentSettings Settings(string type, CodexAuth auth = CodexAuth.ApiKey) =>
+        new(type, Isolation.Container, [], [], 30, null, null)
+        {
+            Codex = new CodexSettings(auth, CodexSettings.DefaultApiKeySecret),
+        };
+
+    [Fact]
+    public void Base_domains_follow_the_provider_and_its_sign_in()
+    {
+        Assert.Equal(["api.anthropic.com", "statsig.anthropic.com", "sentry.io"],
+            AgentProviderInfo.BaseDomains(Settings(AgentTypes.ClaudeCode, CodexAuth.ChatGpt)));
+        Assert.Equal(["api.openai.com"], AgentProviderInfo.BaseDomains(Settings(AgentTypes.Codex)));
+        Assert.Equal(["api.openai.com", "auth.openai.com", "chatgpt.com"],
+            AgentProviderInfo.BaseDomains(Settings(AgentTypes.Codex, CodexAuth.ChatGpt)));
+        Assert.Throws<ArgumentException>(() => AgentProviderInfo.BaseDomains(Settings("aider")));
     }
 }
 
@@ -71,7 +94,8 @@ public class AgentDockerfileTests
     [Fact]
     public void Dockerfile_installs_both_clis()
     {
-        Assert.Contains("npm install -g @anthropic-ai/claude-code @openai/codex", Dockerfile);
+        // Codex is pinned: CodexRunner's read-only guards were verified against this version.
+        Assert.Contains("npm install -g @anthropic-ai/claude-code @openai/codex@0.164.0", Dockerfile);
         Assert.Contains("claude --version", Dockerfile);
         Assert.Contains("codex --version", Dockerfile);
     }

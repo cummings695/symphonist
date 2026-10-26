@@ -40,6 +40,32 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
             ? home
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
 
+    /// <summary>
+    /// Deletes every per-run directory under <paramref name="runFilesRoot"/>: after a crash they may still hold live
+    /// copies of the developer's auth.json. Call on startup, before any run; a link is removed, never followed.
+    /// </summary>
+    /// <returns>How many directories were removed.</returns>
+    public static int CleanupRunFiles(string runFilesRoot, Action<string, Exception>? onError = null)
+    {
+        var root = new DirectoryInfo(runFilesRoot);
+        if (!root.Exists) return 0;
+        var removed = 0;
+        foreach (var dir in root.EnumerateDirectories())
+        {
+            try
+            {
+                if (IsLink(dir)) dir.Delete();
+                else dir.Delete(recursive: true);
+                removed++;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                onError?.Invoke(dir.FullName, e);
+            }
+        }
+        return removed;
+    }
+
     public async Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
     {
         var settings = request.Settings;
@@ -92,8 +118,12 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
                     rotatedElsewhere = ReadDeveloperAuth() is { } now && !now.AsSpan().SequenceEqual(signedIn);
                 if (await WriteBackAsync(home, signedIn) is { } note) notes.Add(note);
             }
+            // Left behind, it may hold a live auth.json copy until the next host start cleans it up.
             try { Directory.Delete(runDir, recursive: true); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                notes.Add($"Codex run directory not deleted: {e.Message}");
+            }
         }
 
         if (rotatedElsewhere && !outcome.Succeeded)
@@ -136,7 +166,8 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
     /// Codex may have refreshed (and so rotated) the ChatGPT tokens in the run's copy; the developer's file must then
     /// get the new ones or their next run signs in with a dead refresh token. Only a changed copy that is a JSON object
     /// for the same account is written back, atomically and owner-only. Returns a note for the raw log when a changed
-    /// copy is not written back.
+    /// copy is not written back. The write is a compare-and-swap: when the developer's file no longer holds the bytes
+    /// this run started from (a new <c>codex login</c>, or another run's refresh), the run's copy is stale and dropped.
     /// </summary>
     private async Task<string?> WriteBackAsync(string home, byte[] original)
     {
@@ -152,6 +183,8 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
         var temp = Path.Combine(codexHome, $"{AuthFile}.{Guid.NewGuid():N}.tmp");
         try
         {
+            if (ReadDeveloperAuth() is not { } developer || !developer.AsSpan().SequenceEqual(original))
+                return "Codex sign-in changed elsewhere; not written back";
             await WritePrivateAsync(temp, current);
             File.Move(temp, Path.Combine(codexHome, AuthFile), overwrite: true);
             return null;
@@ -194,8 +227,8 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
     /// Reads <paramref name="name"/> in <paramref name="dir"/>, a directory the agent could write. Returns null when the
     /// file is absent; refuses (null plus <paramref name="refusal"/>) a link (file or directory, which could point at
     /// any host file), anything but a non-empty regular file (FIFOs and devices report size 0 and are never opened),
-    /// and anything over <paramref name="maxBytes"/>. The agent's process has ended by now (exited, or cleaned up after
-    /// a timeout or cancel), so nothing swaps the file between these checks and the read.
+    /// anything over <paramref name="maxBytes"/>, and a file that cannot be read. The agent's process has ended by now
+    /// (exited, or cleaned up after a timeout or cancel), so nothing swaps the file between these checks and the read.
     /// </summary>
     private static byte[]? ReadRunFile(string dir, string name, int maxBytes, out string? refusal)
     {
@@ -218,6 +251,7 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
+            refusal = $"it could not be read ({e.Message})";
             return null;
         }
     }

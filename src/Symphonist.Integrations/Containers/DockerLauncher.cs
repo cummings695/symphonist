@@ -202,7 +202,7 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     {
         var settings = request.Settings;
         var image = ImageFor(settings);
-        var baseDomains = AgentProviderInfo.BaseDomains(settings.Type);
+        var baseDomains = AgentProviderInfo.BaseDomains(settings);
         var credentials = Credentials(settings);
         var commandEnv = agentCommand.Environment ?? new Dictionary<string, string?>();
         foreach (var name in commandEnv.Keys) ValidateCommandVariable(name);

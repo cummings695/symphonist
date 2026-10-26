@@ -10,7 +10,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git curl ca-certificates iptables ipset dnsutils jq nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+# Codex is pinned: CodexRunner's read-only guards (-c project_doc_max_bytes=0, -c web_search="disabled", and a fresh
+# CODEX_HOME that trusts no project) were verified against this version. Bump it only after re-running the AGENTS.md /
+# .codex smoke check. Claude Code stays unpinned.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex@0.164.0 \
  && npm cache clean --force \
  && claude --version \
  && codex --version

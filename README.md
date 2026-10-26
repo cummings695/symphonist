@@ -387,8 +387,8 @@ An override that switches provider without naming a `model` uses that provider's
 - The default agent image is `symphonist/agent:2`, which has both CLIs. A custom `agent.image` must contain the CLIs
   the project uses; the setup check verifies this. Images built `FROM` the old `symphonist/agent-claude:1` keep working
   for Claude-only projects; rebuild them on `symphonist/agent:2` to use Codex.
-- The container firewall allows each provider's own domains automatically (Codex: `api.openai.com`,
-  `auth.openai.com`, `chatgpt.com`), on top of `agent.allowedDomains`.
+- The container firewall allows each provider's own domains automatically (Codex: `api.openai.com`; with
+  `auth: chatgpt` also `auth.openai.com` and `chatgpt.com`), on top of `agent.allowedDomains`.
 
 ### Sandbox
 
