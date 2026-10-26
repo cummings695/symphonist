@@ -263,7 +263,13 @@ public class DockerLauncherTests
     [InlineData("A=B")]
     [InlineData("-v")]
     [InlineData("")]
-    public void Command_environment_cannot_set_launcher_variables(string name)
+    [InlineData("BASH_ENV")]
+    [InlineData("LD_PRELOAD")]
+    [InlineData("PATH")]
+    [InlineData("HOME")]
+    [InlineData("codex_home")]
+    [InlineData("CODEX_HOME=x")]
+    public void Command_environment_forwards_only_allowlisted_names(string name)
     {
         var command = new ProcessSpec("codex", ["exec"],
             Environment: new Dictionary<string, string?> { [name] = "x" });
@@ -314,6 +320,12 @@ public class DockerLauncherTests
     [InlineData("named-volume")]
     [InlineData("/tmp/a:/etc")]
     [InlineData("C:/tmp/a:/etc")]
+    [InlineData("tmp/run")]
+    [InlineData(@"tmp\run")]
+    [InlineData("./run")]
+    [InlineData("../run")]
+    [InlineData("C:run/x")]
+    [InlineData(@"\run")]
     public void Mounts_need_a_plain_host_directory_path(string hostPath)
     {
         var command = new ProcessSpec("codex", ["exec"], Mounts: [new BindMount(hostPath, "/symphonist-run")]);
@@ -322,6 +334,8 @@ public class DockerLauncherTests
 
     [Theory]
     [InlineData(@"C:\Users\dev\AppData\Local\Temp\run")]
+    [InlineData("C:/tmp/run")]
+    [InlineData(@"\\server\share\run")]
     [InlineData("/tmp/run")]
     public void Mounts_accept_windows_and_unix_host_paths(string hostPath)
     {
@@ -338,8 +352,8 @@ public class DockerLauncherTests
         Assert.Equal(expected, await launcher.HasCommandAsync("acme/agent:7", "codex", default));
         var call = Assert.Single(fake.Calls);
         Assert.Equal("docker", call.FileName);
-        Assert.Equal(["run", "--rm", "--pull=never", "--entrypoint", "codex", "acme/agent:7", "--version"],
-            call.Arguments);
+        Assert.Equal(["run", "--rm", "--pull=never", "--network=none", "--cap-drop=ALL", "--entrypoint", "codex",
+            "acme/agent:7", "--version"], call.Arguments);
     }
 
     [Theory]

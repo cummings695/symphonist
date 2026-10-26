@@ -30,8 +30,6 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
 
     private const string TokenVar = "CLAUDE_CODE_OAUTH_TOKEN";
     private const string DomainsVar = "SYMPHONIST_ALLOWED_DOMAINS";
-    private const string LauncherVarPrefix = "SYMPHONIST_";
-    private const string DockerVarPrefix = "DOCKER_"; // the docker CLI's own configuration (DOCKER_HOST, ...)
     private const string WorkspacePath = "/workspace";
     private const string UidVar = "SYMPHONIST_UID";
     private const string GidVar = "SYMPHONIST_GID";
@@ -44,17 +42,18 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     private static readonly TimeSpan RemoveTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(45);
 
-    /// <summary>Variables only the launcher sets: provider credentials (a run must get only its own), besides
-    /// <see cref="LauncherVarPrefix"/> and <see cref="DockerVarPrefix"/> names.</summary>
-    private static readonly string[] CredentialVars = [TokenVar, CodexApiKeyVar, "OPENAI_API_KEY"];
+    /// <summary>
+    /// The only command variables forwarded into the container. An allowlist: forwarded names also reach the docker
+    /// CLI's own environment and the entrypoint and firewall, which run as root (BASH_ENV, LD_PRELOAD, PATH, ...),
+    /// and must never override the launcher's own credential or SYMPHONIST_* variables.
+    /// </summary>
+    private static readonly HashSet<string> ForwardableVars = new(StringComparer.Ordinal) { "CODEX_HOME" };
 
     /// <summary>Container paths a mount may not cover or sit under: the workspace (its mounts carry the read-only
     /// rules) and system directories, which hold the firewall, entrypoint and tools that run before the agent.</summary>
     private static readonly string[] ReservedMountRoots =
         ["workspace", "bin", "sbin", "lib", "lib32", "lib64", "libx32", "usr", "etc", "opt", "proc", "sys", "dev",
             "root", "boot", "var"];
-
-    private static readonly System.Text.RegularExpressions.Regex EnvName = new("^[A-Za-z_][A-Za-z0-9_]*$");
 
     public bool ProvidesIsolation(AgentRunRequest request) => true;
 
@@ -193,7 +192,9 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
         if (string.IsNullOrWhiteSpace(command) || command.StartsWith('-') || command.Any(char.IsWhiteSpace))
             throw new ArgumentException($"invalid command '{command}'", nameof(command));
         var r = await runner.RunAsync(new ProcessSpec("docker",
-            ["run", "--rm", "--pull=never", "--entrypoint", command, image, "--version"], Timeout: InspectTimeout), ct);
+            // The entrypoint (and with it the firewall) is bypassed, so no network and no capabilities.
+            ["run", "--rm", "--pull=never", "--network=none", "--cap-drop=ALL", "--entrypoint", command, image,
+                "--version"], Timeout: InspectTimeout), ct);
         return r.ExitCode == 0;
     }
 
@@ -273,22 +274,19 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
 
     private static void ValidateCommandVariable(string name)
     {
-        // A name with '=' would put its value on the docker command line; launcher variables must not be overridden.
-        if (!EnvName.IsMatch(name)
-            || CredentialVars.Contains(name, StringComparer.OrdinalIgnoreCase)
-            || name.StartsWith(LauncherVarPrefix, StringComparison.OrdinalIgnoreCase)
-            || name.StartsWith(DockerVarPrefix, StringComparison.OrdinalIgnoreCase))
+        if (!ForwardableVars.Contains(name))
             throw new InvalidOperationException($"agent command may not set environment variable '{name}'");
     }
 
     private static void ValidateMount(BindMount mount)
     {
         var path = mount.ContainerPath;
-        // A host path without a separator would make docker create a named volume instead, and a ':' other than a
-        // Windows drive letter's would shift the fields of the -v value.
-        var host = mount.HostPath;
-        if (string.IsNullOrWhiteSpace(host) || !host.Contains('/') && !host.Contains('\\')
-            || host.IndexOf(':', host.Length > 2 && host[1] == ':' ? 2 : 0) >= 0)
+        // Rooted (docker resolves nothing relative, and a bare name would make it create a named volume instead), in
+        // any OS's form, and with no ':' other than a drive letter's, which would shift the fields of the -v value.
+        var host = mount.HostPath ?? "";
+        var drive = host.Length > 2 && char.IsAsciiLetter(host[0]) && host[1] == ':' && host[2] is '/' or '\\';
+        var rooted = drive || host.StartsWith('/') || host.StartsWith(@"\\", StringComparison.Ordinal);
+        if (!rooted || host.IndexOf(':', drive ? 2 : 0) >= 0)
             throw new InvalidOperationException($"mount at '{path}' needs a host directory path, not '{mount.HostPath}'");
         // Absolute, already normal (no empty, '.' or '..' segments) and free of ':' and ',' so docker reads exactly
         // this path, which must stay clear of the workspace and system directories.
