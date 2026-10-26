@@ -492,6 +492,24 @@ public sealed class OnboardingServiceTests : IDisposable
     }
 
     [Fact]
+    public void Secret_names_in_use_follow_the_providers()
+    {
+        WriteProject("orders", "github-projects", "github");
+        var session = service.Open("orders");
+        session.Form.Agent.Type = AgentTypes.Codex;
+
+        Assert.Equal(["github-orders", CodexSettings.DefaultApiKeySecret], service.SecretNamesInUse(session));
+
+        session.Form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        Assert.Equal(["github-orders"], service.SecretNamesInUse(session));
+
+        session.Form.Agent.CodexAuth = CodexAuth.ApiKey;
+        session.Form.Agent.CodexApiKeySecret = "openai-orders";
+        session.Form.Review.AgentType = AgentTypes.ClaudeCode;
+        Assert.Equal(["github-orders", DockerLauncher.TokenSecretName, "openai-orders"], service.SecretNamesInUse(session));
+    }
+
+    [Fact]
     public async Task Nothing_is_written_until_save()
     {
         var text = WriteProject("orders");

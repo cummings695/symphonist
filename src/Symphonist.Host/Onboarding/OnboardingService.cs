@@ -312,8 +312,9 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
     }
 
     /// <summary>
-    /// The distinct Secret-kind values of the session's tracker, repo and build sections, plus the agent token in
-    /// container mode.
+    /// The distinct Secret-kind values of the session's tracker, repo and build sections, plus the agent credentials:
+    /// the Claude Code token when some job runs Claude Code in a container, the OpenAI key secret when some job runs
+    /// Codex with an API key.
     /// </summary>
     public IReadOnlyList<string> SecretNamesInUse(OnboardingSession session)
     {
@@ -322,7 +323,12 @@ public sealed class OnboardingService(ProjectRegistry registry, ProviderRegistry
         Add(form.Tracker, providers.AllTrackers.FirstOrDefault(p => p.Type == form.Tracker.Type)?.Fields);
         Add(form.Repo, providers.AllRepos.FirstOrDefault(p => p.Type == form.Repo.Type)?.Fields);
         Add(form.Build, providers.AllBuilds.FirstOrDefault(p => p.Type == form.Build.Type)?.Fields);
-        if (form.Agent.Isolation == Isolation.Container) names.Add(DockerLauncher.TokenSecretName);
+        var agents = form.AgentTypesInUse;
+        if (agents.Contains(AgentTypes.ClaudeCode) && form.Agent.Isolation == Isolation.Container)
+            names.Add(DockerLauncher.TokenSecretName);
+        if (agents.Contains(AgentTypes.Codex) && form.Agent.CodexAuth == CodexAuth.ApiKey)
+            names.Add(string.IsNullOrWhiteSpace(form.Agent.CodexApiKeySecret)
+                ? CodexSettings.DefaultApiKeySecret : form.Agent.CodexApiKeySecret.Trim());
         return names.Distinct(StringComparer.Ordinal).ToList();
 
         void Add(ProviderSectionForm section, IReadOnlyList<ProviderField>? fields)

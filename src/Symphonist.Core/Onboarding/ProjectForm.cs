@@ -22,6 +22,8 @@ public sealed class ProviderSectionForm
 
 public sealed class AgentForm
 {
+    /// <summary>The project's provider, <c>agent.type</c>: one of <see cref="AgentTypes.All"/>.</summary>
+    public string Type { get; set; } = AgentTypes.ClaudeCode;
     public Isolation Isolation { get; set; } = Isolation.Container;
     public List<string> AllowedDomains { get; set; } = [];
     public List<string> AllowedTools { get; set; } = [];
@@ -32,8 +34,15 @@ public sealed class AgentForm
     public List<string> PackagesPip { get; set; } = [];
     public List<string> PackagesNpm { get; set; } = [];
 
+    /// <summary><c>agent.codex.auth</c>; written only when some job uses Codex and it is not the default.</summary>
+    public CodexAuth CodexAuth { get; set; } = CodexAuth.ApiKey;
+
+    /// <summary><c>agent.codex.apiKeySecret</c>; applies only to <see cref="CodexAuth.ApiKey"/>.</summary>
+    public string CodexApiKeySecret { get; set; } = CodexSettings.DefaultApiKeySecret;
+
     public AgentForm Clone() => new()
     {
+        Type = Type, CodexAuth = CodexAuth, CodexApiKeySecret = CodexApiKeySecret,
         Isolation = Isolation, AllowedDomains = [.. AllowedDomains], AllowedTools = [.. AllowedTools],
         TimeoutMinutes = TimeoutMinutes, Model = Model, Image = Image,
         PackagesApt = [.. PackagesApt], PackagesPip = [.. PackagesPip], PackagesNpm = [.. PackagesNpm],
@@ -50,10 +59,17 @@ public sealed class StageForm
     public string? OnGateStatus { get; set; }
     public string? ApprovedWhenStatus { get; set; }
 
+    // The stage's agent override; null = the project agent's value. A changed type without a model gets the
+    // provider's default model, as the loader reads it.
+    public string? AgentType { get; set; }
+    public string? AgentModel { get; set; }
+    public int? AgentTimeoutMinutes { get; set; }
+
     public StageForm Clone() => new()
     {
         Id = Id, Kind = Kind, Gate = Gate, EntryStatuses = [.. EntryStatuses],
         OnEnterStatus = OnEnterStatus, OnGateStatus = OnGateStatus, ApprovedWhenStatus = ApprovedWhenStatus,
+        AgentType = AgentType, AgentModel = AgentModel, AgentTimeoutMinutes = AgentTimeoutMinutes,
     };
 }
 
@@ -71,13 +87,15 @@ public sealed class ReviewForm
 {
     public ReviewMode Mode { get; set; } = ReviewMode.Off;
     public string? PromptPath { get; set; }
+    public string? AgentType { get; set; }
     public string? Model { get; set; }
     public int TimeoutMinutes { get; set; } = 20;
     public List<string> AllowedTools { get; set; } = [];
 
     public ReviewForm Clone() => new()
     {
-        Mode = Mode, PromptPath = PromptPath, Model = Model, TimeoutMinutes = TimeoutMinutes, AllowedTools = [.. AllowedTools],
+        Mode = Mode, PromptPath = PromptPath, AgentType = AgentType, Model = Model, TimeoutMinutes = TimeoutMinutes,
+        AllowedTools = [.. AllowedTools],
     };
 }
 
@@ -100,14 +118,15 @@ public sealed class EvidenceForm
     public string? Notes { get; set; }
     public List<EvidenceFeatureForm> Features { get; set; } = [];
     public int TimeoutMinutes { get; set; } = EvidenceLimits.DefaultTimeoutMinutes;
+    public string? AgentType { get; set; }
     public string? Model { get; set; }
     public string? PromptPath { get; set; }
 
     public EvidenceForm Clone() => new()
     {
         Mode = Mode, Setup = [.. Setup], Start = Start, Url = Url, Ready = Ready, Notes = Notes,
-        Features = Features.Select(f => f.Clone()).ToList(), TimeoutMinutes = TimeoutMinutes, Model = Model,
-        PromptPath = PromptPath,
+        Features = Features.Select(f => f.Clone()).ToList(), TimeoutMinutes = TimeoutMinutes,
+        AgentType = AgentType, Model = Model, PromptPath = PromptPath,
     };
 
     /// <summary>Fills only blank run fields and adds features whose name is new (ignoring case), up to the loader's limit.</summary>
@@ -212,6 +231,9 @@ public sealed class ProjectForm
                 providers.Build(config.Build.Type).Fields, dir),
             Agent = new AgentForm
             {
+                Type = config.Agent.Type,
+                CodexAuth = config.Agent.Codex.Auth,
+                CodexApiKeySecret = config.Agent.Codex.ApiKeySecret,
                 Isolation = config.Agent.Isolation,
                 AllowedDomains = [.. config.Agent.AllowedDomains],
                 AllowedTools = [.. config.Agent.AllowedTools],
@@ -228,6 +250,10 @@ public sealed class ProjectForm
             {
                 Id = s.Id, Kind = s.Kind, Gate = s.Gate, EntryStatuses = [.. s.EntryStatuses],
                 OnEnterStatus = s.OnEnterStatus, OnGateStatus = s.OnGateStatus, ApprovedWhenStatus = s.ApprovedWhenStatus,
+                AgentType = OverrideType(s.Agent, config.Agent),
+                AgentModel = s.Agent is null ? null : OverrideModel(s.Agent, config.Agent),
+                AgentTimeoutMinutes = s.Agent is null || s.Agent.TimeoutMinutes == config.Agent.TimeoutMinutes
+                    ? null : s.Agent.TimeoutMinutes,
             }).ToList(),
             RiskAreas = config.RiskAreas.Select(a => new RiskAreaForm
             {
@@ -238,7 +264,8 @@ public sealed class ProjectForm
                 Mode = review.Mode,
                 PromptPath = review.PromptPath is null ? null : Relative(review.PromptPath, dir),
                 // The loader fills inherited and default values in; keep only what the file overrides.
-                Model = review.Agent.Model == config.Agent.Model ? null : Blank(review.Agent.Model),
+                AgentType = OverrideType(review.Agent, config.Agent),
+                Model = OverrideModel(review.Agent, config.Agent),
                 TimeoutMinutes = review.Agent.TimeoutMinutes,
                 AllowedTools = review.Agent.AllowedTools.SequenceEqual(ReviewConfig.ReadOnlyTools)
                     ? [] : [.. review.Agent.AllowedTools],
@@ -254,13 +281,36 @@ public sealed class ProjectForm
                 Features = config.Evidence.Features.Select(f => new EvidenceFeatureForm { Name = f.Name, Steps = f.Steps }).ToList(),
                 TimeoutMinutes = config.Evidence.Agent.TimeoutMinutes,
                 // The loader fills the inherited model in; keep only what the file overrides.
-                Model = config.Evidence.Agent.Model == config.Agent.Model ? null : Blank(config.Evidence.Agent.Model),
+                AgentType = OverrideType(config.Evidence.Agent, config.Agent),
+                Model = OverrideModel(config.Evidence.Agent, config.Agent),
                 PromptPath = config.Evidence.PromptPath is null ? null : Relative(config.Evidence.PromptPath, dir),
             },
             PrCommentsFromOthers = config.PrComments.FromOthers,
             Prompts = config.PromptOverrides.ToDictionary(e => e.Key, e => Relative(e.Value, dir)),
         };
     }
+
+    /// <summary>Every provider some job uses, a blank override meaning the project agent's (as <see cref="ProjectConfig.AgentTypesInUse"/>).</summary>
+    public IReadOnlySet<string> AgentTypesInUse
+    {
+        get
+        {
+            var types = new HashSet<string> { Agent.Type, JobType(Review.AgentType), JobType(Evidence.AgentType) };
+            foreach (var stage in Pipeline) types.Add(JobType(stage.AgentType));
+            return types;
+        }
+    }
+
+    private string JobType(string? type) => string.IsNullOrWhiteSpace(type) ? Agent.Type : type;
+
+    // Together these invert the loader's override rule: an override's type is kept only when it differs from the
+    // project's. With the project's type an absent model inherits the project's, so an equal one is dropped; with
+    // another type nothing is inherited, so the model is kept as is.
+    private static string? OverrideType(AgentSettings? job, AgentSettings project) =>
+        job is null || job.Type == project.Type ? null : job.Type;
+
+    private static string? OverrideModel(AgentSettings job, AgentSettings project) =>
+        job.Type == project.Type && job.Model == project.Model ? null : Blank(job.Model);
 
     public void ChangeTrackerType(string type, ProviderRegistry providers)
     {
@@ -320,6 +370,7 @@ public sealed class ProjectForm
         ValidateSection("repo", Repo, providers.AllRepos.FirstOrDefault(p => p.Type == Repo.Type)?.Fields, errors);
         ValidateSection("build", Build, providers.AllBuilds.FirstOrDefault(p => p.Type == Build.Type)?.Fields, errors);
 
+        ValidateAgents(errors);
         Items("agent.allowedDomains", Agent.AllowedDomains, errors);
         Items("agent.allowedTools", Agent.AllowedTools, errors);
         Line("agent.model", Agent.Model, errors);
@@ -337,6 +388,7 @@ public sealed class ProjectForm
             Line($"pipeline stage '{stage.Id}' onEnterStatus", stage.OnEnterStatus, errors);
             Line($"pipeline stage '{stage.Id}' onGateStatus", stage.OnGateStatus, errors);
             Line($"pipeline stage '{stage.Id}' approvedWhenStatus", stage.ApprovedWhenStatus, errors);
+            Line($"pipeline stage '{stage.Id}' agent.model", stage.AgentModel, errors);
         }
 
         foreach (var area in RiskAreas)
@@ -352,6 +404,37 @@ public sealed class ProjectForm
         ValidateEvidence(errors);
         foreach (var (kind, path) in Prompts) Line($"prompts.{kind.ToString().ToLowerInvariant()}", path, errors);
         return errors;
+    }
+
+    /// <summary>The loader's provider rules, with its messages (<see cref="AgentRules"/>).</summary>
+    private void ValidateAgents(List<string> errors)
+    {
+        Type("agent.type", Agent.Type ?? "", optional: false);
+        foreach (var stage in Pipeline) Type($"pipeline stage '{stage.Id}' agent.type", stage.AgentType);
+        Type("review.agent.type", Review.AgentType);
+        Type("evidence.agent.type", Evidence.AgentType);
+        var inUse = AgentTypesInUse;
+        if (inUse.Any(t => !AgentRules.AllowedIn(t, Agent.Isolation))) errors.Add(AgentRules.CodexNeedsContainer);
+
+        // The writer leaves agent.codex out when no job uses Codex, so its fields only matter when one does.
+        if (!inUse.Contains(AgentTypes.Codex)) return;
+        Line("agent.codex.apiKeySecret", Agent.CodexApiKeySecret, errors);
+        var secret = string.IsNullOrWhiteSpace(Agent.CodexApiKeySecret) ? CodexSettings.DefaultApiKeySecret
+            : Agent.CodexApiKeySecret;
+        if (Agent.CodexAuth != CodexAuth.ApiKey)
+        {
+            if (secret != CodexSettings.DefaultApiKeySecret) errors.Add(AgentRules.ApiKeySecretNeedsApiKey);
+        }
+        else if (!SecretNames.IsValid(secret))
+            errors.Add("agent.codex.apiKeySecret: invalid secret name; use lowercase letters, digits and '-'");
+
+        // A blank override is not written: the job uses the project agent.
+        void Type(string field, string? type, bool optional = true)
+        {
+            if (type is null || (optional && string.IsNullOrWhiteSpace(type))) return;
+            Line(field, type, errors);
+            if (!AgentRules.IsSupported(type)) errors.Add(AgentRules.UnsupportedType(field, type));
+        }
     }
 
     /// <summary>Rules matching the loader's evidence limits, so the screen cannot save what the loader rejects.</summary>

@@ -622,4 +622,189 @@ public class ProjectYamlWriterTests
         Assert.Contains(errors, e => e.StartsWith("evidence.features[].name is 81"));
         Assert.Contains(errors, e => e.Contains("needs steps"));
     }
+
+    [Fact]
+    public void Claude_only_form_writes_the_same_sections_as_before()
+    {
+        var sections = ProjectYamlWriter.Sections(Sample("orders.example.yaml"), Registry);
+
+        Assert.Equal("agent:\n  type: claude-code\n  allowedDomains: [api.nuget.org, registry.npmjs.org]\n", sections["agent"]);
+        Assert.Equal(
+            "pipeline:\n"
+            + "  - { id: triage, kind: triage, gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }\n"
+            + "  - { id: plan, kind: plan, gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }\n"
+            + "  - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }\n"
+            + "  - { id: build, kind: build }\n"
+            + "  - { id: release, kind: release, gate: human }\n"
+            + "  - { id: deploy, kind: deploy }\n"
+            + "  - { id: done, kind: done, onEnterStatus: Done }\n",
+            sections["pipeline"]);
+        Assert.Equal("review:\n  mode: off\n", sections["review"]);
+        Assert.Null(sections["evidence"]);
+
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n")
+            .Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+                "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n")
+            .Replace("review:\n  mode: off",
+                "review:\n  mode: shadow\n  agent: { model: sonnet, timeoutMinutes: 10 }\nevidence:\n  agent: { model: haiku }");
+        sections = ProjectYamlWriter.Sections(ProjectForm.From(Parse(text), Registry), Registry);
+
+        Assert.Equal("agent:\n  type: claude-code\n  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n",
+            sections["agent"]);
+        Assert.Equal("review:\n  mode: shadow\n  agent: { model: sonnet, timeoutMinutes: 10 }\n", sections["review"]);
+        Assert.Equal("evidence:\n  agent: { model: haiku }\n", sections["evidence"]);
+    }
+
+    [Fact]
+    public void Codex_agent_round_trips()
+    {
+        var form = Filled();
+        form.Agent.Type = AgentTypes.Codex;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        form.Agent.Model = "gpt-5-codex";
+
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var p = Parse(text);
+
+        Assert.Contains("agent:\n  type: codex\n", text);
+        Assert.Contains("  codex: { auth: chatgpt }\n", text);
+        Assert.Equal(AgentTypes.Codex, p.Agent.Type);
+        Assert.Equal(new CodexSettings(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret), p.Agent.Codex);
+        Assert.Equal("gpt-5-codex", p.Agent.Model);
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Agent.Type);
+        Assert.Equal(CodexAuth.ChatGpt, back.Agent.CodexAuth);
+        Assert.Equal(ProjectYamlWriter.Sections(form, Registry)["agent"], ProjectYamlWriter.Sections(back, Registry)["agent"]);
+
+        form.Agent.CodexAuth = CodexAuth.ApiKey;
+        form.Agent.CodexApiKeySecret = "openai-orders";
+        p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+        Assert.Equal(new CodexSettings(CodexAuth.ApiKey, "openai-orders"), p.Agent.Codex);
+        Assert.Equal("openai-orders", ProjectForm.From(p, Registry).Agent.CodexApiKeySecret);
+    }
+
+    [Fact]
+    public void Default_codex_settings_are_omitted()
+    {
+        var form = Filled();
+        form.Agent.Type = AgentTypes.Codex;
+
+        var agent = ProjectYamlWriter.Sections(form, Registry)["agent"]!;
+
+        Assert.StartsWith("agent:\n  type: codex\n", agent);
+        Assert.DoesNotContain("codex:", agent);
+
+        // Settings for a provider no job uses are not written (the loader rejects them).
+        form.Agent.Type = AgentTypes.ClaudeCode;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        Assert.DoesNotContain("codex", ProjectYamlWriter.Sections(form, Registry)["agent"]);
+        Parse(ProjectYamlWriter.NewFile(form, Registry));
+    }
+
+    [Fact]
+    public void Stage_override_round_trips()
+    {
+        var form = Filled();
+        form.Pipeline[2].AgentType = AgentTypes.Codex;
+        form.Pipeline[2].AgentModel = "m";
+        form.Pipeline[0].AgentModel = "haiku";
+        form.Pipeline[0].AgentTimeoutMinutes = 15;
+
+        var pipeline = ProjectYamlWriter.Sections(form, Registry)["pipeline"]!;
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Contains("  - { id: implement, kind: implement, gate: human, agent: { type: codex, model: m } }\n", pipeline);
+        Assert.Contains("  - { id: triage, kind: triage, gate: human, agent: { model: haiku, timeoutMinutes: 15 } }\n", pipeline);
+        Assert.Equal(AgentTypes.Codex, p.AgentFor("implement").Type);
+        Assert.Equal("m", p.AgentFor("implement").Model);
+        Assert.Equal(AgentTypes.ClaudeCode, p.AgentFor("triage").Type);
+        Assert.Equal(15, p.AgentFor("triage").TimeoutMinutes);
+        Assert.Null(p.Stage("plan").Agent);
+
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Pipeline[2].AgentType);
+        Assert.Equal("m", back.Pipeline[2].AgentModel);
+        Assert.Null(back.Pipeline[2].AgentTimeoutMinutes);
+        Assert.Null(back.Pipeline[0].AgentType);
+        Assert.Equal(pipeline, ProjectYamlWriter.Sections(back, Registry)["pipeline"]);
+    }
+
+    [Fact]
+    public void Stage_override_that_changes_nothing_comes_back_empty()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n")
+            .Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+                "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n  timeoutMinutes: 90\n")
+            .Replace("kind: build }", "kind: build, agent: { type: claude-code } }")
+            .Replace("kind: deploy }", "kind: deploy, agent: { type: codex, model: opus } }");
+
+        var form = ProjectForm.From(Parse(text), Registry);
+
+        var build = form.Pipeline.Single(s => s.Id == "build");
+        Assert.Null(build.AgentType);
+        Assert.Null(build.AgentModel);
+        Assert.Null(build.AgentTimeoutMinutes);
+        // Another provider with the project's model name keeps it: the loader would not carry it across.
+        var deploy = form.Pipeline.Single(s => s.Id == "deploy");
+        Assert.Equal(AgentTypes.Codex, deploy.AgentType);
+        Assert.Equal("opus", deploy.AgentModel);
+        Assert.Equal("opus", Parse(ProjectYamlWriter.NewFile(form, Registry)).AgentFor("deploy").Model);
+    }
+
+    [Fact]
+    public void Review_and_evidence_agent_type_round_trip()
+    {
+        var form = Filled();
+        form.Agent.Model = "opus";
+        form.Review.Mode = ReviewMode.Shadow;
+        form.Review.AgentType = AgentTypes.Codex;
+        form.Review.Model = "opus";
+        form.Evidence.AgentType = AgentTypes.Codex;
+
+        var sections = ProjectYamlWriter.Sections(form, Registry);
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Equal("review:\n  mode: shadow\n  agent: { type: codex, model: opus }\n", sections["review"]);
+        Assert.Equal("evidence:\n  agent: { type: codex }\n", sections["evidence"]);
+        Assert.Equal(AgentTypes.Codex, p.Review.Agent.Type);
+        Assert.Equal("opus", p.Review.Agent.Model);
+        Assert.Equal(AgentTypes.Codex, p.Evidence.Agent.Type);
+        Assert.Null(p.Evidence.Agent.Model);
+
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Review.AgentType);
+        Assert.Equal("opus", back.Review.Model);
+        Assert.Equal(AgentTypes.Codex, back.Evidence.AgentType);
+        Assert.Null(back.Evidence.Model);
+        Assert.Equal(sections["review"], ProjectYamlWriter.Sections(back, Registry)["review"]);
+        Assert.Equal(sections["evidence"], ProjectYamlWriter.Sections(back, Registry)["evidence"]);
+    }
+
+    [Fact]
+    public void Validate_rejects_codex_with_host_isolation()
+    {
+        var form = Filled();
+        form.Agent.Isolation = Isolation.Host;
+        form.Agent.AllowedTools = ["Read"];
+        Assert.DoesNotContain(AgentRules.CodexNeedsContainer, form.Validate(Registry));
+
+        form.Evidence.AgentType = AgentTypes.Codex;
+        Assert.Contains(AgentRules.CodexNeedsContainer, form.Validate(Registry));
+
+        form.Evidence.AgentType = null;
+        form.Pipeline[1].AgentType = "gemini";
+        Assert.Contains(AgentRules.UnsupportedType("pipeline stage 'plan' agent.type", "gemini"), form.Validate(Registry));
+
+        form.Pipeline[1].AgentType = null;
+        form.Agent.Isolation = Isolation.Container;
+        form.Agent.Type = AgentTypes.Codex;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        form.Agent.CodexApiKeySecret = "openai-orders";
+        Assert.Contains(AgentRules.ApiKeySecretNeedsApiKey, form.Validate(Registry));
+
+        form.Agent.CodexAuth = CodexAuth.ApiKey;
+        Assert.Empty(form.Validate(Registry));
+        form.Agent.CodexApiKeySecret = "Bad Name";
+        Assert.Contains(form.Validate(Registry), e => e.StartsWith("agent.codex.apiKeySecret: invalid secret name"));
+    }
 }

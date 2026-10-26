@@ -120,8 +120,23 @@ public class ProjectFormTests
         form.RiskAreas.Add(new RiskAreaForm { Name = "a", Description = "d", Paths = ["p"] });
         form.Prompts[StageKind.Plan] = "prompts/plan.md";
         form.Agent.PackagesApt.Add("ripgrep");
+        form.Agent.Type = AgentTypes.Codex;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        form.Agent.CodexApiKeySecret = "openai-orders";
+        form.Pipeline[2].AgentType = AgentTypes.Codex;
+        form.Pipeline[2].AgentModel = "m";
+        form.Pipeline[2].AgentTimeoutMinutes = 5;
+        form.Review.AgentType = AgentTypes.Codex;
+        form.Evidence.AgentType = AgentTypes.ClaudeCode;
 
         var clone = form.Clone();
+        Assert.Equal(AgentTypes.Codex, clone.Agent.Type);
+        Assert.Equal(CodexAuth.ChatGpt, clone.Agent.CodexAuth);
+        Assert.Equal("openai-orders", clone.Agent.CodexApiKeySecret);
+        Assert.Equal((AgentTypes.Codex, "m", 5),
+            (clone.Pipeline[2].AgentType, clone.Pipeline[2].AgentModel, clone.Pipeline[2].AgentTimeoutMinutes));
+        Assert.Equal(AgentTypes.Codex, clone.Review.AgentType);
+        Assert.Equal(AgentTypes.ClaudeCode, clone.Evidence.AgentType);
         clone.Tracker.Values["label"] = "Other";
         clone.Tracker.Lists["statuses"].Add("Planned");
         clone.Repo.Values["owner"] = "other";

@@ -35,7 +35,7 @@ public static class ProjectYamlWriter
             ["tracker"] = ProviderSection("tracker", form.Tracker, tracker.Fields),
             ["repo"] = ProviderSection("repo", form.Repo, repo.Fields),
             ["build"] = ProviderSection("build", form.Build, build.Fields),
-            ["agent"] = Agent(form.Agent),
+            ["agent"] = Agent(form.Agent, form.AgentTypesInUse.Contains(AgentTypes.Codex)),
             ["maxAttemptsPerStage"] = form.MaxAttemptsPerStage == 3 ? null
                 : $"maxAttemptsPerStage: {form.MaxAttemptsPerStage.ToString(CultureInfo.InvariantCulture)}\n",
             ["commentMarker"] = form.CommentMarker == TrackerComments.DefaultMarker ? null
@@ -145,9 +145,10 @@ public static class ProjectYamlWriter
         return text.ToString();
     }
 
-    private static string Agent(AgentForm agent)
+    /// <param name="usesCodex">Some job runs Codex; otherwise <c>codex</c> is left out (the loader rejects it then).</param>
+    private static string Agent(AgentForm agent, bool usesCodex)
     {
-        var text = new StringBuilder("agent:\n  type: claude-code\n");
+        var text = new StringBuilder($"agent:\n  type: {Scalar(agent.Type)}\n");
         if (agent.Isolation != Isolation.Container) text.Append($"  isolation: {Enum(agent.Isolation)}\n");
         if (agent.AllowedDomains.Count > 0) text.Append($"  allowedDomains: {List(agent.AllowedDomains)}\n");
         if (agent.AllowedTools.Count > 0) text.Append($"  allowedTools: {List(agent.AllowedTools)}\n");
@@ -162,7 +163,22 @@ public static class ProjectYamlWriter
             if (agent.PackagesPip.Count > 0) text.Append($"    pip: {List(agent.PackagesPip)}\n");
             if (agent.PackagesNpm.Count > 0) text.Append($"    npm: {List(agent.PackagesNpm)}\n");
         }
+        var codex = new List<string>();
+        if (usesCodex && agent.CodexAuth != CodexAuth.ApiKey) codex.Add("auth: chatgpt");
+        if (usesCodex && !string.IsNullOrWhiteSpace(agent.CodexApiKeySecret)
+            && agent.CodexApiKeySecret != CodexSettings.DefaultApiKeySecret)
+            codex.Add($"apiKeySecret: {FlowScalar(agent.CodexApiKeySecret)}");
+        if (codex.Count > 0) text.Append($"  codex: {{ {string.Join(", ", codex)} }}\n");
         return text.ToString();
+    }
+
+    /// <summary>The type and model of a job's agent override as flow-mapping entries; blank ones are left out.</summary>
+    private static List<string> AgentOverride(string? type, string? model)
+    {
+        var entries = new List<string>();
+        if (!string.IsNullOrWhiteSpace(type)) entries.Add($"type: {FlowScalar(type)}");
+        if (!string.IsNullOrWhiteSpace(model)) entries.Add($"model: {FlowScalar(model)}");
+        return entries;
     }
 
     private static string Pipeline(List<StageForm> stages)
@@ -178,6 +194,10 @@ public static class ProjectYamlWriter
             if (!string.IsNullOrEmpty(stage.OnGateStatus)) entries.Add($"onGateStatus: {FlowScalar(stage.OnGateStatus)}");
             if (!string.IsNullOrEmpty(stage.ApprovedWhenStatus))
                 entries.Add($"approvedWhenStatus: {FlowScalar(stage.ApprovedWhenStatus)}");
+            var agent = AgentOverride(stage.AgentType, stage.AgentModel);
+            if (stage.AgentTimeoutMinutes is { } timeout)
+                agent.Add($"timeoutMinutes: {timeout.ToString(CultureInfo.InvariantCulture)}");
+            if (agent.Count > 0) entries.Add($"agent: {{ {string.Join(", ", agent)} }}");
             text.Append($"  - {{ {string.Join(", ", entries)} }}\n");
         }
         return text.ToString();
@@ -200,8 +220,7 @@ public static class ProjectYamlWriter
     {
         var text = new StringBuilder($"review:\n  mode: {Enum(review.Mode)}\n");
         if (!string.IsNullOrWhiteSpace(review.PromptPath)) text.Append($"  prompt: {Scalar(review.PromptPath)}\n");
-        var agent = new List<string>();
-        if (!string.IsNullOrWhiteSpace(review.Model)) agent.Add($"model: {FlowScalar(review.Model)}");
+        var agent = AgentOverride(review.AgentType, review.Model);
         if (review.TimeoutMinutes != 20)
             agent.Add($"timeoutMinutes: {review.TimeoutMinutes.ToString(CultureInfo.InvariantCulture)}");
         if (review.AllowedTools.Count > 0) agent.Add($"allowedTools: {List(review.AllowedTools)}");
@@ -218,6 +237,7 @@ public static class ProjectYamlWriter
         if (!string.IsNullOrWhiteSpace(e.Ready)) run.Append($"    ready: {Scalar(e.Ready)}\n");
         if (!string.IsNullOrWhiteSpace(e.Notes)) run.Append("    notes: ").Append(Multiline(e.Notes, "      "));
         var agent = new List<string>();
+        if (!string.IsNullOrWhiteSpace(e.AgentType)) agent.Add($"type: {FlowScalar(e.AgentType)}");
         if (e.TimeoutMinutes != EvidenceLimits.DefaultTimeoutMinutes)
             agent.Add($"timeoutMinutes: {e.TimeoutMinutes.ToString(CultureInfo.InvariantCulture)}");
         if (!string.IsNullOrWhiteSpace(e.Model)) agent.Add($"model: {FlowScalar(e.Model)}");
@@ -260,8 +280,8 @@ public static class ProjectYamlWriter
         "repo" => [$"The repository the agents work in: {providers.Repo(form.Repo.Type).DisplayName}. localPath is an existing",
             "local clone; a relative path resolves against the folder holding this file."],
         "build" => [$"Build and deployment status is read from {providers.Build(form.Build.Type).DisplayName}."],
-        "agent" => ["The coding agent. isolation: container (default, Docker sandbox) or host (requires allowedTools).",
-            "allowedDomains are the extra hosts the container may reach."],
+        "agent" => ["The coding agent: type claude-code or codex (containers only). isolation: container (default, Docker",
+            "sandbox) or host (requires allowedTools). allowedDomains are the extra hosts the container may reach."],
         "maxAttemptsPerStage" => ["Failed attempts per stage before the ticket is Blocked. Default: 3."],
         "commentMarker" => ["Comments starting with this (an \"@\" and a name) ask Symphonist to rerun a stage, on the ticket or the PR. Default: \"@claude\"."],
         "pipeline" =>
