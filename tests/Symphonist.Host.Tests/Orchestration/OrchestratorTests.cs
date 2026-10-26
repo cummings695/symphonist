@@ -56,6 +56,7 @@ public sealed class OrchestratorTests : IDisposable
     private readonly FakeTimeProvider time = new(Now);
     private readonly FakeGitWorkspace git = new();
     private readonly FakeAgentRunner agent = new();
+    private readonly FakeAgentRunner codex = new();
     private readonly FakeTicketStore store = new();
     private readonly FakeTracker tracker = new();
     private readonly FakeSourceControl scm = new();
@@ -88,14 +89,17 @@ public sealed class OrchestratorTests : IDisposable
     /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time,
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
 
     private GateReviewer Reviewer() =>
-        new(git, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
+        new(git, Runners(), store, time);
 
     private EvidenceRunner Evidence() =>
-        new(evidenceGit, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
+        new(evidenceGit, Runners(), store, time);
+
+    private AgentRunners Runners() =>
+        new(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent, [AgentTypes.Codex] = codex });
 
     private void Source(string key, string status, params SourceComment[] comments) =>
         tracker.Tickets.Add(new SourceTicket(key, $"Title {key}", $"Description {key}", status, comments,
@@ -1143,7 +1147,7 @@ public sealed class OrchestratorTests : IDisposable
         tracker.OnQuery = () => Interlocked.Increment(ref queries) % 2 == 0 ? throw new HttpRequestException("flaky") : [];
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1169,7 +1173,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1202,7 +1206,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -2443,6 +2447,35 @@ public sealed class OrchestratorTests : IDisposable
             t.EvidenceDue = true;
             t.PullRequestId = 7;
         });
+
+    private void UseCodexFor(string section, string mode)
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path)
+            .Replace($"{section}: {{ mode: {mode} }}", $"{section}: {{ mode: {mode}, agent: {{ type: codex }} }}"));
+        registry.Reload();
+        Assert.Equal(AgentTypes.ClaudeCode, registry.Get("orders").Agent.Type);
+    }
+
+    [Fact] public async Task Reviewer_and_evidence_use_their_own_providers()
+    {
+        ConfigureEvidence("active", "always");
+        UseCodexFor("review", "active");
+        UseCodexFor("evidence", "always");
+        var p = registry.Get("orders");
+        Assert.Equal((AgentTypes.Codex, AgentTypes.Codex), (p.Review.Agent.Type, p.Evidence.Agent.Type));
+        codex.OnRun = r => FakeAgentRunner.IsReview(r) ? FakeAgentRunner.Review("low") : EvidenceReport();
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review
+        await TickIdle(o); // evidence
+
+        Assert.Contains(codex.Requests, FakeAgentRunner.IsReview);
+        Assert.Contains(codex.Requests, IsEvidence);
+        Assert.All(codex.Requests, r => Assert.Equal(AgentTypes.Codex, r.Settings.Type));
+        Assert.Empty(agent.Requests);
+    }
 
     [Fact] public async Task Evidence_runs_after_review_and_posts_to_pr_and_tracker()
     {

@@ -39,7 +39,7 @@ public sealed class StageExecutorTests : IDisposable
     {
         Environment.SetEnvironmentVariable("SYMPHONIST_HOME", home);
         io = new ProjectIntegrations(tracker, scm, builds);
-        executor = new StageExecutor(git, agent, store, time);
+        executor = new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time);
     }
 
     public void Dispose()
@@ -70,6 +70,55 @@ public sealed class StageExecutorTests : IDisposable
         Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-1", Title = "Add export", StageId = stageId,
         Status = StageStatus.Running, Branch = "symphonist/ORD-1", StageStartedAt = Now,
     };
+
+    private ProjectConfig WithImplementOn(string type) => project with
+    {
+        Pipeline = [.. project.Pipeline.Select(s => s.Id == "implement" ? s with { Agent = project.Agent with { Type = type } } : s)],
+    };
+
+    private (StageExecutor Executor, FakeAgentRunner Claude, FakeAgentRunner Codex) TwoRunners()
+    {
+        var claude = new FakeAgentRunner();
+        var codex = new FakeAgentRunner();
+        var runners = new AgentRunners(new Dictionary<string, IAgentRunner>
+            { [AgentTypes.ClaudeCode] = claude, [AgentTypes.Codex] = codex });
+        return (new StageExecutor(git, runners, store, time), claude, codex);
+    }
+
+    [Fact] public async Task Stage_with_codex_override_runs_on_the_codex_runner()
+    {
+        var (two, claude, codex) = TwoRunners();
+
+        var r = await two.ExecuteAsync(WithImplementOn(AgentTypes.Codex), io, At("implement"), source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Equal(AgentTypes.Codex, Assert.Single(codex.Requests).Settings.Type);
+        Assert.Empty(claude.Requests);
+    }
+
+    [Fact] public async Task Stage_without_override_runs_on_project_agent()
+    {
+        var (two, claude, codex) = TwoRunners();
+
+        await two.ExecuteAsync(WithImplementOn(AgentTypes.Codex), io, At("plan"), source, CancellationToken.None);
+
+        Assert.Equal(AgentTypes.ClaudeCode, Assert.Single(claude.Requests).Settings.Type);
+        Assert.Empty(codex.Requests);
+    }
+
+    [Fact] public async Task Pr_comment_fix_run_uses_the_gated_stage_agent()
+    {
+        var (two, claude, codex) = TwoRunners();
+        var t = FixTicket(Mine("issue:1"));
+
+        var r = await two.ExecuteAsync(WithImplementOn(AgentTypes.Codex), io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        var request = Assert.Single(codex.Requests);
+        Assert.Equal(PrFixOutputSchema.Json, request.OutputSchema);
+        Assert.Equal(AgentTypes.Codex, request.Settings.Type);
+        Assert.Empty(claude.Requests);
+    }
 
     [Fact] public void Agent_stages_are_triage_plan_implement()
     {

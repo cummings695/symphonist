@@ -7,6 +7,7 @@ using Microsoft.JSInterop;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
@@ -43,7 +44,7 @@ public sealed class MainLayoutTests : IDisposable
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
         orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
+            new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
             new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);

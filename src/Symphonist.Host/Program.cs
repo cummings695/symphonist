@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Http.Resilience;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
 using Symphonist.Core.Storage;
@@ -15,6 +16,7 @@ using Symphonist.Host.Onboarding;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations;
 using Symphonist.Integrations.ClaudeCode;
+using Symphonist.Integrations.Codex;
 using Symphonist.Integrations.Containers;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
@@ -75,7 +77,10 @@ builder.Services.AddSingleton<IAgentRunner>(sp =>
     new ClaudeCodeRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<IsolationLauncher>()));
 builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictionary<string, IAgentRunner>
 {
-    ["claude-code"] = sp.GetRequiredService<IAgentRunner>(),
+    [AgentTypes.ClaudeCode] = sp.GetRequiredService<IAgentRunner>(),
+    // Run files hold per-run copies of the Codex auth, so they stay under the Symphonist home, not a shared temp dir.
+    [AgentTypes.Codex] = new CodexRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<IsolationLauncher>(),
+        CodexRunner.DefaultCodexHome(), SymphonistPaths.Resolve("run")),
 }));
 builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<GateReviewer>();

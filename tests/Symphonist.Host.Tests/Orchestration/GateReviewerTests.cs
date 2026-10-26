@@ -778,7 +778,7 @@ public sealed class GateReviewerTests : IDisposable
     [Fact]
     public async Task Stage_prompts_get_risk_areas()
     {
-        var executor = new StageExecutor(git, agent, store, time);
+        var executor = new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time);
         agent.Results.Enqueue(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")));
         var t = At("plan");
         t.Status = StageStatus.Running;

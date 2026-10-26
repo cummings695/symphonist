@@ -22,7 +22,7 @@ public sealed record ExecutionResult(ExecutionStatus Status, string? Error = nul
 /// Performs each stage's side effects through the plug-in interfaces. Only mutates the ticket's artifact fields
 /// (spec/plan paths, PR ids, merge commits); the caller applies the engine transition for the returned result.
 /// </summary>
-public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicketStore store, TimeProvider time)
+public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITicketStore store, TimeProvider time)
 {
     private static readonly ExecutionResult Completed = new(ExecutionStatus.Completed);
     private static readonly ExecutionResult InProgress = new(ExecutionStatus.InProgress);
@@ -352,11 +352,12 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         extra?.Invoke(workspace, values);
         var prompt = PromptRenderer.Render(template ?? PromptLibrary.Get(p, kind), values);
 
+        var settings = p.AgentFor(t.StageId);
         var startedAt = time.GetUtcNow();
         AgentRunResult result;
         try
         {
-            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent, schema), ct);
+            result = await agents.For(settings.Type).RunAsync(new AgentRunRequest(workspace, prompt, settings, schema), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {

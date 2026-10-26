@@ -31,7 +31,7 @@ public sealed class BoardQueryTests : IDisposable
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         var time = new FakeTimeProvider(Now);
         orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
+            new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
             new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
