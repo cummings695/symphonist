@@ -616,4 +616,91 @@ public sealed class ProjectSetupComponentTests : IDisposable
         Assert.Equal("npm start", cut.Find("#evidence-start").GetAttribute("value"));
         Assert.Equal("Checkout", cut.Find("#evidence-feature-0-name").GetAttribute("value"));
     }
+
+    [Fact]
+    public async Task Choosing_codex_on_a_stage_writes_the_override()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+
+        Assert.Equal(["Project default", "Claude Code", "Codex"], cut.FindAll("#stage-0-provider option").Select(o => o.TextContent.Trim()));
+        cut.Find("#stage-0-provider").Change(AgentTypes.Codex);
+        cut.Find("#stage-0-model").Change("gpt-5-codex");
+        Assert.Equal("openai-api-key", cut.Find("#agent-codex-secret").GetAttribute("value"));
+        await Button(cut, "Save project").ClickAsync(new());
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-saved]")));
+
+        var saved = registry.Projects.Single(p => p.Id == "orders");
+        Assert.Equal(AgentTypes.Codex, saved.Pipeline[0].Agent!.Type);
+        Assert.Equal("gpt-5-codex", saved.Pipeline[0].Agent!.Model);
+        Assert.Equal(AgentTypes.ClaudeCode, saved.Agent.Type);
+    }
+
+    [Fact]
+    public async Task Reviewer_and_evidence_providers_default_to_the_project_agent_and_save()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+
+        Assert.Equal(["Project agent", "Claude Code", "Codex"], cut.FindAll("#review-provider option").Select(o => o.TextContent.Trim()));
+        Assert.Equal(["Project agent", "Claude Code", "Codex"], cut.FindAll("#evidence-provider option").Select(o => o.TextContent.Trim()));
+        cut.Find("#review-provider").Change(AgentTypes.Codex);
+        cut.Find("#evidence-provider").Change(AgentTypes.Codex);
+        await Button(cut, "Save project").ClickAsync(new());
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-saved]")));
+
+        var saved = registry.Projects.Single(p => p.Id == "orders");
+        Assert.Equal(AgentTypes.Codex, saved.Review.Agent.Type);
+        Assert.Equal(AgentTypes.Codex, saved.Evidence.Agent.Type);
+    }
+
+    [Fact]
+    public void Codex_is_disabled_under_host_isolation_with_a_hint()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        Assert.DoesNotContain("Codex runs only in containers", cut.Markup);
+        Assert.All(new[] { "#agent-type", "#review-provider", "#evidence-provider", "#stage-0-provider" },
+            id => Assert.False(cut.Find($"{id} option[value='codex']").HasAttribute("disabled")));
+
+        cut.Find("#agent-isolation").Change(nameof(Isolation.Host));
+
+        Assert.All(new[] { "#agent-type", "#review-provider", "#evidence-provider", "#stage-0-provider" },
+            id => Assert.True(cut.Find($"{id} option[value='codex']").HasAttribute("disabled")));
+        Assert.Contains("Codex runs only in containers", cut.Find("#agent-type-hint").TextContent);
+        Assert.False(cut.Find("#agent-type option[value='claude-code']").HasAttribute("disabled"));
+    }
+
+    [Fact]
+    public void Host_isolation_keeps_a_chosen_codex()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        cut.Find("#stage-0-provider").Change(AgentTypes.Codex);
+
+        cut.Find("#agent-isolation").Change(nameof(Isolation.Host));
+
+        Assert.Equal(AgentTypes.Codex, service.Current!.Form.Pipeline[0].AgentType);
+    }
+
+    [Fact]
+    public void Sign_in_fields_appear_only_when_a_job_uses_codex()
+    {
+        WriteProject("orders");
+        var cut = Render("orders");
+        Assert.Empty(cut.FindAll("#agent-codex-auth"));
+        Assert.Empty(cut.FindAll("#agent-codex-secret"));
+
+        cut.Find("#agent-type").Change(AgentTypes.Codex);
+        Assert.Equal(["API key", "ChatGPT login"], cut.FindAll("#agent-codex-auth option").Select(o => o.TextContent.Trim()));
+        Assert.Equal("openai-api-key", cut.Find("#agent-codex-secret").GetAttribute("value"));
+        Assert.Contains("Name of the secret in the OS credential store", cut.Find("#agent-codex-secret-hint").TextContent);
+
+        cut.Find("#agent-codex-auth").Change(nameof(CodexAuth.ChatGpt));
+        Assert.Empty(cut.FindAll("#agent-codex-secret"));
+        Assert.Equal(CodexAuth.ChatGpt, service.Current!.Form.Agent.CodexAuth);
+
+        cut.Find("#agent-type").Change(AgentTypes.ClaudeCode);
+        Assert.Empty(cut.FindAll("#agent-codex-auth"));
+    }
 }

@@ -65,6 +65,13 @@
                     @StatusField(prefix, "enter", "On enter", stage.OnEnterStatus, v => stage.OnEnterStatus = v)
                     @StatusField(prefix, "gate-status", "On gate", stage.OnGateStatus, v => stage.OnGateStatus = v)
                     @StatusField(prefix, "approved", "Approved when", stage.ApprovedWhenStatus, v => stage.ApprovedWhenStatus = v)
+                    <AgentTypeSelect Id="@($"{prefix}-provider")" Value="@stage.AgentType" DefaultLabel="Project default" CodexAllowed="CodexAllowed"
+                                     ValueChanged="v => EditAsync(() => stage.AgentType = v)" />
+                    <div class="setup-field">
+                        <label for="@($"{prefix}-model")">Model</label>
+                        <input id="@($"{prefix}-model")" type="text" value="@stage.AgentModel" autocomplete="off" spellcheck="false"
+                               placeholder="the project's model" @onchange="e => EditAsync(() => stage.AgentModel = Text(e))" />
+                    </div>
                 </div>
                 <div class="stage-actions">
                     <button type="button" class="button button-quiet" disabled="@(index == 0)" aria-label="@($"Move stage {stage.Id} up")"
@@ -99,6 +106,9 @@
 
     /// <summary>What a status the tracker lacks also breaks (see <see cref="SetupHints.MissingStatusEffect"/>).</summary>
     [Parameter] public string? MissingStatusEffect { get; set; }
+
+    /// <summary>False while the project runs on the host: stages cannot choose Codex then.</summary>
+    [Parameter] public bool CodexAllowed { get; set; } = true;
 
     [Parameter] public EventCallback OnChanged { get; set; }
 

@@ -111,7 +111,7 @@
             <MappingTable Stages="Form.Pipeline" Baseline="@(session.Original?.Pipeline ?? baseline)"
                           Statuses="@(session.Connections?.Tracker?.Statuses.Select(s => s.Name).ToList() ?? [])"
                           StatusSource="@session.Connections?.Tracker?.StatusSource"
-                          MissingStatusEffect="@SetupHints.MissingStatusEffect(Form.Tracker.Type)" OnChanged="Edited" />
+                          MissingStatusEffect="@SetupHints.MissingStatusEffect(Form.Tracker.Type)" CodexAllowed="CodexAllowed" OnChanged="Edited" />
 
             <div class="setup-actions">
                 <button type="button" class="button" disabled="@Running" @onclick="ProposeAsync">Propose mapping and risk areas</button>
@@ -209,6 +209,8 @@
                 }
             </fieldset>
             <div class="setup-fields">
+                <AgentTypeSelect Id="review-provider" Value="@Form.Review.AgentType" DefaultLabel="Project agent" CodexAllowed="CodexAllowed"
+                                 ValueChanged="v => { Form.Review.AgentType = v; Edited(); }" />
                 <div class="setup-field">
                     <label for="comment-marker">Comment marker</label>
                     <input id="comment-marker" type="text" placeholder="@@claude" aria-describedby="comment-marker-hint"
@@ -247,6 +249,8 @@
                     </select>
                     <span class="hint" id="evidence-mode-hint">High risk: only when the change is rated high risk or touches a risk area</span>
                 </div>
+                <AgentTypeSelect Id="evidence-provider" Value="@Form.Evidence.AgentType" DefaultLabel="Project agent" CodexAllowed="CodexAllowed"
+                                 ValueChanged="v => { Form.Evidence.AgentType = v; Edited(); }" />
                 <div class="setup-field">
                     <label for="evidence-start">Start command</label>
                     <input id="evidence-start" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. npm start"
@@ -368,12 +372,33 @@
                     <input id="agent-image" type="text" autocomplete="off" spellcheck="false" placeholder="the default agent image"
                            value="@Form.Agent.Image" @onchange="e => SetText(e, v => Form.Agent.Image = v)" />
                 </div>
+                <AgentTypeSelect Id="agent-type" Value="@Form.Agent.Type" CodexAllowed="CodexAllowed"
+                                 ValueChanged="v => { if (v is not null) Form.Agent.Type = v; Edited(); }" />
                 <div class="setup-field">
                     <label for="agent-model">Model</label>
-                    <input id="agent-model" type="text" autocomplete="off" spellcheck="false" placeholder="Claude Code's default"
+                    <input id="agent-model" type="text" autocomplete="off" spellcheck="false" placeholder="the agent's default"
                            value="@Form.Agent.Model" @onchange="e => SetText(e, v => Form.Agent.Model = v)" />
                 </div>
-                @ListField("agent-domains", "Allowed domains", "Container mode: hosts the agent may reach besides Claude Code's own", Form.Agent.AllowedDomains, v => Form.Agent.AllowedDomains = v)
+                @if (Form.AgentTypesInUse.Contains(AgentTypes.Codex))
+                {
+                    <div class="setup-field">
+                        <label for="agent-codex-auth">Codex sign-in</label>
+                        <select id="agent-codex-auth" value="@Form.Agent.CodexAuth" @onchange="SetCodexAuth">
+                            <option value="@CodexAuth.ApiKey" selected="@(Form.Agent.CodexAuth == CodexAuth.ApiKey)">API key</option>
+                            <option value="@CodexAuth.ChatGpt" selected="@(Form.Agent.CodexAuth == CodexAuth.ChatGpt)">ChatGPT login</option>
+                        </select>
+                    </div>
+                    @if (Form.Agent.CodexAuth == CodexAuth.ApiKey)
+                    {
+                        <div class="setup-field">
+                            <label for="agent-codex-secret">OpenAI key secret</label>
+                            <input id="agent-codex-secret" type="text" autocomplete="off" spellcheck="false" aria-describedby="agent-codex-secret-hint"
+                                   value="@Form.Agent.CodexApiKeySecret" @onchange="SetCodexSecret" />
+                            <span class="hint" id="agent-codex-secret-hint">Name of the secret in the OS credential store</span>
+                        </div>
+                    }
+                }
+                @ListField("agent-domains", "Allowed domains", "Container mode: hosts the agent may reach besides the agent's own", Form.Agent.AllowedDomains, v => Form.Agent.AllowedDomains = v)
                 @ListField("agent-tools", "Allowed tools", "Host mode: the only tools the agent may use (required there)", Form.Agent.AllowedTools, v => Form.Agent.AllowedTools = v)
                 @ListField("agent-apt", "apt packages", "Installed into the agent image", Form.Agent.PackagesApt, v => Form.Agent.PackagesApt = v)
                 @ListField("agent-pip", "pip packages", "Installed into the agent image", Form.Agent.PackagesPip, v => Form.Agent.PackagesPip = v)
@@ -506,6 +531,9 @@
     private ProjectForm Form => session!.Form;
 
     private bool Running => session?.RunningStep is not null;
+
+    /// <summary>Codex runs only in containers; under host isolation it stays chosen where it was and Save reports it.</summary>
+    private bool CodexAllowed => Form.Agent.Isolation == Isolation.Container;
 
     private string Heading => notFound ? "Not found"
         : Id is null ? "Add project"
@@ -724,6 +752,20 @@
     private void SetIsolation(ChangeEventArgs e)
     {
         if (Enum.TryParse<Isolation>(e.Value as string, out var isolation)) Form.Agent.Isolation = isolation;
+        Edited();
+    }
+
+    private void SetCodexAuth(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<CodexAuth>(e.Value as string, out var auth)) Form.Agent.CodexAuth = auth;
+        Edited();
+    }
+
+    /// <summary>Blank falls back to the default secret name.</summary>
+    private void SetCodexSecret(ChangeEventArgs e)
+    {
+        Form.Agent.CodexApiKeySecret = e.Value is string text && !string.IsNullOrWhiteSpace(text)
+            ? text.Trim() : CodexSettings.DefaultApiKeySecret;
         Edited();
     }
 
