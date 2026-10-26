@@ -358,6 +358,210 @@ public sealed class CodexRunnerTests : IDisposable
         public Task CleanupAsync(ProcessSpec wrapped, AgentRunRequest request, CancellationToken ct) => Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Plants a symlink as the agent could; false when this machine does not permit creating one (e.g. Windows without
+    /// developer mode), in which case the calling test has nothing to check.
+    /// </summary>
+    private static bool TryLink(string link, string target, bool directory = false)
+    {
+        try
+        {
+            if (directory) Directory.CreateSymbolicLink(link, target);
+            else File.CreateSymbolicLink(link, target);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
+    public async Task Symlinked_auth_is_not_written_back()
+    {
+        SignIn();
+        var hostSecret = Path.Combine(temp, "other-credentials.json");
+        File.WriteAllText(hostSecret, """{"claudeAiOauth":{"accessToken":"secret"}}""");
+        var linked = true;
+        fake.OnRun = dir =>
+        {
+            var auth = Path.Combine(dir, "home", "auth.json");
+            File.Delete(auth);
+            linked = TryLink(auth, hostSecret);
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+        if (linked) Assert.Contains("auth.json not written back: it is a link", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Symlinked_home_directory_is_not_written_back()
+    {
+        SignIn();
+        var hostDir = Path.Combine(temp, "host-dir");
+        Directory.CreateDirectory(hostDir);
+        File.WriteAllText(Path.Combine(hostDir, "auth.json"), """{"tokens":{"refresh_token":"stolen"}}""");
+        fake.OnRun = dir =>
+        {
+            var home = Path.Combine(dir, "home");
+            Directory.Delete(home, recursive: true);
+            TryLink(home, hostDir, directory: true);
+            WriteLastMessage(dir, Completed);
+        };
+        await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.True(File.Exists(Path.Combine(hostDir, "auth.json"))); // deleting the run dir does not follow the link
+    }
+
+    [Fact]
+    public async Task Symlinked_last_message_is_missing_structured_output()
+    {
+        var hostFile = Path.Combine(temp, "host.json");
+        File.WriteAllText(hostFile, Completed);
+        var linked = true;
+        fake.OnRun = dir => linked = TryLink(Path.Combine(dir, "last-message.json"), hostFile);
+        var result = await Runner().RunAsync(Request(), default);
+        if (!linked) return;
+        Assert.False(result.Succeeded);
+        Assert.Equal("missing structured output", result.Error);
+    }
+
+    [Fact]
+    public async Task Oversize_last_message_is_missing_structured_output()
+    {
+        fake.OnRun = dir => WriteLastMessage(dir,
+            """{"status":"completed","summary":"s","comment_markdown":""" + "\"" + new string('x', 1024 * 1024) + "\"}");
+        var result = await Runner().RunAsync(Request(), default);
+        Assert.Equal("missing structured output", result.Error);
+    }
+
+    [Fact]
+    public async Task Oversize_auth_is_not_written_back()
+    {
+        SignIn();
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"),
+                """{"pad":""" + "\"" + new string('x', 64 * 1024) + "\"}");
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.Contains("auth.json not written back: it is too large", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Auth_for_another_account_is_not_written_back()
+    {
+        SignIn("""{"tokens":{"account_id":"acct-1","refresh_token":"old"}}""");
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"),
+                """{"tokens":{"account_id":"acct-2","refresh_token":"theirs"}}""");
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal("""{"tokens":{"account_id":"acct-1","refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.Contains("auth.json not written back: it names a different account", result.RawLog);
+
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"none"}}""");
+            WriteLastMessage(dir, Completed);
+        };
+        await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"account_id":"acct-1","refresh_token":"old"}}""", File.ReadAllText(DeveloperAuth));
+    }
+
+    [Fact]
+    public async Task Auth_for_the_same_account_is_written_back()
+    {
+        SignIn("""{"tokens":{"account_id":"acct-1","refresh_token":"old"}}""");
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"),
+                """{"tokens":{"account_id":"acct-1","refresh_token":"new"}}""");
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"account_id":"acct-1","refresh_token":"new"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.DoesNotContain("not written back", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Failed_write_back_is_noted_in_the_raw_log()
+    {
+        SignIn();
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"new"}}""");
+            Directory.Delete(codexHome, recursive: true); // the developer's Codex home vanished mid-run
+            WriteLastMessage(dir, Completed);
+        };
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Contains("Codex auth.json not written back:", result.RawLog);
+    }
+
+    [Fact]
+    public async Task Failed_run_after_another_run_rotated_the_sign_in_says_so()
+    {
+        SignIn();
+        fake.OnRun = _ => File.WriteAllText(DeveloperAuth, """{"tokens":{"refresh_token":"rotated"}}""");
+        fake.Result = new ProcessResult(1, "", "401 refresh token already used", false);
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("401 refresh token already used; " + CodexRunner.RotatedElsewhereHint, result.Error);
+    }
+
+    [Fact]
+    public async Task Failed_run_without_rotation_keeps_its_error()
+    {
+        SignIn();
+        fake.OnRun = dir => File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"mine"}}""");
+        fake.Result = new ProcessResult(1, "", "bad model", false);
+        var result = await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("bad model", result.Error);
+        Assert.Equal("""{"tokens":{"refresh_token":"mine"}}""", File.ReadAllText(DeveloperAuth));
+    }
+
+    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    private const UnixFileMode OwnerOnlyDir = OwnerOnlyFile | UnixFileMode.UserExecute;
+
+    [Containers.NonWindowsFact, System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public async Task Run_files_are_owner_only()
+    {
+        SignIn();
+        UnixFileMode? runDir = null, home = null, auth = null;
+        fake.OnRun = dir =>
+        {
+            runDir = File.GetUnixFileMode(dir);
+            home = File.GetUnixFileMode(Path.Combine(dir, "home"));
+            auth = File.GetUnixFileMode(Path.Combine(dir, "home", "auth.json"));
+            WriteLastMessage(dir, Completed);
+        };
+        await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal(OwnerOnlyDir, runDir);
+        Assert.Equal(OwnerOnlyDir, home);
+        Assert.Equal(OwnerOnlyFile, auth);
+    }
+
+    [Containers.NonWindowsFact, System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public async Task Written_back_auth_is_owner_only()
+    {
+        SignIn();
+        File.SetUnixFileMode(DeveloperAuth, OwnerOnlyFile);
+        fake.OnRun = dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, "home", "auth.json"), """{"tokens":{"refresh_token":"new"}}""");
+            WriteLastMessage(dir, Completed);
+        };
+        await Runner().RunAsync(ChatGpt(), default);
+        Assert.Equal("""{"tokens":{"refresh_token":"new"}}""", File.ReadAllText(DeveloperAuth));
+        Assert.Equal(OwnerOnlyFile, File.GetUnixFileMode(DeveloperAuth));
+    }
+
     [Fact]
     public async Task Api_key_run_copies_no_auth_file()
     {
