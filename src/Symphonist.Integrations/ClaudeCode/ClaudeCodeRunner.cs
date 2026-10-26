@@ -101,16 +101,8 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
             return Fail(FirstNonEmpty(Tail(result.StandardError), resultText,
                 result.ExitCode != 0 ? $"agent exited with code {result.ExitCode}" : "agent reported an error")!,
                 output, cost);
-        if (!isStage)
-            return structured is null
-                ? Fail("missing structured output", null, cost)
-                : new AgentRunResult(true, null, cost, duration, null, rawLog, structured);
-        if (output is null) return Fail("missing structured output", null, cost);
-        if (output.Status != "completed")
-            return Fail(FirstNonEmpty(output.Summary, $"stage status '{output.Status}'")!, output, cost);
-        return new AgentRunResult(true, output, cost, duration, null, rawLog, structured);
+        return AgentResults.FromStructured(request, structured, cost, duration, rawLog);
     }
-
 
     private static string? Tail(string s)
     {
