@@ -62,6 +62,25 @@ public class FirewallScriptTests
     }
 }
 
+/// <summary>Text checks on the image definition; they need no Docker.</summary>
+public class AgentDockerfileTests
+{
+    private static readonly string Dockerfile =
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Containers", "agent", "Dockerfile"));
+
+    [Fact]
+    public void Dockerfile_installs_both_clis()
+    {
+        Assert.Contains("npm install -g @anthropic-ai/claude-code @openai/codex", Dockerfile);
+        Assert.Contains("claude --version", Dockerfile);
+        Assert.Contains("codex --version", Dockerfile);
+    }
+
+    [Fact]
+    public void Default_image_tag_is_agent_2() =>
+        Assert.Equal("symphonist/agent:2", DockerLauncher.DefaultImage);
+}
+
 /// <summary>Builds the agent image once for all Docker tests.</summary>
 public sealed class AgentImageFixture : IAsyncLifetime
 {
@@ -113,6 +132,7 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
     public async Task Image_builds_and_has_tools()
     {
         AssertExit(0, await RunInContainer("claude", "--version"));
+        AssertExit(0, await RunInContainer("codex", "--version"));
         AssertExit(0, await RunInContainer("dotnet", "--version"));
         AssertExit(0, await RunInContainer("git", "--version"));
         AssertExit(0, await RunInContainer("chromium", "--version"));

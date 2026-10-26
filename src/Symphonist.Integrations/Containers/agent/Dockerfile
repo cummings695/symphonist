@@ -1,4 +1,4 @@
-# Sandbox image for unattended Claude Code runs. Built by DockerLauncher.EnsureImageAsync as symphonist/agent-claude:1.
+# Sandbox image for unattended Claude Code and Codex runs. Built by DockerLauncher.EnsureImageAsync as symphonist/agent:2.
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -10,9 +10,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git curl ca-certificates iptables ipset dnsutils jq nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
  && npm cache clean --force \
- && claude --version
+ && claude --version \
+ && codex --version
 
 # Chromium: the base image is Ubuntu 24.04, whose apt "chromium-browser" is only a snap stub (unusable in a
 # container) and which has no "chromium" package, so install Playwright's Chromium build plus its apt deps.

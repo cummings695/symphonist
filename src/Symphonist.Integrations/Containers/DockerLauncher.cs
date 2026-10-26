@@ -19,7 +19,7 @@ namespace Symphonist.Integrations.Containers;
 public sealed class DockerLauncher(IProcessRunner runner, string agentContextDirectory,
     Func<string, string?> getSecret) : IAgentLauncher
 {
-    public const string DefaultImage = "symphonist/agent-claude:1";
+    public const string DefaultImage = "symphonist/agent:2";
     /// <summary>Repository of the images built from <c>agent.packages</c>; the tag is a hash of their Dockerfile.</summary>
     public const string PackagesRepository = "symphonist/agent-packages";
     public const string TokenSecretName = "claude-code-token";
