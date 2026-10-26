@@ -40,6 +40,28 @@ public sealed class DockerFactAttribute : FactAttribute
     }
 }
 
+/// <summary>Text checks on the firewall script; they need no Docker.</summary>
+public class FirewallScriptTests
+{
+    private static readonly string Script =
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Containers", "agent", "init-firewall.sh"));
+
+    [Fact]
+    public void Firewall_script_takes_base_domains_from_env()
+    {
+        foreach (var domain in AgentProviderInfo.BaseDomains(AgentTypes.ClaudeCode)
+                     .Concat(AgentProviderInfo.BaseDomains(AgentTypes.Codex)))
+            Assert.DoesNotContain(domain, Script);
+        Assert.Contains("${SYMPHONIST_BASE_DOMAINS:-}", Script);
+        Assert.Contains("add_domain \"$domain\" 1", Script);
+        // An empty list is refused before any firewall rule is touched.
+        var refuse = Script.IndexOf("no base domains", StringComparison.Ordinal);
+        Assert.True(refuse > 0, "the script must refuse an empty SYMPHONIST_BASE_DOMAINS");
+        Assert.Contains("exit 1", Script[refuse..(refuse + 200)]);
+        Assert.True(refuse < Script.IndexOf("iptables -F", StringComparison.Ordinal));
+    }
+}
+
 /// <summary>Builds the agent image once for all Docker tests.</summary>
 public sealed class AgentImageFixture : IAsyncLifetime
 {
@@ -140,6 +162,31 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         await fixture.Launcher.CleanupAsync(spec, new AgentRunRequest(workspace, "",
             new AgentSettings("claude-code", Isolation.Container, [], [], 5, null, null)), CancellationToken.None);
         Assert.Empty(await ContainersNamed(name));
+    }
+
+    [DockerFact]
+    public async Task Codex_runs_get_openai_base_domains_not_anthropic()
+    {
+        var request = new AgentRunRequest(workspace, "",
+            new AgentSettings("codex", Isolation.Container, [], [], 5, null, null)
+            {
+                Codex = new CodexSettings(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret),
+            });
+        var spec = fixture.Launcher.Wrap(new ProcessSpec("bash", ["-c",
+            "curl -sS -m 10 -o /dev/null https://api.openai.com/ && ! curl -sS -m 5 -o /dev/null https://api.anthropic.com/"]),
+            request);
+        AssertExit(0, await fixture.Runner.RunAsync(spec with { Timeout = TimeSpan.FromMinutes(3) }, CancellationToken.None));
+    }
+
+    [DockerFact]
+    public async Task Fails_closed_without_base_domains()
+    {
+        var spec = Wrap("touch", ["/workspace/should-not-exist"], TimeSpan.FromMinutes(2));
+        var env = new Dictionary<string, string?>(spec.Environment!) { [DockerLauncher.BaseDomainsVar] = "" };
+        var r = await fixture.Runner.RunAsync(spec with { Environment = env }, CancellationToken.None);
+        AssertExit(70, r);
+        Assert.Contains("no base domains", r.StandardError);
+        Assert.False(File.Exists(Path.Combine(workspace, "should-not-exist")));
     }
 
     [DockerFact]

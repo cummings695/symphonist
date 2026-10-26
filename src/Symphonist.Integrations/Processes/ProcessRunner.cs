@@ -3,8 +3,13 @@ using System.Text;
 
 namespace Symphonist.Integrations.Processes;
 
+/// <param name="Mounts">Host paths a container launcher binds into the container; a plain process cannot honour them.</param>
 public sealed record ProcessSpec(string FileName, IReadOnlyList<string> Arguments, string? WorkingDirectory = null,
-    string? StandardInput = null, IReadOnlyDictionary<string, string?>? Environment = null, TimeSpan? Timeout = null);
+    string? StandardInput = null, IReadOnlyDictionary<string, string?>? Environment = null, TimeSpan? Timeout = null,
+    IReadOnlyList<BindMount>? Mounts = null);
+
+/// <summary>A host path bound into the agent container at <paramref name="ContainerPath"/> (absolute, POSIX).</summary>
+public sealed record BindMount(string HostPath, string ContainerPath, bool ReadOnly = false);
 
 public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError, bool TimedOut);
 
@@ -20,6 +25,8 @@ public sealed class ProcessRunner : IProcessRunner
 
     public async Task<ProcessResult> RunAsync(ProcessSpec spec, CancellationToken ct)
     {
+        if (spec.Mounts is { Count: > 0 })
+            throw new InvalidOperationException("a command with bind mounts must be wrapped by a container launcher");
         var psi = new ProcessStartInfo(spec.FileName)
         {
             WorkingDirectory = spec.WorkingDirectory ?? "",

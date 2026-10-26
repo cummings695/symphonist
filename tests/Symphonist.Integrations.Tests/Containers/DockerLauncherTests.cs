@@ -61,8 +61,7 @@ public class DockerLauncherTests
         Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", spec.Arguments);
         Assert.DoesNotContain(spec.Arguments, a => a.Contains("tok-123"));
         Assert.Equal("tok-123", spec.Environment!["CLAUDE_CODE_OAUTH_TOKEN"]);
-        Assert.Equal("api.anthropic.com,statsig.anthropic.com,sentry.io,api.nuget.org",
-            spec.Environment["SYMPHONIST_ALLOWED_DOMAINS"]);
+        Assert.Equal("api.nuget.org", spec.Environment["SYMPHONIST_ALLOWED_DOMAINS"]);
         Assert.Equal(["claude", "-p"], spec.Arguments.TakeLast(2));
     }
 
@@ -100,7 +99,7 @@ public class DockerLauncherTests
             "--cap-add=NET_ADMIN", "--cap-add=NET_RAW",
             "-v", "/work/t1:/workspace", "-v", Path.Combine("/work/t1", ".git") + ":/workspace/.git:ro",
             "-w", "/workspace",
-            "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-e", "SYMPHONIST_ALLOWED_DOMAINS",
+            "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-e", "SYMPHONIST_BASE_DOMAINS", "-e", "SYMPHONIST_ALLOWED_DOMAINS",
         ];
         Assert.Equal(expectedPrefix, spec.Arguments.Take(expectedPrefix.Length));
         Assert.Equal([DockerLauncher.DefaultImage, "claude", "-p", "--x"], spec.Arguments.TakeLast(4));
@@ -160,16 +159,197 @@ public class DockerLauncherTests
         Assert.Null(spec.Environment["CLAUDE_CODE_OAUTH_TOKEN"]);
     }
 
+    private static AgentRunRequest Codex(CodexSettings codex, IReadOnlyList<string>? domains = null) =>
+        new("/w", "prompt",
+            new AgentSettings("codex", Isolation.Container, domains ?? ["api.nuget.org"], [], 5, null, null)
+            {
+                Codex = codex,
+            });
+
+    private static List<string> EnvNames(ProcessSpec spec) =>
+        spec.Arguments.Select((a, i) => (a, i)).Where(x => x.a == "-e").Select(x => spec.Arguments[x.i + 1]).ToList();
+
     [Fact]
-    public void Wrap_does_not_duplicate_base_domains()
+    public void Allowed_domains_no_longer_include_base_domains()
     {
         var req = Request("/w") with
         {
-            Settings = Request("/w").Settings with { AllowedDomains = ["sentry.io", "github.com"] },
+            Settings = Request("/w").Settings with { AllowedDomains = ["github.com", "api.nuget.org"] },
         };
         var spec = launcher.Wrap(new("claude", []), req);
-        Assert.Equal("api.anthropic.com,statsig.anthropic.com,sentry.io,github.com",
-            spec.Environment!["SYMPHONIST_ALLOWED_DOMAINS"]);
+        Assert.Equal("github.com,api.nuget.org", spec.Environment!["SYMPHONIST_ALLOWED_DOMAINS"]);
+    }
+
+    [Fact]
+    public void Claude_run_gets_claude_token_and_anthropic_domains_only()
+    {
+        var spec = launcher.Wrap(new("claude", ["-p"]), Request("/w"));
+        Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", EnvNames(spec));
+        Assert.DoesNotContain("CODEX_API_KEY", spec.Arguments);
+        Assert.False(spec.Environment!.ContainsKey("CODEX_API_KEY"));
+        Assert.Contains("SYMPHONIST_BASE_DOMAINS", EnvNames(spec));
+        Assert.Equal("api.anthropic.com,statsig.anthropic.com,sentry.io", spec.Environment["SYMPHONIST_BASE_DOMAINS"]);
+    }
+
+    [Fact]
+    public void Codex_api_key_run_gets_its_project_secret_and_openai_domains_only()
+    {
+        var codex = new DockerLauncher(fake, "/ctx", name => name switch
+        {
+            "openai-orders" => "sk-x",
+            "claude-code-token" => "tok-123",
+            _ => null,
+        });
+        var spec = codex.Wrap(new("codex", ["exec"]), Codex(new(CodexAuth.ApiKey, "openai-orders")));
+        Assert.Contains(DockerLauncher.CodexApiKeyVar, EnvNames(spec));
+        Assert.Equal("sk-x", spec.Environment![DockerLauncher.CodexApiKeyVar]);
+        Assert.DoesNotContain(spec.Arguments, a => a.Contains("sk-x"));
+        Assert.DoesNotContain("CLAUDE_CODE_OAUTH_TOKEN", spec.Arguments);
+        Assert.False(spec.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
+        Assert.DoesNotContain(spec.Environment.Values, v => v == "tok-123");
+        Assert.Equal("api.openai.com,auth.openai.com,chatgpt.com", spec.Environment[DockerLauncher.BaseDomainsVar]);
+        Assert.Equal("api.nuget.org", spec.Environment["SYMPHONIST_ALLOWED_DOMAINS"]);
+    }
+
+    [Fact]
+    public void Codex_chatgpt_run_gets_no_api_key()
+    {
+        var codex = new DockerLauncher(fake, "/ctx", _ => "anything");
+        var spec = codex.Wrap(new("codex", ["exec"]), Codex(new(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret)));
+        Assert.DoesNotContain(DockerLauncher.CodexApiKeyVar, spec.Arguments);
+        Assert.DoesNotContain("CLAUDE_CODE_OAUTH_TOKEN", spec.Arguments);
+        Assert.False(spec.Environment!.ContainsKey(DockerLauncher.CodexApiKeyVar));
+        Assert.False(spec.Environment.ContainsKey("CLAUDE_CODE_OAUTH_TOKEN"));
+        Assert.Equal("api.openai.com,auth.openai.com,chatgpt.com", spec.Environment[DockerLauncher.BaseDomainsVar]);
+    }
+
+    [Fact]
+    public void Codex_api_key_run_without_secret_throws_naming_the_secret()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            launcher.Wrap(new("codex", ["exec"]), Codex(new(CodexAuth.ApiKey, "openai-orders"))));
+        Assert.Contains("openai-orders", ex.Message);
+        Assert.Contains("not set", ex.Message);
+    }
+
+    [Fact]
+    public void Unknown_agent_type_is_refused()
+    {
+        var req = Request("/w") with { Settings = Request("/w").Settings with { Type = "other" } };
+        Assert.ThrowsAny<ArgumentException>(() => launcher.Wrap(new("other", []), req));
+    }
+
+    [Fact]
+    public void Command_environment_is_forwarded_by_name()
+    {
+        var command = new ProcessSpec("codex", ["exec"],
+            Environment: new Dictionary<string, string?> { ["CODEX_HOME"] = "/symphonist-run/home" });
+        var spec = launcher.Wrap(command, Request("/w"));
+        Assert.Contains("CODEX_HOME", EnvNames(spec));
+        Assert.DoesNotContain(spec.Arguments, a => a.Contains("/symphonist-run/home"));
+        Assert.Equal("/symphonist-run/home", spec.Environment!["CODEX_HOME"]);
+        Assert.Equal(["codex", "exec"], spec.Arguments.TakeLast(2));
+    }
+
+    [Theory]
+    [InlineData("CLAUDE_CODE_OAUTH_TOKEN")]
+    [InlineData("CODEX_API_KEY")]
+    [InlineData("OPENAI_API_KEY")]
+    [InlineData("SYMPHONIST_BASE_DOMAINS")]
+    [InlineData("SYMPHONIST_ALLOWED_DOMAINS")]
+    [InlineData("SYMPHONIST_UID")]
+    [InlineData("symphonist_allowed_domains")]
+    [InlineData("DOCKER_HOST")]
+    [InlineData("A=B")]
+    [InlineData("-v")]
+    [InlineData("")]
+    public void Command_environment_cannot_set_launcher_variables(string name)
+    {
+        var command = new ProcessSpec("codex", ["exec"],
+            Environment: new Dictionary<string, string?> { [name] = "x" });
+        Assert.Throws<InvalidOperationException>(() => launcher.Wrap(command, Request("/w")));
+    }
+
+    [Fact]
+    public void Mounts_become_volume_arguments()
+    {
+        var command = new ProcessSpec("codex", ["exec"], Mounts:
+        [
+            new BindMount("C:/tmp/run", "/symphonist-run"),
+            new BindMount("C:/tmp/cfg", "/symphonist-cfg", ReadOnly: true),
+        ]);
+        var spec = launcher.Wrap(command, Request("/work/t1"));
+        Assert.Equal([
+            "/work/t1:/workspace", Path.Combine("/work/t1", ".git") + ":/workspace/.git:ro",
+            "C:/tmp/run:/symphonist-run", "C:/tmp/cfg:/symphonist-cfg:ro",
+        ], Mounts(spec));
+        Assert.Null(spec.Mounts);
+        Assert.True(spec.Arguments.ToList().IndexOf("C:/tmp/run:/symphonist-run")
+            < spec.Arguments.ToList().IndexOf(DockerLauncher.DefaultImage));
+    }
+
+    [Theory]
+    [InlineData("/workspace")]
+    [InlineData("/workspace/")]
+    [InlineData("/workspace/.git")]
+    [InlineData("/workspace/sub/dir")]
+    [InlineData("//workspace")]
+    [InlineData("/x/../workspace")]
+    [InlineData("/./workspace")]
+    [InlineData("relative/path")]
+    [InlineData("")]
+    [InlineData("/")]
+    [InlineData("/run:rw")]
+    [InlineData("/usr/local/bin")]
+    [InlineData("/usr/local/bin/init-firewall.sh")]
+    [InlineData("/etc")]
+    public void Mounts_cannot_touch_the_workspace_or_system_paths(string containerPath)
+    {
+        var command = new ProcessSpec("codex", ["exec"], Mounts: [new BindMount("C:/tmp/run", containerPath)]);
+        Assert.Throws<InvalidOperationException>(() => launcher.Wrap(command, Request("/w")));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("named-volume")]
+    [InlineData("/tmp/a:/etc")]
+    [InlineData("C:/tmp/a:/etc")]
+    public void Mounts_need_a_plain_host_directory_path(string hostPath)
+    {
+        var command = new ProcessSpec("codex", ["exec"], Mounts: [new BindMount(hostPath, "/symphonist-run")]);
+        Assert.Throws<InvalidOperationException>(() => launcher.Wrap(command, Request("/w")));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\dev\AppData\Local\Temp\run")]
+    [InlineData("/tmp/run")]
+    public void Mounts_accept_windows_and_unix_host_paths(string hostPath)
+    {
+        var command = new ProcessSpec("codex", ["exec"], Mounts: [new BindMount(hostPath, "/symphonist-run")]);
+        Assert.Contains($"{hostPath}:/symphonist-run", Mounts(launcher.Wrap(command, Request("/w"))));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(127, false)]
+    public async Task HasCommand_runs_the_command_version_in_the_image(int exitCode, bool expected)
+    {
+        fake.ExitCode = _ => exitCode;
+        Assert.Equal(expected, await launcher.HasCommandAsync("acme/agent:7", "codex", default));
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal("docker", call.FileName);
+        Assert.Equal(["run", "--rm", "--pull=never", "--entrypoint", "codex", "acme/agent:7", "--version"],
+            call.Arguments);
+    }
+
+    [Theory]
+    [InlineData("-v", "codex")]
+    [InlineData("acme/agent:7", "-v")]
+    [InlineData("acme/agent:7", "")]
+    public async Task HasCommand_rejects_option_like_names(string image, string command)
+    {
+        await Assert.ThrowsAsync<ArgumentException>(() => launcher.HasCommandAsync(image, command, default));
+        Assert.Empty(fake.Calls);
     }
 
     [NonWindowsFact]

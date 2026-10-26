@@ -7,10 +7,22 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Mirrors DockerLauncher.BaseAllowedDomains; always allowed and must resolve.
-BASE_DOMAINS=(api.anthropic.com statsig.anthropic.com sentry.io)
 IPV4_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
 DOMAIN_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+
+# The agent provider's own domains (DockerLauncher.BaseDomainsVar, from AgentProviderInfo.BaseDomains): always
+# allowed and must resolve. Required: without them the agent cannot work, so refuse before touching any rule.
+IFS=',' read -r -a RAW_BASE_DOMAINS <<< "${SYMPHONIST_BASE_DOMAINS:-}"
+IFS=$'\n\t'
+BASE_DOMAINS=()
+for domain in "${RAW_BASE_DOMAINS[@]}"; do
+    domain="${domain//[[:space:]]/}"
+    if [ -n "$domain" ]; then BASE_DOMAINS+=("$domain"); fi
+done
+if [ "${#BASE_DOMAINS[@]}" -eq 0 ]; then
+    echo "init-firewall: no base domains (SYMPHONIST_BASE_DOMAINS is empty)" >&2
+    exit 1
+fi
 
 # Resolvers this container is configured to use (plus Docker's embedded DNS); port 53 is open to these only, so
 # it cannot be used as a general egress channel.

@@ -167,4 +167,39 @@ public class IsolationLauncherTests
         launcher.EnableImage(DockerLauncher.DefaultImage);
         Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(Isolation.Container)).FileName);
     }
+
+    [Theory]
+    [InlineData("--dangerously-bypass-approvals-and-sandbox")]
+    [InlineData("--dangerously-bypass-approvals-and-sandbox=true")]
+    [InlineData("--yolo")]
+    [InlineData("--sandbox", "danger-full-access")]
+    [InlineData("-s", "danger-full-access")]
+    [InlineData("--sandbox=danger-full-access")]
+    [InlineData("-s=danger-full-access")]
+    [InlineData("-sdanger-full-access")]
+    [InlineData("--sandbox", "DANGER-FULL-ACCESS")]
+    [InlineData("-c", "sandbox_mode=danger-full-access")]
+    [InlineData("--config", "sandbox_mode=\"danger-full-access\"")]
+    public void Host_launcher_refuses_codex_bypass_and_full_access(params string[] bypass)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => new HostLauncher().Wrap(
+            new ProcessSpec("codex", ["exec", .. bypass]), Request(Isolation.Host)));
+        Assert.Contains("sandbox", ex.Message);
+    }
+
+    [Fact]
+    public void Host_launcher_allows_codex_workspace_sandbox()
+    {
+        var spec = new HostLauncher().Wrap(new ProcessSpec("codex", ["exec", "--sandbox", "workspace-write"]),
+            Request(Isolation.Host));
+        Assert.Equal("/work", spec.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Host_launcher_refuses_mounts()
+    {
+        var command = new ProcessSpec("codex", ["exec"], Mounts: [new BindMount("/tmp/run", "/symphonist-run")]);
+        var ex = Assert.Throws<InvalidOperationException>(() => new HostLauncher().Wrap(command, Request(Isolation.Host)));
+        Assert.Contains("mount", ex.Message);
+    }
 }

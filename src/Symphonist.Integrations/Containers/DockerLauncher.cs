@@ -10,9 +10,11 @@ using Symphonist.Integrations.Processes;
 namespace Symphonist.Integrations.Containers;
 
 /// <summary>
-/// Runs the agent command inside a throwaway Docker container. Only the ticket workspace is mounted, secrets are
-/// passed by env-var name (values via the docker CLI's own environment, never on its command line), and the image's
-/// entrypoint restricts outbound network to <see cref="BaseAllowedDomains"/> plus the project's allowed domains.
+/// Runs the agent command inside a throwaway Docker container. Only the ticket workspace (plus the command's own
+/// <see cref="ProcessSpec.Mounts"/>) is mounted, the run's provider gets only its own credential, passed by env-var
+/// name (values via the docker CLI's own environment, never on its command line), and the image's entrypoint restricts
+/// outbound network to the provider's <see cref="AgentProviderInfo.BaseDomains">base domains</see> plus the project's
+/// allowed domains.
 /// </summary>
 public sealed class DockerLauncher(IProcessRunner runner, string agentContextDirectory,
     Func<string, string?> getSecret) : IAgentLauncher
@@ -21,9 +23,16 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     /// <summary>Repository of the images built from <c>agent.packages</c>; the tag is a hash of their Dockerfile.</summary>
     public const string PackagesRepository = "symphonist/agent-packages";
     public const string TokenSecretName = "claude-code-token";
+    /// <summary>The variable Codex reads its OpenAI API key from in <c>exec</c> mode.</summary>
+    public const string CodexApiKeyVar = "CODEX_API_KEY";
+    /// <summary>The provider's base domains, which init-firewall.sh requires and always allows.</summary>
+    public const string BaseDomainsVar = "SYMPHONIST_BASE_DOMAINS";
 
     private const string TokenVar = "CLAUDE_CODE_OAUTH_TOKEN";
     private const string DomainsVar = "SYMPHONIST_ALLOWED_DOMAINS";
+    private const string LauncherVarPrefix = "SYMPHONIST_";
+    private const string DockerVarPrefix = "DOCKER_"; // the docker CLI's own configuration (DOCKER_HOST, ...)
+    private const string WorkspacePath = "/workspace";
     private const string UidVar = "SYMPHONIST_UID";
     private const string GidVar = "SYMPHONIST_GID";
     private const string NameOption = "--name";
@@ -35,9 +44,17 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     private static readonly TimeSpan RemoveTimeout = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(45);
 
-    /// <summary>Domains Claude Code itself needs; always allowed (init-firewall.sh mirrors this list).</summary>
-    public static readonly IReadOnlyList<string> BaseAllowedDomains =
-        ["api.anthropic.com", "statsig.anthropic.com", "sentry.io"];
+    /// <summary>Variables only the launcher sets: provider credentials (a run must get only its own), besides
+    /// <see cref="LauncherVarPrefix"/> and <see cref="DockerVarPrefix"/> names.</summary>
+    private static readonly string[] CredentialVars = [TokenVar, CodexApiKeyVar, "OPENAI_API_KEY"];
+
+    /// <summary>Container paths a mount may not cover or sit under: the workspace (its mounts carry the read-only
+    /// rules) and system directories, which hold the firewall, entrypoint and tools that run before the agent.</summary>
+    private static readonly string[] ReservedMountRoots =
+        ["workspace", "bin", "sbin", "lib", "lib32", "lib64", "libx32", "usr", "etc", "opt", "proc", "sys", "dev",
+            "root", "boot", "var"];
+
+    private static readonly System.Text.RegularExpressions.Regex EnvName = new("^[A-Za-z_][A-Za-z0-9_]*$");
 
     public bool ProvidesIsolation(AgentRunRequest request) => true;
 
@@ -166,10 +183,30 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
             ? throw new ArgumentException($"invalid package '{i}'", nameof(items))
             : $"'{i}'"));
 
+    /// <summary>
+    /// Whether <paramref name="image"/> has <paramref name="command"/>: runs <c>&lt;command&gt; --version</c> in it
+    /// (no firewall, entrypoint bypassed; the image must already exist locally).
+    /// </summary>
+    public async Task<bool> HasCommandAsync(string image, string command, CancellationToken ct)
+    {
+        ValidateImage(image);
+        if (string.IsNullOrWhiteSpace(command) || command.StartsWith('-') || command.Any(char.IsWhiteSpace))
+            throw new ArgumentException($"invalid command '{command}'", nameof(command));
+        var r = await runner.RunAsync(new ProcessSpec("docker",
+            ["run", "--rm", "--pull=never", "--entrypoint", command, image, "--version"], Timeout: InspectTimeout), ct);
+        return r.ExitCode == 0;
+    }
+
     public ProcessSpec Wrap(ProcessSpec agentCommand, AgentRunRequest request)
     {
         var settings = request.Settings;
         var image = ImageFor(settings);
+        var baseDomains = AgentProviderInfo.BaseDomains(settings.Type);
+        var credentials = Credentials(settings);
+        var commandEnv = agentCommand.Environment ?? new Dictionary<string, string?>();
+        foreach (var name in commandEnv.Keys) ValidateCommandVariable(name);
+        foreach (var mount in agentCommand.Mounts ?? []) ValidateMount(mount);
+
         var args = new List<string>
         {
             // Never pull: a missing image must fail rather than fetch whatever owns the name on a registry.
@@ -186,13 +223,19 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
                 // hooks or config that would execute there.
                 "-v", $"{Path.Combine(request.WorkingDirectory, ".git")}:/workspace/.git:ro",
             ]);
-        args.AddRange(["-w", "/workspace", "-e", TokenVar, "-e", DomainsVar]);
-        var env = new Dictionary<string, string?>
+        foreach (var mount in agentCommand.Mounts ?? [])
+            args.AddRange(["-v", $"{mount.HostPath}:{mount.ContainerPath}{(mount.ReadOnly ? ":ro" : "")}"]);
+        args.AddRange(["-w", WorkspacePath]);
+        // A null value removes the variable from the docker CLI's environment, so `-e NAME` passes nothing.
+        var env = new Dictionary<string, string?>();
+        foreach (var (name, value) in commandEnv.Concat(credentials))
         {
-            // A null value removes the variable from the docker CLI's environment, so `-e NAME` passes nothing.
-            [TokenVar] = getSecret(TokenSecretName),
-            [DomainsVar] = string.Join(",", BaseAllowedDomains.Concat(settings.AllowedDomains).Distinct()),
-        };
+            args.AddRange(["-e", name]);
+            env[name] = value;
+        }
+        args.AddRange(["-e", BaseDomainsVar, "-e", DomainsVar]);
+        env[BaseDomainsVar] = string.Join(",", baseDomains);
+        env[DomainsVar] = string.Join(",", settings.AllowedDomains.Distinct());
         if (!OperatingSystem.IsWindows())
         {
             args.AddRange(["-e", UidVar, "-e", GidVar]);
@@ -205,6 +248,56 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
 
         return new ProcessSpec("docker", args, StandardInput: agentCommand.StandardInput, Environment: env,
             Timeout: agentCommand.Timeout);
+    }
+
+    /// <summary>The credential variables of the run's provider, and only those.</summary>
+    private Dictionary<string, string?> Credentials(AgentSettings settings)
+    {
+        switch (settings.Type)
+        {
+            case AgentTypes.ClaudeCode:
+                // Missing token: pass nothing and let Claude Code report it, as before providers existed.
+                return new() { [TokenVar] = getSecret(TokenSecretName) };
+            case AgentTypes.Codex when settings.Codex.Auth == CodexAuth.ApiKey:
+                var secret = settings.Codex.ApiKeySecret;
+                return getSecret(secret) is { Length: > 0 } key
+                    ? new() { [CodexApiKeyVar] = key }
+                    : throw new InvalidOperationException(
+                        $"secret '{secret}' is not set; store the OpenAI API key under that name to run Codex");
+            case AgentTypes.Codex:
+                return []; // ChatGPT sign-in: auth.json arrives through the runner's mounts.
+            default:
+                throw new ArgumentException($"unknown agent type '{settings.Type}'", nameof(settings));
+        }
+    }
+
+    private static void ValidateCommandVariable(string name)
+    {
+        // A name with '=' would put its value on the docker command line; launcher variables must not be overridden.
+        if (!EnvName.IsMatch(name)
+            || CredentialVars.Contains(name, StringComparer.OrdinalIgnoreCase)
+            || name.StartsWith(LauncherVarPrefix, StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith(DockerVarPrefix, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"agent command may not set environment variable '{name}'");
+    }
+
+    private static void ValidateMount(BindMount mount)
+    {
+        var path = mount.ContainerPath;
+        // A host path without a separator would make docker create a named volume instead, and a ':' other than a
+        // Windows drive letter's would shift the fields of the -v value.
+        var host = mount.HostPath;
+        if (string.IsNullOrWhiteSpace(host) || !host.Contains('/') && !host.Contains('\\')
+            || host.IndexOf(':', host.Length > 2 && host[1] == ':' ? 2 : 0) >= 0)
+            throw new InvalidOperationException($"mount at '{path}' needs a host directory path, not '{mount.HostPath}'");
+        // Absolute, already normal (no empty, '.' or '..' segments) and free of ':' and ',' so docker reads exactly
+        // this path, which must stay clear of the workspace and system directories.
+        var segments = path.StartsWith('/') ? path[1..].Split('/') : [];
+        if (segments.Length == 0
+            || segments.Any(s => s is "" or "." or ".." || s.Contains(':') || s.Contains(','))
+            || ReservedMountRoots.Contains(segments[0], StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"mount container path '{path}' must be absolute, normalized and outside {WorkspacePath} and system directories");
     }
 
     /// <summary>
