@@ -56,7 +56,7 @@ public sealed class ProjectSetupComponentTests : IDisposable
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
         var agents = new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent });
         var docker = new DockerLauncher(new FakeProcessRunner(), Path.Combine(home.Path, "agent-context"), _ => null);
-        service = new OnboardingService(registry, Providers, new SetupChecks(discovery, Providers, secrets, git),
+        service = new OnboardingService(registry, Providers, new SetupChecks(discovery, Providers, secrets, git, Path.Combine(home.Path, "codex-home")),
             new OnboardingProposer(git, agents, time),
             new ContainerCheck(docker, new IsolationLauncher(new HostLauncher(), docker), git, agents, time),
             new ProjectFileStore(registry, tickets, orchestrator, Providers), secrets, lifetime, time);

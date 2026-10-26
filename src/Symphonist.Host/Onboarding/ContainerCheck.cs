@@ -82,6 +82,26 @@ public sealed class ContainerCheck(DockerLauncher docker, IsolationLauncher laun
             SkipFrom(2, "the agent image is not available");
             return steps;
         }
+        // Every provider some job runs needs its CLI in the project's image.
+        foreach (var type in AgentTypes.All.Where(draft.AgentTypesInUse.Contains))
+        {
+            var command = AgentProviderInfo.Command(type);
+            bool has;
+            try
+            {
+                has = await docker.HasCommandAsync(image, command, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                has = false;
+                log?.LogWarning(e, "Container check of {Project}: could not probe {Command} in {Image}", draft.Id, command, image);
+            }
+            if (has) continue;
+            steps[1] = steps[1] with { Status = CheckStatus.Failed,
+                Detail = $"image has no {command} CLI; rebuild on symphonist/agent:2" };
+            SkipFrom(2, "the agent image is not usable");
+            return steps;
+        }
         launcher.EnableImage(image);
         Set(1, CheckStatus.Passed, image);
 

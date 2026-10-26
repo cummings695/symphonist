@@ -11,6 +11,14 @@ public static class AgentProviderInfo
     // The API, plus what ChatGPT sign-in and token refresh reach.
     private static readonly IReadOnlyList<string> CodexDomains = ["api.openai.com", "auth.openai.com", "chatgpt.com"];
 
+    /// <summary>The provider's CLI executable name.</summary>
+    public static string Command(string agentType) => agentType switch
+    {
+        AgentTypes.ClaudeCode => "claude",
+        AgentTypes.Codex => "codex",
+        _ => throw new ArgumentException($"unknown agent type '{agentType}'", nameof(agentType)),
+    };
+
     /// <summary>
     /// The domains the provider's CLI itself needs. The container firewall always allows them and refuses to start
     /// when one cannot be resolved.

@@ -23,8 +23,68 @@ public sealed class SetupChecksTests : IDisposable
 
     public SetupChecksTests()
     {
-        checks = new SetupChecks(discovery, Providers, secrets, git);
+        codexHome = Path.Combine(home.Path, "codex-home");
+        checks = new SetupChecks(discovery, Providers, secrets, git, codexHome);
         discovery.Repository = new RepositoryDiscovery("acme/orders", "main", true);
+    }
+
+    private readonly string codexHome;
+
+    private ProjectConfig Yaml(string agent) =>
+        ProjectConfigLoader.Parse(TestHome.ProjectYaml("orders", agent), home.Projects, "draft", Providers);
+
+    private const string CodexApiKeyAgent = "type: codex\n  codex:\n    auth: api-key\n    apiKeySecret: my-openai";
+    private const string CodexChatGptAgent = "type: codex\n  codex:\n    auth: chatgpt";
+
+    [Fact]
+    public async Task Missing_secrets_include_claude_token_only_when_claude_is_used()
+    {
+        var draft = Yaml(CodexChatGptAgent);
+        secrets.Set(draft.Tracker.TokenSecret, "t");
+        secrets.Set(draft.Repo.TokenSecret, "r");
+
+        var report = await Check(draft);
+
+        Assert.Equal(new CheckStep("Secrets", CheckStatus.Passed, "all set"), report.Steps[0]);
+    }
+
+    [Fact]
+    public async Task Missing_secrets_include_the_codex_api_key_secret_when_codex_uses_api_key()
+    {
+        var draft = Yaml(CodexApiKeyAgent);
+        secrets.Set(draft.Tracker.TokenSecret, "t");
+        secrets.Set(draft.Repo.TokenSecret, "r");
+
+        var report = await Check(draft);
+
+        Assert.Equal(new CheckStep("Secrets", CheckStatus.Failed, "not set: my-openai; enter them above"), report.Steps[0]);
+        Assert.DoesNotContain(report.Steps, s => s.Name == "Codex sign-in");
+    }
+
+    [Fact]
+    public async Task Chatgpt_sign_in_is_checked()
+    {
+        var draft = Yaml(CodexChatGptAgent);
+        secrets.Set(draft.Tracker.TokenSecret, "t");
+        secrets.Set(draft.Repo.TokenSecret, "r");
+
+        var missing = await Check(draft);
+        Assert.Equal(new CheckStep("Codex sign-in", CheckStatus.Failed, "not signed in to ChatGPT; run `codex login`"),
+            missing.Steps[1]);
+
+        Directory.CreateDirectory(codexHome);
+        File.WriteAllText(Path.Combine(codexHome, "auth.json"), "{}");
+        var present = await Check(draft);
+        Assert.Equal(CheckStatus.Passed, present.Steps[1].Status);
+        Assert.Equal("Codex sign-in", present.Steps[1].Name);
+    }
+
+    [Fact]
+    public async Task Claude_projects_have_no_sign_in_step()
+    {
+        var report = await Check(Draft());
+
+        Assert.Equal(StepNames, report.Steps.Select(s => s.Name));
     }
 
     public void Dispose() => home.Dispose();

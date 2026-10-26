@@ -19,7 +19,9 @@ public sealed record ConnectionReport(IReadOnlyList<CheckStep> Steps, TrackerDis
 /// repository and the build host (<see cref="IProjectDiscovery"/>), then the local checkout's origin. Details are one
 /// bounded line each and never hold secret values.
 /// </summary>
-public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry providers, ISecretStore secrets, IGitWorkspace git)
+/// <param name="codexHome">The developer's Codex home, where <c>codex login</c> leaves <c>auth.json</c>.</param>
+public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry providers, ISecretStore secrets, IGitWorkspace git,
+    string codexHome)
 {
     private static string NeedsSecret(string name) => $"needs secret {name}";
 
@@ -45,6 +47,8 @@ public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry pr
         steps.Add(missing.Count > 0
             ? Failed("Secrets", $"not set: {string.Join(", ", missing)}; enter them above")
             : Passed("Secrets", "all set"));
+
+        if (UsesChatGptSignIn(draft)) steps.Add(CodexSignInStep());
 
         if (missing.Contains(draft.Tracker.TokenSecret))
         {
@@ -123,9 +127,35 @@ public sealed class SetupChecks(IProjectDiscovery discovery, ProviderRegistry pr
     /// <summary>The distinct secrets the draft needs that are not set, in the order the form names them.</summary>
     private List<string> MissingSecrets(ProjectConfig draft)
     {
+        var used = draft.AgentTypesInUse;
         List<string> names = [draft.Tracker.TokenSecret, draft.Repo.TokenSecret];
-        if (draft.Agent.Isolation == Isolation.Container) names.Add(DockerLauncher.TokenSecretName);
+        if (used.Contains(AgentTypes.ClaudeCode) && draft.Agent.Isolation == Isolation.Container)
+            names.Add(DockerLauncher.TokenSecretName);
+        if (used.Contains(AgentTypes.Codex) && draft.Agent.Codex.Auth == CodexAuth.ApiKey)
+            names.Add(draft.Agent.Codex.ApiKeySecret);
         return names.Distinct(StringComparer.Ordinal).Where(name => !IsSet(name)).ToList();
+    }
+
+    private static bool UsesChatGptSignIn(ProjectConfig draft) =>
+        draft.AgentTypesInUse.Contains(AgentTypes.Codex) && draft.Agent.Codex.Auth == CodexAuth.ChatGpt;
+
+    /// <summary>Only that <c>auth.json</c> is a readable regular file; its contents are never read.</summary>
+    private CheckStep CodexSignInStep()
+    {
+        const string name = "Codex sign-in";
+        try
+        {
+            var path = Path.Combine(codexHome, "auth.json");
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Attributes.HasFlag(FileAttributes.Directory))
+                return Failed(name, "not signed in to ChatGPT; run `codex login`");
+            using (info.OpenRead()) { }
+            return Passed(name, "signed in to ChatGPT");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return Failed(name, "cannot read the Codex sign-in; run `codex login`");
+        }
     }
 
     private bool IsSet(string name)

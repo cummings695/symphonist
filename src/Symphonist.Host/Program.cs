@@ -90,7 +90,9 @@ builder.Services.AddSingleton<Orchestrator>();
 builder.Services.AddSingleton<ProjectFileStore>();
 builder.Services.AddSingleton<OnboardingProposer>();
 builder.Services.AddSingleton<ContainerCheck>();
-builder.Services.AddSingleton<SetupChecks>();
+builder.Services.AddSingleton(sp => new SetupChecks(sp.GetRequiredService<IProjectDiscovery>(),
+    sp.GetRequiredService<ProviderRegistry>(), sp.GetRequiredService<ISecretStore>(), sp.GetRequiredService<IGitWorkspace>(),
+    CodexRunner.DefaultCodexHome()));
 builder.Services.AddSingleton<OnboardingService>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();

@@ -153,6 +153,51 @@ public sealed class ContainerCheckTests : IDisposable
         Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request(packaged.Agent)).FileName);
     }
 
+    private bool Probed(string command) => processes.Calls.Any(s =>
+        s.Arguments.Contains("--entrypoint") && s.Arguments[(s.Arguments.ToList().IndexOf("--entrypoint") + 1)] == command);
+
+    [Fact]
+    public async Task Container_check_verifies_each_cli_in_the_image()
+    {
+        var both = Draft(TestHome.ProjectYaml("orders") + "\nevidence:\n  agent: { type: codex }\n");
+        Assert.Equal(["claude-code", "codex"], AgentTypes.All.Where(both.AgentTypesInUse.Contains));
+
+        var steps = await check.RunAsync(both, null, CancellationToken.None);
+
+        Assert.Equal(CheckStatus.Passed, steps[1].Status);
+        Assert.True(Probed("claude"));
+        Assert.True(Probed("codex"));
+    }
+
+    [Fact]
+    public async Task Missing_codex_cli_fails_the_image_step()
+    {
+        var both = Draft(TestHome.ProjectYaml("orders") + "\nevidence:\n  agent: { type: codex }\n");
+        var hash = DockerLauncher.ContextHash(context);
+        processes.OnRun = s => Verb(s) switch
+        {
+            "image inspect" => new ProcessResult(0, hash, "", false),
+            "run --rm" when s.Arguments.Contains("codex") => new ProcessResult(127, "", "not found", false),
+            _ => new ProcessResult(0, "", "", false),
+        };
+
+        var steps = await check.RunAsync(both, null, CancellationToken.None);
+
+        Assert.Equal(new CheckStep("Agent image", CheckStatus.Failed, "image has no codex CLI; rebuild on symphonist/agent:2"),
+            steps[1]);
+        Assert.Equal(CheckStatus.Skipped, steps[2].Status);
+        Assert.Empty(agent.Requests);
+    }
+
+    [Fact]
+    public async Task Claude_only_project_does_not_probe_codex()
+    {
+        await check.RunAsync(draft, null, CancellationToken.None);
+
+        Assert.True(Probed("claude"));
+        Assert.False(Probed("codex"));
+    }
+
     [Fact]
     public async Task Passing_check_enables_containers_and_image()
     {
