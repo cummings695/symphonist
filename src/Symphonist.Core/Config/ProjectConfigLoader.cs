@@ -104,15 +104,20 @@ public static partial class ProjectConfigLoader
         if (buildProvider.RepoType != repo.Type)
             throw new ProjectConfigException($"build.type '{build.Type}' needs repo.type '{buildProvider.RepoType}'");
 
-        Supported("agent.type", Required(agent.Type, "agent.type"), "claude-code");
+        var agentType = SupportedAgentType("agent.type", Required(agent.Type, "agent.type"));
 
         var isolation = ParseEnum<Isolation>(agent.Isolation ?? "container", "isolation");
         IReadOnlyList<string> allowedTools = Items(agent.AllowedTools, "agent.allowedTools");
         if (isolation == Isolation.Host && allowedTools.Count == 0)
             throw new ProjectConfigException("host isolation requires agent.allowedTools");
 
-        var packages = MapPackages(agent.Packages);
-        var pipeline = MapPipeline(d.Pipeline);
+        var agentSettings = new AgentSettings(agentType, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
+            allowedTools, agent.TimeoutMinutes ?? 60, agent.Model, agent.Image)
+        {
+            Packages = MapPackages(agent.Packages),
+            Codex = MapCodex(agent.Codex),
+        };
+        var pipeline = MapPipeline(d.Pipeline, agentSettings);
 
         var commentMarker = d.CommentMarker ?? Integrations.TrackerComments.DefaultMarker;
         if (!IsValidCommentMarker(commentMarker)) throw new ProjectConfigException(CommentMarkerRule(commentMarker));
@@ -121,26 +126,72 @@ public static partial class ProjectConfigLoader
         foreach (var (kind, path) in d.Prompts ?? [])
             prompts[ParseEnum<StageKind>(kind, "prompt stage kind")] = Path.GetFullPath(Required(path, $"prompts.{kind}"), dir);
 
-        return new ProjectConfig(
+        var config = new ProjectConfig(
             id,
             d.Name ?? id,
             tracker,
             repo,
             build,
-            new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"), allowedTools,
-                agent.TimeoutMinutes ?? 60, agent.Model, agent.Image) { Packages = packages },
+            agentSettings,
             d.MaxAttemptsPerStage ?? 3,
             pipeline,
             prompts,
             dir)
         {
             RiskAreas = MapRiskAreas(d.RiskAreas),
-            Review = MapReview(d.Review, agent, isolation, packages, dir),
-            Evidence = MapEvidence(d.Evidence, agent, isolation, packages, dir),
+            Review = MapReview(d.Review, agentSettings, dir),
+            Evidence = MapEvidence(d.Evidence, agentSettings, dir),
             PrComments = new PrCommentsConfig(d.PrComments?.FromOthers ?? false),
             CommentMarker = commentMarker,
         };
+
+        var typesInUse = config.AgentTypesInUse;
+        CheckIsolation(isolation, typesInUse);
+        if (agent.Codex is not null && !typesInUse.Contains(AgentTypes.Codex))
+            throw new ProjectConfigException(AgentRules.StaleCodexSettings);
+        return config;
     }
+
+    /// <summary>Every provider some job uses must be allowed under the project's isolation (codex: containers only).</summary>
+    private static void CheckIsolation(Isolation isolation, IEnumerable<string> typesInUse)
+    {
+        if (typesInUse.Any(t => !AgentRules.AllowedIn(t, isolation)))
+            throw new ProjectConfigException(AgentRules.CodexNeedsContainer);
+    }
+
+    private static CodexSettings MapCodex(CodexDto? c)
+    {
+        if (c is null) return CodexSettings.Default;
+        var auth = (c.Auth ?? "api-key").ToLowerInvariant() switch
+        {
+            "api-key" => CodexAuth.ApiKey,
+            "chatgpt" => CodexAuth.ChatGpt,
+            _ => throw new ProjectConfigException($"unknown agent.codex.auth '{c.Auth}'"),
+        };
+        var secret = string.IsNullOrWhiteSpace(c.ApiKeySecret) ? null : c.ApiKeySecret;
+        if (secret is not null && auth != CodexAuth.ApiKey)
+            throw new ProjectConfigException(AgentRules.ApiKeySecretNeedsApiKey);
+        return new CodexSettings(auth, secret ?? CodexSettings.DefaultApiKeySecret);
+    }
+
+    /// <summary>
+    /// The project agent with an override applied: type, model and timeout may differ, the rest is the project's. A
+    /// changed type without a model gets no model (provider default), since model names don't cross providers.
+    /// </summary>
+    private static AgentSettings Override(AgentSettings project, string field, string? type, string? model,
+        int? timeoutMinutes, int defaultTimeoutMinutes)
+    {
+        var effectiveType = type is null ? project.Type : SupportedAgentType(field, type);
+        return project with
+        {
+            Type = effectiveType,
+            Model = model ?? (effectiveType == project.Type ? project.Model : null),
+            TimeoutMinutes = timeoutMinutes ?? defaultTimeoutMinutes,
+        };
+    }
+
+    private static string SupportedAgentType(string field, string type) =>
+        AgentRules.IsSupported(type) ? type : throw new ProjectConfigException(AgentRules.UnsupportedType(field, type));
 
     // Every item ends up as one argument of an install command in a generated Dockerfile, so only plain package
     // names with an optional version are accepted: no spaces, quotes, shell characters or leading '-'.
@@ -184,22 +235,19 @@ public static partial class ProjectConfigLoader
         return result;
     }
 
-    private static ReviewConfig MapReview(ReviewDto? r, AgentDto agent, Isolation isolation, AgentPackages packages,
-        string dir)
+    private static ReviewConfig MapReview(ReviewDto? r, AgentSettings agent, string dir)
     {
         var mode = ParseEnum<ReviewMode>(r?.Mode ?? "off", "review.mode");
         var ra = r?.Agent;
-        Supported("review.agent.type", ra?.Type ?? agent.Type!, "claude-code");
         var tools = ra?.AllowedTools is null ? ReviewConfig.ReadOnlyTools : Items(ra.AllowedTools, "review.agent.allowedTools");
         if (tools.Count == 0) tools = ReviewConfig.ReadOnlyTools;
-        var settings = new AgentSettings(ra?.Type ?? agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
-            tools, ra?.TimeoutMinutes ?? 20, ra?.Model ?? agent.Model, agent.Image) { Packages = packages };
+        var settings = Override(agent, "review.agent.type", ra?.Type, ra?.Model, ra?.TimeoutMinutes, 20)
+            with { AllowedTools = tools };
         var prompt = r?.Prompt is null ? null : Path.GetFullPath(Required(r.Prompt, "review.prompt"), dir);
         return new ReviewConfig(mode, settings, prompt);
     }
 
-    private static EvidenceConfig MapEvidence(EvidenceDto? e, AgentDto agent, Isolation isolation, AgentPackages packages,
-        string dir)
+    private static EvidenceConfig MapEvidence(EvidenceDto? e, AgentSettings agent, string dir)
     {
         var mode = (e?.Mode ?? "high-risk").ToLowerInvariant() switch
         {
@@ -223,9 +271,9 @@ public static partial class ProjectConfigLoader
                 Limited(Required(f.Steps, "evidence.features[].steps"), "evidence.features[].steps", EvidenceLimits.MaxFeatureStepsChars)));
         }
 
-        var settings = new AgentSettings(agent.Type!, isolation, Items(agent.AllowedDomains, "agent.allowedDomains"),
-            Items(agent.AllowedTools, "agent.allowedTools"), e?.Agent?.TimeoutMinutes ?? EvidenceLimits.DefaultTimeoutMinutes,
-            e?.Agent?.Model ?? agent.Model, agent.Image) { Packages = packages };
+        var ea = e?.Agent;
+        var settings = Override(agent, "evidence.agent.type", ea?.Type, ea?.Model, ea?.TimeoutMinutes,
+            EvidenceLimits.DefaultTimeoutMinutes);
         var prompt = e?.Prompt is null ? null : Path.GetFullPath(Required(e.Prompt, "evidence.prompt"), dir);
         return new EvidenceConfig(mode, run, features, settings, prompt);
     }
@@ -257,7 +305,7 @@ public static partial class ProjectConfigLoader
     private static string Limited(string value, string field, int max) =>
         value.Length > max ? throw new ProjectConfigException($"{field} is {value.Length} characters (at most {max})") : value;
 
-    private static List<StageDefinition> MapPipeline(List<StageDto?>? stages)
+    private static List<StageDefinition> MapPipeline(List<StageDto?>? stages, AgentSettings agent)
     {
         if (stages is null || stages.Count == 0)
             throw new ProjectConfigException("pipeline must contain at least one stage");
@@ -276,7 +324,11 @@ public static partial class ProjectConfigLoader
                 kind,
                 ParseGate(s.Gate, stageId, kind),
                 Items(s.EntryStatuses, $"pipeline stage '{stageId}' entryStatuses"),
-                s.OnEnterStatus, s.OnGateStatus, s.ApprovedWhenStatus));
+                s.OnEnterStatus, s.OnGateStatus, s.ApprovedWhenStatus)
+            {
+                Agent = s.Agent is null ? null : Override(agent, $"pipeline stage '{stageId}' agent.type",
+                    s.Agent.Type, s.Agent.Model, s.Agent.TimeoutMinutes, agent.TimeoutMinutes),
+            });
         }
 
         if (result[^1].Kind != StageKind.Done)
@@ -305,11 +357,6 @@ public static partial class ProjectConfigLoader
         Enum.TryParse<T>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)
             ? parsed
             : throw new ProjectConfigException($"unknown {what} '{value}'");
-
-    private static void Supported(string field, string value, string expected)
-    {
-        if (value != expected) throw new ProjectConfigException($"unsupported {field} '{value}'");
-    }
 
     private static string Required(string? value, string field) =>
         string.IsNullOrWhiteSpace(value) ? throw Missing(field) : value;
@@ -359,9 +406,10 @@ public static partial class ProjectConfigLoader
         public string? Steps { get; set; }
     }
 
-    /// <summary>Only these two keys may differ from the project agent.</summary>
+    /// <summary>Only these keys may differ from the project agent.</summary>
     private sealed class EvidenceAgentDto
     {
+        public string? Type { get; set; }
         public int? TimeoutMinutes { get; set; }
         public string? Model { get; set; }
     }
@@ -395,6 +443,21 @@ public static partial class ProjectConfigLoader
         public string? Model { get; set; }
         public string? Image { get; set; }
         public PackagesDto? Packages { get; set; }
+        public CodexDto? Codex { get; set; }
+    }
+
+    private sealed class CodexDto
+    {
+        public string? Auth { get; set; }
+        public string? ApiKeySecret { get; set; }
+    }
+
+    /// <summary>A pipeline stage's override: only these keys may differ from the project agent.</summary>
+    private sealed class StageAgentDto
+    {
+        public string? Type { get; set; }
+        public string? Model { get; set; }
+        public int? TimeoutMinutes { get; set; }
     }
 
     private sealed class PackagesDto
@@ -413,5 +476,6 @@ public static partial class ProjectConfigLoader
         public string? OnEnterStatus { get; set; }
         public string? OnGateStatus { get; set; }
         public string? ApprovedWhenStatus { get; set; }
+        public StageAgentDto? Agent { get; set; }
     }
 }

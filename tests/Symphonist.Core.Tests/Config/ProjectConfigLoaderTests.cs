@@ -139,7 +139,7 @@ public class ProjectConfigLoaderTests
     [Theory]
     [InlineData("type: jira", "type: github", "unsupported tracker.type 'github'")]
     [InlineData("type: bitbucket\n  workspace", "type: gitlab\n  workspace", "unsupported repo.type 'gitlab'")]
-    [InlineData("type: claude-code", "type: codex", "unsupported agent.type 'codex'")]
+    [InlineData("type: claude-code", "type: gpt", "unsupported agent.type 'gpt' (allowed: claude-code, codex)")]
     public void Rejects_unsupported_types(string from, string to, string expectedMessage)
     {
         var yaml = File.ReadAllText(Fixture("orders.yaml")).Replace("\r\n", "\n").Replace(from, to);
@@ -360,8 +360,8 @@ public class ProjectConfigLoaderTests
     public void Unsupported_review_agent_is_rejected()
     {
         var ex = Assert.Throws<ProjectConfigException>(() =>
-            LoadYaml(FixtureYaml() + "review:\n  mode: shadow\n  agent: { type: codex }\n"));
-        Assert.Contains("unsupported review.agent.type 'codex'", ex.Message);
+            LoadYaml(FixtureYaml() + "review:\n  mode: shadow\n  agent: { type: gpt }\n"));
+        Assert.Contains("unsupported review.agent.type 'gpt' (allowed: claude-code, codex)", ex.Message);
     }
 
     [Fact]
@@ -518,5 +518,137 @@ public class ProjectConfigLoaderTests
         Assert.False(p.WantsEvidence(p.Stage("plan")));
         var off = LoadYaml(FixtureYaml() + "evidence:\n  mode: off\n");
         Assert.False(off.WantsEvidence(off.Stage("implement")));
+    }
+    private const string Domains = "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n";
+    private const string ImplementStage = "kind: implement, gate: human";
+
+    private static string WithAgentLines(string lines) => FixtureYaml().Replace(Domains, Domains + lines);
+
+    private static string WithImplementAgent(string yaml, string agent) =>
+        yaml.Replace(ImplementStage, $"{ImplementStage}, agent: {agent}");
+
+    private static string WithHostIsolation(string yaml) =>
+        yaml.Replace("  type: claude-code\n", "  type: claude-code\n  isolation: host\n  allowedTools: [Read]\n");
+
+    [Fact]
+    public void Existing_file_has_no_overrides_and_default_codex_settings()
+    {
+        var p = ProjectConfigLoader.Load(Fixture("orders.yaml"), BuiltInProviders.Registry);
+        Assert.All(p.Pipeline, s => Assert.Null(s.Agent));
+        Assert.Equal(CodexSettings.Default, p.Agent.Codex);
+        Assert.Equal(new HashSet<string> { "claude-code" }, p.AgentTypesInUse);
+        Assert.Same(p.Agent, p.AgentFor("implement"));
+    }
+
+    [Fact]
+    public void Stage_override_sets_type_model_timeout_and_inherits_the_rest()
+    {
+        var p = LoadYaml(WithImplementAgent(
+            WithAgentLines("  image: acme/agent\n  packages:\n    apt: [ripgrep]\n"),
+            "{ type: codex, model: gpt-5-codex, timeoutMinutes: 15 }"));
+
+        var a = p.AgentFor("implement");
+        Assert.Equal("codex", a.Type);
+        Assert.Equal("gpt-5-codex", a.Model);
+        Assert.Equal(15, a.TimeoutMinutes);
+        Assert.Equal(p.Agent.Isolation, a.Isolation);
+        Assert.Equal(p.Agent.AllowedDomains, a.AllowedDomains);
+        Assert.Equal(p.Agent.AllowedTools, a.AllowedTools);
+        Assert.Equal("acme/agent", a.Image);
+        Assert.Same(p.Agent.Packages, a.Packages);
+        Assert.Same(a, p.Stage("implement").Agent);
+        Assert.Same(p.Agent, p.AgentFor("plan"));
+        Assert.Same(p.Agent, p.AgentFor("no-such-stage"));
+        Assert.Equal(new HashSet<string> { "claude-code", "codex" }, p.AgentTypesInUse);
+    }
+
+    [Fact]
+    public void Override_changing_type_without_model_clears_the_model()
+    {
+        var p = LoadYaml(WithImplementAgent(WithAgentLines("  model: opus\n"), "{ type: codex }")
+            + "review:\n  mode: shadow\n  agent: { type: codex }\n"
+            + "evidence:\n  agent: { type: codex }\n");
+        Assert.Equal("opus", p.Agent.Model);
+        Assert.Null(p.AgentFor("implement").Model);
+        Assert.Equal(60, p.AgentFor("implement").TimeoutMinutes);
+        Assert.Null(p.Review.Agent.Model);
+        Assert.Null(p.Evidence.Agent.Model);
+    }
+
+    [Fact]
+    public void Override_keeping_type_without_model_inherits_the_model()
+    {
+        var p = LoadYaml(WithImplementAgent(WithAgentLines("  model: opus\n"), "{ timeoutMinutes: 5 }")
+            + "review:\n  agent: { type: claude-code }\n");
+        Assert.Equal("opus", p.AgentFor("implement").Model);
+        Assert.Equal("claude-code", p.AgentFor("implement").Type);
+        Assert.Equal(5, p.AgentFor("implement").TimeoutMinutes);
+        Assert.Equal("opus", p.Review.Agent.Model);
+    }
+
+    [Fact]
+    public void Codex_api_key_settings_parse()
+    {
+        var p = LoadYaml(WithImplementAgent(
+            WithAgentLines("  codex: { auth: api-key, apiKeySecret: openai-orders }\n"), "{ type: codex }"));
+        var expected = new CodexSettings(CodexAuth.ApiKey, "openai-orders");
+        Assert.Equal(expected, p.Agent.Codex);
+        Assert.Equal(expected, p.AgentFor("implement").Codex);
+        Assert.Equal(expected, p.Review.Agent.Codex);
+        Assert.Equal(expected, p.Evidence.Agent.Codex);
+    }
+
+    [Fact]
+    public void Codex_chatgpt_settings_parse()
+    {
+        var p = LoadYaml(WithImplementAgent(WithAgentLines("  codex: { auth: chatgpt }\n"), "{ type: codex }"));
+        Assert.Equal(new CodexSettings(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret), p.Agent.Codex);
+        Assert.Equal("openai-api-key", CodexSettings.DefaultApiKeySecret);
+    }
+
+    [Fact]
+    public void Unknown_codex_auth_is_rejected()
+    {
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(WithImplementAgent(
+            WithAgentLines("  codex: { auth: oauth }\n"), "{ type: codex }")));
+        Assert.Contains("unknown agent.codex.auth 'oauth'", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("agent.type: gpt", "unsupported agent.type 'gpt' (allowed: claude-code, codex)")]
+    [InlineData("stage agent type: gpt", "unsupported pipeline stage 'implement' agent.type 'gpt' (allowed: claude-code, codex)")]
+    [InlineData("evidence agent type: gpt", "unsupported evidence.agent.type 'gpt' (allowed: claude-code, codex)")]
+    [InlineData("codex block without codex job", "agent.codex is set but no job uses codex")]
+    [InlineData("apiKeySecret with chatgpt", "agent.codex.apiKeySecret applies only to auth: api-key")]
+    [InlineData("codex stage with isolation: host", "codex runs only in containers (isolation: host)")]
+    [InlineData("review.agent codex with isolation: host", "codex runs only in containers (isolation: host)")]
+    [InlineData("stage agent with isolation key", "Property 'isolation' not found")]
+    public void Invalid_provider_config_is_rejected(string yamlCase, string message)
+    {
+        var yaml = yamlCase switch
+        {
+            "agent.type: gpt" => FixtureYaml().Replace("  type: claude-code\n", "  type: gpt\n"),
+            "stage agent type: gpt" => WithImplementAgent(FixtureYaml(), "{ type: gpt }"),
+            "evidence agent type: gpt" => FixtureYaml() + "evidence:\n  agent: { type: gpt }\n",
+            "codex block without codex job" => WithAgentLines("  codex: { auth: api-key }\n"),
+            "apiKeySecret with chatgpt" => WithImplementAgent(
+                WithAgentLines("  codex: { auth: chatgpt, apiKeySecret: openai-orders }\n"), "{ type: codex }"),
+            "codex stage with isolation: host" => WithImplementAgent(WithHostIsolation(FixtureYaml()), "{ type: codex }"),
+            "review.agent codex with isolation: host" =>
+                WithHostIsolation(FixtureYaml()) + "review:\n  mode: off\n  agent: { type: codex }\n",
+            "stage agent with isolation key" => WithImplementAgent(FixtureYaml(), "{ isolation: host }"),
+            _ => throw new ArgumentException(yamlCase),
+        };
+        var ex = Assert.Throws<ProjectConfigException>(() => LoadYaml(yaml));
+        Assert.Contains(message, ex.Message);
+    }
+
+    [Fact]
+    public void Evidence_agent_accepts_type()
+    {
+        var p = LoadYaml(FixtureYaml() + "evidence:\n  agent: { type: codex }\n");
+        Assert.Equal("codex", p.Evidence.Agent.Type);
+        Assert.Equal(30, p.Evidence.Agent.TimeoutMinutes);
+        Assert.Equal(new HashSet<string> { "claude-code", "codex" }, p.AgentTypesInUse);
     }
 }

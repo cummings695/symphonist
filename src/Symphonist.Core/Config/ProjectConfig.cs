@@ -8,7 +8,11 @@ public enum ReviewMode { Off, Shadow, Active }
 public enum Isolation { Container, Host }
 
 public sealed record StageDefinition(string Id, StageKind Kind, GatePolicy Gate,
-    IReadOnlyList<string> EntryStatuses, string? OnEnterStatus, string? OnGateStatus, string? ApprovedWhenStatus);
+    IReadOnlyList<string> EntryStatuses, string? OnEnterStatus, string? OnGateStatus, string? ApprovedWhenStatus)
+{
+    /// <summary>This stage's own agent (the project agent with its override applied), or null for the project default.</summary>
+    public AgentSettings? Agent { get; init; }
+}
 
 /// <summary>The settings every tracker provider shares; each provider subclasses it with its own fields.</summary>
 public abstract record TrackerConfig(string Type, string TokenSecret);
@@ -30,6 +34,9 @@ public sealed record AgentSettings(string Type, Isolation Isolation, IReadOnlyLi
 {
     /// <summary>Extra packages baked into the agent image (container isolation only).</summary>
     public AgentPackages Packages { get; init; } = AgentPackages.None;
+
+    /// <summary>The project's Codex sign-in; read only by Codex runs.</summary>
+    public CodexSettings Codex { get; init; } = CodexSettings.Default;
 }
 
 /// <summary>
@@ -98,6 +105,22 @@ public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker
     /// <summary>Evidence applies to this stage's gate rounds: mode not off, implement kind, a gate.</summary>
     public bool WantsEvidence(StageDefinition stage) =>
         Evidence.Mode != EvidenceMode.Off && stage.Gate != GatePolicy.None && stage.Kind == StageKind.Implement;
+
+    /// <summary>The agent a stage's runs use: its override, else the project <see cref="Agent"/> (also for an unknown id).</summary>
+    public AgentSettings AgentFor(string stageId) =>
+        Pipeline.FirstOrDefault(s => s.Id == stageId)?.Agent ?? Agent;
+
+    /// <summary>Every provider some job may run: the project agent, stage overrides, reviewer and evidence agent, whatever their modes.</summary>
+    public IReadOnlySet<string> AgentTypesInUse
+    {
+        get
+        {
+            var types = new HashSet<string> { Agent.Type, Review.Agent.Type, Evidence.Agent.Type };
+            foreach (var stage in Pipeline)
+                if (stage.Agent is not null) types.Add(stage.Agent.Type);
+            return types;
+        }
+    }
 
     public StageDefinition Stage(string id) =>
         Pipeline.FirstOrDefault(s => s.Id == id)
