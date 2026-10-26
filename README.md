@@ -9,7 +9,8 @@ along the way. A host process does the work; the `symphonist` CLI talks to it ov
 
 - .NET 10 SDK.
 - A Docker-compatible engine, running (needed for the default `container` isolation).
-- The `claude` CLI, logged in (used once to create a long-lived token).
+- The `claude` CLI, logged in (used once to create a long-lived token). Only needed for projects that use Claude Code;
+  see [Agent providers](#agent-providers) for Codex.
 - git, with credentials for Bitbucket or GitHub already working on this machine. Symphonist pushes from the host with your git
   credentials; they are never given to the agent.
 - A Jira Cloud account and a Bitbucket Cloud account for the project you want to automate, or a GitHub account (github.com)
@@ -27,6 +28,8 @@ is never taken from arguments.
    claude setup-token
    symphonist secret set claude-code-token
    ```
+
+   Projects that run Codex need their own sign-in instead; see [Agent providers](#agent-providers).
 
 2. Jira: create an Atlassian API token (id.atlassian.com, Security, API tokens). Jira authenticates with your account
    email plus the token.
@@ -346,11 +349,52 @@ evidence:
 
 Onboarding can propose `run` and `features` for you.
 
+### Agent providers
+
+Any job (a stage, the risk reviewer, evidence) can run on Claude Code or on OpenAI Codex. `agent.type` is
+`claude-code` (the default) or `codex`, and the stage kinds, the reviewer and evidence can each override it:
+
+```yaml
+agent:
+  type: claude-code               # claude-code | codex
+  codex:                          # only read when a job uses Codex
+    auth: api-key                 # api-key | chatgpt
+    apiKeySecret: openai-api-key  # secret name; the default, and only with auth: api-key
+pipeline:
+  - { id: plan, kind: plan, gate: human, agent: { type: codex, timeoutMinutes: 30 } }   # type, model, timeoutMinutes
+review:
+  mode: shadow
+  agent: { type: codex }
+evidence:
+  mode: high-risk
+  agent: { type: claude-code }
+```
+
+An override that switches provider without naming a `model` uses that provider's default model, not the project's
+`agent.model`.
+
+- Codex runs only in containers for now: `agent.isolation: host` together with Codex is a load error.
+- `auth: api-key`: store the key in the OS credential store, the same way as the Claude token, under the
+  `apiKeySecret` name (default `openai-api-key`):
+
+  ```
+  symphonist secret set openai-api-key
+  ```
+- `auth: chatgpt`: run `codex login` once on this machine. Symphonist copies `auth.json` into each run and writes a
+  refreshed login back afterwards (only if it is the same account). `CODEX_HOME` is honoured.
+- A run only receives the credential of its own provider.
+- No dollar cost is shown for Codex runs.
+- The default agent image is `symphonist/agent:2`, which has both CLIs. A custom `agent.image` must contain the CLIs
+  the project uses; the setup check verifies this. Images built `FROM` the old `symphonist/agent-claude:1` keep working
+  for Claude-only projects; rebuild them on `symphonist/agent:2` to use Codex.
+- The container firewall allows each provider's own domains automatically (Codex: `api.openai.com`,
+  `auth.openai.com`, `chatgpt.com`), on top of `agent.allowedDomains`.
+
 ### Sandbox
 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network
   allowlist (Claude Code's own hosts plus `agent.allowedDomains`; HTTPS/HTTP on TCP 443/80 only). Jira, Bitbucket and git
-  credentials stay on the host; the only secret the container receives is the Claude token. Symphonist itself commits,
+  credentials stay on the host; the only credential a container receives is the one for its own provider (the Claude token, or the Codex sign-in). Symphonist itself commits,
   pushes and opens PRs from the host using your git credentials. If the origin URL of your checkout embeds credentials
   (`https://user:token@...`), Symphonist strips them from agent workspaces (and masks them in errors) and logs a
   warning; pushes then authenticate through your git credential helper, so make sure one is configured. Git never

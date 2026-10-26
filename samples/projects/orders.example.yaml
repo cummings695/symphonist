@@ -33,7 +33,11 @@ build:
   # timeoutMinutes: 45          # default: 45
 
 agent:
-  type: claude-code             # only "claude-code" is supported
+  type: claude-code             # "claude-code" or "codex" (Codex runs only with isolation: container)
+  # Codex sign-in, used by any job that runs Codex:
+  # codex:
+  #   auth: api-key               # "api-key" (secret below) or "chatgpt" (run "codex login" once on this machine)
+  #   apiKeySecret: openai-api-key  # default; api-key only: symphonist secret set openai-api-key
   # isolation: container        # default: container (Docker sandbox). "host" runs claude directly on this machine;
   #                             # host isolation REQUIRES allowedTools, e.g. allowedTools: [Read, Edit, "Bash(git:*)"]
   # allowedTools: []            # passed to claude --allowedTools (host mode only)
@@ -74,6 +78,8 @@ agent:
 pipeline:
   - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
   - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
+  # A stage can run another provider: add  agent: { type: codex, model: "", timeoutMinutes: 30 }  to its line.
+  # Without a model, the provider's default model is used.
   - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
   - { id: build,     kind: build }
   - { id: release,   kind: release,   gate: human }
@@ -95,7 +101,7 @@ riskAreas:
 review:
   mode: off
   # prompt: prompts/review.md   # optional prompt override, relative to this file
-  # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # inherits the rest from agent
+  # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # type may be codex; inherits the rest from agent
   #   host mode: allowedTools defaults to [Read, Grep, Glob], and a review refuses to run with any other tool
 
 # Optional: after a gated implement round is pushed, an agent runs the app and reports what it saw (tests, screenshots)
@@ -114,7 +120,7 @@ review:
 #     notes: Sign in as demo@example.com   # free text for the agent
 #   features:                       # at most 20; things to exercise, in your own words
 #     - { name: Checkout, steps: Add an item to the basket and pay with the test card }
-#   agent: { timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from agent
+#   agent: { type: codex, timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from agent
 
 # Optional: comments on the pull request that tag @claude (from you) are applied as a fix run.
 # prComments:
