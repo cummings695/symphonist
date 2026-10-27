@@ -23,3 +23,11 @@ Roadmap plan 5 item, tabled by the developer until Symphonist has been used long
 Plan 6 makes Codex container-only "for now". Lifting it needs two answers: whether write runs on the host get network
 (Codex's `workspace-write` sandbox has none by default and there is no per-domain allowlist outside a container), and
 whether to allow it on native Windows, where Codex's sandbox is experimental.
+
+## Codex smoke run (skipped at ship, 2026-10-26)
+
+Plan 6 shipped without its real-CLI smoke run, which needs real OpenAI credentials. Still unverified on codex 0.164.0:
+a read-only Codex review ignores the reviewed repo's `AGENTS.md` (`-c project_doc_max_bytes=0`) and its
+`.codex/config.toml` (fresh `CODEX_HOME`); an API-key run and a ChatGPT run both complete; the developer's
+`~/.codex/auth.json` is intact after a ChatGPT run. If either repo-file guard fails, have `DockerLauncher` mount an
+empty read-only directory over `/workspace/.codex` for read-only Codex runs.
