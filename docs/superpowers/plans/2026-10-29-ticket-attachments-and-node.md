@@ -250,7 +250,7 @@ Limits are applied in ticket attachment order (oldest `Created` first). Download
 - [ ] **Step 3: Implement**
 
 - `RunAgentAsync`: after `PrepareAsync`, `var attachments = await TicketAttachments.SyncAsync(io.Tracker, p.Id, t.Key, source, ct)`; pass `attachments` to `PromptValues.For` and `AttachmentsDirectory: attachments.HasFiles ? attachments.Directory : null` to the request. `RunAgentAsync` needs `io`; thread it through from Triage/Plan/Implement. Return `attachments` on `AgentStep` for Task 6.
-- `AttachmentsText`: `(none)` when no entries; otherwise one fenced block with one line per entry: `<path>  <mime>  <size KB>` for Available (path = `/attachments/<LocalName>` in container mode, full host path in host mode), `<file name>  skipped: <reason>` / `unavailable: <reason>` otherwise.
+- `AttachmentsText`: `(none)` when no entries; otherwise one fenced block with one line per entry: `<path>  <mime>  <size KB>` for Available (path = `/attachments/<LocalName>` in container mode, full host path in host mode), `<file name>  skipped: <reason>` / `unavailable: <reason>` otherwise. Fence: lift `GateReviewer`'s local `Fence` (`<untrusted-{nonce}>` … `</untrusted-{nonce}>` with `ForgedMarker` escaping, ~line 95) into an internal static helper both use, with a fresh nonce per render. Strip control characters (`\r`, `\n`, `\t`) from file names first so each entry stays on one line.
 - Templates: add after Comments:
 
   ```
