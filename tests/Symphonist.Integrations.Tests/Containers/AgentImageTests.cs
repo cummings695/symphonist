@@ -94,6 +94,8 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         AssertExit(0, await RunInContainer("dotnet", "--version"));
         AssertExit(0, await RunInContainer("git", "--version"));
         AssertExit(0, await RunInContainer("chromium", "--version"));
+        AssertExit(0, await RunInContainer("node", "-e", "process.exit(process.versions.node.split('.')[0] === '22' ? 0 : 1)"));
+        AssertExit(0, await RunInContainer("npm", "--version"));
     }
 
     [DockerFact]
