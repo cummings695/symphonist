@@ -91,9 +91,9 @@ public static class TicketAttachments
         }
 
         foreach (var file in Directory.EnumerateFiles(dir))
-            if (!keep.Contains(Path.GetFileName(file))) File.Delete(file);
+            if (!keep.Contains(Path.GetFileName(file))) TryDelete(() => File.Delete(file));
         foreach (var sub in Directory.EnumerateDirectories(dir))
-            Directory.Delete(sub, true);
+            TryDelete(() => Directory.Delete(sub, true));
 
         return new AttachmentSet(dir, entries);
     }
@@ -119,9 +119,24 @@ public static class TicketAttachments
         }
         catch (Exception e)
         {
-            File.Delete(part);
+            TryDelete(() => File.Delete(part));
             if (e is OperationCanceledException && ct.IsCancellationRequested) throw;
             return e.Message;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort cleanup: a file that is locked (another sync, antivirus) or otherwise undeletable stays until the next
+    /// sync rather than failing the stage.
+    /// </summary>
+    private static void TryDelete(Action delete)
+    {
+        try
+        {
+            delete();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
         }
     }
 

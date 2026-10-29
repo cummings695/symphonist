@@ -95,6 +95,41 @@ public sealed class TicketAttachmentsTests : IDisposable
     }
 
     [Fact]
+    public async Task Locked_stale_file_does_not_fail_the_sync()
+    {
+        var csv = Add("10002", "orders.csv", "abc");
+        var old = Add("10001", "old.txt", "gone");
+        await Sync(Ticket(old, csv));
+
+        SourceTicket ticket = Ticket(csv, Add("10003", "new.txt", "new", minutes: 1));
+        AttachmentSet set;
+        using (new FileStream(Path.Combine(Dir, "10001-old.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+            set = await Sync(ticket);
+
+        Assert.Equal(["10002-orders.csv", "10003-new.txt"], set.Entries.Select(e => e.LocalName));
+        Assert.All(set.Entries, e => Assert.Equal(AttachmentState.Available, e.State));
+
+        await Sync(ticket);
+        Assert.Equal(["10002-orders.csv", "10003-new.txt"], FilesOnDisk());
+    }
+
+    [Fact]
+    public async Task Failed_download_whose_part_cannot_be_deleted_is_unavailable()
+    {
+        var csv = Add("10002", "orders.csv", "abc");
+        var other = Add("10003", "other.txt", "xyz", minutes: 1);
+        // A directory in the way makes both creating and deleting the .part file fail.
+        Directory.CreateDirectory(Path.Combine(Dir, "10002-orders.csv.part"));
+
+        var set = await Sync(Ticket(csv, other));
+
+        Assert.Equal(AttachmentState.Unavailable, set.Entries[0].State);
+        Assert.Null(set.Entries[0].LocalName);
+        Assert.Equal(AttachmentState.Available, set.Entries[1].State);
+        Assert.Equal(["10003-other.txt"], FilesOnDisk());
+    }
+
+    [Fact]
     public async Task Skips_file_over_25_MB_with_reason()
     {
         var big = Meta("10002", "dump.sql", TicketAttachments.MaxFileBytes + 1);
