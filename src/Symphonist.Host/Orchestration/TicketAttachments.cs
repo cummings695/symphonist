@@ -27,7 +27,13 @@ public static class TicketAttachments
     public const long MaxFileBytes = 25L * 1024 * 1024, MaxTicketBytes = 100L * 1024 * 1024;
     public const int MaxFiles = 50;
 
-    private const int MaxNameLength = 100;
+    /// <summary>
+    /// How long one file's download may take. HTTP timeouts bound only the time to response headers, so a stalled body
+    /// would otherwise hold the stage forever. Settable for tests.
+    /// </summary>
+    internal static TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+    private const int MaxNameLength = 100, MaxExtensionLength = 20;
     private const string PartSuffix = ".part";
 
     /// <summary>The host directory holding the ticket's attachments.</summary>
@@ -35,14 +41,26 @@ public static class TicketAttachments
 
     /// <summary>
     /// <c>&lt;id&gt;-&lt;file name&gt;</c>, keeping only letters, digits, <c>.</c>, <c>-</c> and <c>_</c> (anything else becomes
-    /// <c>_</c>), with no <c>..</c>, no leading or trailing dots, and the file name part capped at 100 characters.
+    /// <c>_</c>), with no <c>..</c>, no leading or trailing dots, and the file name part capped at 100 characters. A long
+    /// name keeps its extension (up to <see cref="MaxExtensionLength"/> characters): Read detects images by it.
     /// </summary>
     public static string LocalName(SourceAttachment a)
     {
         var name = Sanitize(a.FileName);
-        if (name.Length > MaxNameLength) name = name[..MaxNameLength].TrimEnd('.');
+        if (name.Length > MaxNameLength)
+        {
+            var ext = Path.GetExtension(name);
+            if (ext.Length > MaxExtensionLength) ext = "";
+            name = name[..(MaxNameLength - ext.Length)].TrimEnd('.') + ext;
+        }
         return $"{Sanitize(a.Id)}-{(name.Length == 0 ? "file" : name)}";
     }
+
+    /// <summary>
+    /// <paramref name="text"/> without control characters, so author-controlled text (file names, MIME types) stays on
+    /// one line and cannot carry terminal escapes into prompts, events or the CLI.
+    /// </summary>
+    internal static string OneLine(string text) => string.Concat(text.Where(c => !char.IsControl(c)));
 
     /// <summary>
     /// Downloads attachments not yet present, deletes files no longer on the ticket, and lists the result. Limits apply
@@ -55,7 +73,6 @@ public static class TicketAttachments
         var dir = DirectoryFor(projectId, key);
         if (source is null) return new AttachmentSet(dir, ListDisk(dir));
 
-        Directory.CreateDirectory(dir);
         var entries = new List<AttachmentEntry>();
         var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long total = 0;
@@ -79,6 +96,7 @@ public static class TicketAttachments
             var path = Path.Combine(dir, local);
             if (!(File.Exists(path) && new FileInfo(path).Length == a.Size))
             {
+                Directory.CreateDirectory(dir); // only when there is something to download
                 var error = await DownloadAsync(tracker, key, a, path, ct);
                 if (error is not null)
                 {
@@ -91,10 +109,13 @@ public static class TicketAttachments
             entries.Add(Entry(a, AttachmentState.Available, local, null));
         }
 
-        foreach (var file in Directory.EnumerateFiles(dir))
-            if (!keep.Contains(Path.GetFileName(file))) TryDelete(() => File.Delete(file));
-        foreach (var sub in Directory.EnumerateDirectories(dir))
-            TryDelete(() => Directory.Delete(sub, true));
+        if (Directory.Exists(dir))
+        {
+            foreach (var file in Directory.EnumerateFiles(dir))
+                if (!keep.Contains(Path.GetFileName(file))) TryDelete(() => File.Delete(file));
+            foreach (var sub in Directory.EnumerateDirectories(dir))
+                TryDelete(() => Directory.Delete(sub, true));
+        }
 
         return new AttachmentSet(dir, entries);
     }
@@ -131,7 +152,7 @@ public static class TicketAttachments
                 if (a.Length != file.Length) continue;
                 hash ??= await HashAsync(full, ct);
                 if (hash.AsSpan().SequenceEqual(a.Hash))
-                    return $"agent copied attachment \"{a.Entry.FileName}\" into {path}; attachments must not be committed";
+                    return $"agent copied attachment \"{OneLine(a.Entry.FileName)}\" into {path}; attachments must not be committed";
             }
         }
         return null;
@@ -156,15 +177,21 @@ public static class TicketAttachments
         if (Directory.Exists(dir)) TryDelete(() => Directory.Delete(dir, true));
     }
 
-    /// <summary>Downloads via a <c>.part</c> file and renames it into place; returns the error message on failure.</summary>
+    /// <summary>
+    /// Downloads via a <c>.part</c> file and renames it into place; returns the error message on failure. A download
+    /// that outlasts <see cref="DownloadTimeout"/> or sends more bytes than the attachment's size fails.
+    /// </summary>
     private static async Task<string?> DownloadAsync(ITracker tracker, string key, SourceAttachment a, string path,
         CancellationToken ct)
     {
         var part = path + PartSuffix;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(DownloadTimeout);
         try
         {
             await using (var stream = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None))
-                await tracker.DownloadAttachmentAsync(key, a, stream, ct);
+            await using (var capped = new CappedStream(stream, a.Size))
+                await tracker.DownloadAttachmentAsync(key, a, capped, deadline.Token);
             File.Move(part, path, overwrite: true);
             return null;
         }
@@ -172,7 +199,49 @@ public static class TicketAttachments
         {
             TryDelete(() => File.Delete(part));
             if (e is OperationCanceledException && ct.IsCancellationRequested) throw;
-            return e.Message;
+            return e is OperationCanceledException && deadline.IsCancellationRequested
+                ? $"download timed out after {DownloadTimeout.TotalMinutes:0.##} minutes"
+                : e.Message;
+        }
+    }
+
+    /// <summary>Passes writes through until they would exceed <c>limit</c> bytes, then throws.</summary>
+    private sealed class CappedStream(Stream inner, long limit) : Stream
+    {
+        private long written;
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => written;
+        public override long Position { get => written; set => throw new NotSupportedException(); }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            Count(count);
+            inner.Write(buffer, offset, count);
+        }
+
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+            WriteAsync(buffer.AsMemory(offset, count), ct).AsTask();
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            Count(buffer.Length);
+            return inner.WriteAsync(buffer, ct);
+        }
+
+        public override void Flush() => inner.Flush();
+        public override Task FlushAsync(CancellationToken ct) => inner.FlushAsync(ct);
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        private void Count(int count)
+        {
+            written += count;
+            if (written > limit)
+                throw new IOException($"download is larger than the attachment's size of {limit} bytes");
         }
     }
 

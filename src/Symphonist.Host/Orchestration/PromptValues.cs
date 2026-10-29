@@ -54,5 +54,5 @@ internal static class PromptValues
 
     private static string Kilobytes(long size) => ((size + 1023) / 1024).ToString(CultureInfo.InvariantCulture);
 
-    private static string OneLine(string text) => string.Concat(text.Where(c => !char.IsControl(c)));
+    private static string OneLine(string text) => TicketAttachments.OneLine(text);
 }

@@ -220,6 +220,70 @@ public sealed class TicketAttachmentsTests : IDisposable
     }
 
     [Fact]
+    public async Task Stalled_download_times_out_as_unavailable()
+    {
+        var csv = Add("10002", "orders.csv", "abc");
+        tracker.OnDownload = async (_, _, ct) => await Task.Delay(Timeout.Infinite, ct);
+        var previous = TicketAttachments.DownloadTimeout;
+        TicketAttachments.DownloadTimeout = TimeSpan.FromMilliseconds(50);
+        AttachmentSet set;
+        try
+        {
+            set = await Sync(Ticket(csv)).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            TicketAttachments.DownloadTimeout = previous;
+        }
+
+        var entry = Assert.Single(set.Entries);
+        Assert.Equal(AttachmentState.Unavailable, entry.State);
+        Assert.Contains("timed out", entry.Reason);
+        Assert.Empty(FilesOnDisk());
+    }
+
+    [Fact]
+    public void Download_timeout_defaults_to_five_minutes() =>
+        Assert.Equal(TimeSpan.FromMinutes(5), TicketAttachments.DownloadTimeout);
+
+    [Fact]
+    public async Task Download_larger_than_metadata_size_is_unavailable_and_not_kept()
+    {
+        var csv = Meta("10002", "orders.csv", 3);
+        tracker.OnDownload = async (_, s, ct) =>
+        {
+            for (var i = 0; i < 4; i++) await s.WriteAsync(new byte[] { 1, 2 }, ct);
+        };
+
+        var set = await Sync(Ticket(csv));
+
+        var entry = Assert.Single(set.Entries);
+        Assert.Equal(AttachmentState.Unavailable, entry.State);
+        Assert.Contains("larger than", entry.Reason);
+        Assert.Empty(FilesOnDisk());
+    }
+
+    [Fact]
+    public async Task Ticket_without_attachments_creates_no_directory()
+    {
+        var set = await Sync(Ticket());
+
+        Assert.Empty(set.Entries);
+        Assert.False(Directory.Exists(Dir));
+    }
+
+    [Fact]
+    public async Task Stale_files_are_deleted_when_all_attachments_are_removed()
+    {
+        await Sync(Ticket(Add("10002", "orders.csv", "abc")));
+
+        var set = await Sync(Ticket());
+
+        Assert.Empty(set.Entries);
+        Assert.Empty(FilesOnDisk());
+    }
+
+    [Fact]
     public async Task Null_source_leaves_directory_untouched_and_lists_disk()
     {
         var csv = Add("10002", "orders.csv", "abc");
@@ -255,6 +319,16 @@ public sealed class TicketAttachmentsTests : IDisposable
 
     [Fact]
     public void Local_name_of_long_file_name_is_capped() => AssertSafe(new string('a', 300));
+
+    [Fact]
+    public void Local_name_of_long_file_name_keeps_its_extension()
+    {
+        AssertSafe(new string('a', 300) + ".png");
+        var name = TicketAttachments.LocalName(Meta("10002", new string('a', 300) + ".png", 1));
+
+        Assert.EndsWith(".png", name);
+        Assert.Equal("10002-".Length + 100, name.Length);
+    }
 
     private void AssertSafe(string fileName)
     {
@@ -306,6 +380,19 @@ public sealed class TicketAttachmentsTests : IDisposable
         var error = await FindCopy(set, "src/Export.cs", "tests/Fixtures/orders.csv");
 
         Assert.Equal("agent copied attachment \"orders.csv\" into tests/Fixtures/orders.csv; attachments must not be committed",
+            error);
+    }
+
+    [Fact]
+    public async Task Find_copy_strips_control_characters_from_the_file_name()
+    {
+        var set = await Sync(Ticket(Add("10002", "ord\ners\u001b[31m.csv", "id,total\n1,9\n")));
+        WriteWorkspace("tests/Fixtures/orders.csv", "id,total\n1,9\n");
+
+        var error = await FindCopy(set, "tests/Fixtures/orders.csv");
+
+        Assert.Equal(
+            "agent copied attachment \"orders[31m.csv\" into tests/Fixtures/orders.csv; attachments must not be committed",
             error);
     }
 
