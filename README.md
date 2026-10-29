@@ -225,10 +225,10 @@ Before each triage, plan or implement stage, Symphonist downloads the ticket's J
 `SYMPHONIST_HOME/attachments/<project>/<key>/`, so the agent can read specs, screenshots and data files.
 
 - In container mode the folder is mounted read-only at `/attachments`. In host mode the agent gets it through
-  `--add-dir`. Gate reviews get no attachments.
+  `--add-dir`, with `Edit` and `Write` denied there. Gate reviews get no attachments.
 - Limits: 25 MB per file, 100 MB and 50 files per ticket. Attachments over a limit are listed to the agent as skipped
-  and never downloaded. A download that fails is listed as unavailable and retried on the next run; it never fails a
-  stage.
+  and never downloaded. A download that fails (or takes over 5 minutes) is listed as unavailable and retried on the next
+  run; it never fails a stage.
 - Attachments must not end up in the repository. If a plan or implement stage commits a byte-identical copy of one, the
   stage fails with `agent copied attachment "<file name>" into <repo path>; attachments must not be committed`.
 - The default prompts list the attachments through the `{{ticket.attachments}}` placeholder. A custom prompt file must
