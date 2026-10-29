@@ -121,6 +121,8 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
 - The API listens on `127.0.0.1` only, port `5199` by default; override with `SYMPHONIST_PORT`. The CLI reads the same
   variable, so set it for both if you change it. The host refuses to serve if it ends up bound to anything else.
 - Every API call needs the token in `~/.symphonist/api-token` (created on first start); the CLI reads it for you.
+- Desktop notifications (Windows toasts for tickets waiting on you, blocked tickets, releases and usage limits) are
+  folded over 30 seconds; set `SYMPHONIST_NOTIFICATIONS=off` to turn them off.
 - State (ticket database, work copies, API token, `paused.json`) lives in `SYMPHONIST_HOME`, default `~/.symphonist`.
 - If any project uses container isolation, the host first removes agent containers left over from a previous run and
   makes sure the agent image (and any `agent.packages` image) exists. The first image build can take several minutes

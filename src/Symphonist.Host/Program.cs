@@ -12,6 +12,7 @@ using Symphonist.Core.Integrations.Providers;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Api;
 using Symphonist.Host.Dashboard;
+using Symphonist.Host.Notifications;
 using Symphonist.Host.Onboarding;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations;
@@ -99,6 +100,21 @@ builder.Services.AddSingleton<OnboardingService>();
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
 builder.Services.AddDashboard(port);
+// SYMPHONIST_NOTIFICATIONS=off disables desktop notifications; only Windows has a notifier so far.
+builder.Services.AddSingleton<INotifier>(sp =>
+    !string.Equals(Environment.GetEnvironmentVariable("SYMPHONIST_NOTIFICATIONS"), "off", StringComparison.OrdinalIgnoreCase)
+    && OperatingSystem.IsWindows()
+        ? new WindowsToastNotifier(sp.GetRequiredService<IProcessRunner>(),
+            Path.Combine(AppContext.BaseDirectory, "Notifications", "toast.ps1"),
+            sp.GetRequiredService<ILogger<WindowsToastNotifier>>())
+        : new NullNotifier(sp.GetRequiredService<ILogger<NullNotifier>>()));
+builder.Services.AddSingleton(sp =>
+{
+    var projects = sp.GetRequiredService<ProjectRegistry>();
+    return new NotificationCenter(sp.GetRequiredService<INotifier>(), new DashboardAddress(port),
+        id => projects.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id,
+        sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<NotificationCenter>>());
+});
 
 var app = builder.Build();
 
