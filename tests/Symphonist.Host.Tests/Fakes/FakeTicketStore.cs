@@ -214,10 +214,13 @@ public sealed class FakeTicketStore : ITicketStore
         return Task.CompletedTask;
     }
 
-    public Task RemoveProviderPauseAsync(string key, CancellationToken ct)
+    /// <summary>When set, RemoveProviderPauseAsync waits for it before removing (a write already under way).</summary>
+    public TaskCompletionSource? HoldPauseRemoval { get; set; }
+
+    public async Task RemoveProviderPauseAsync(string key, CancellationToken ct)
     {
+        if (HoldPauseRemoval is { } hold) await hold.Task;
         lock (sync) ProviderPauses.RemoveAll(p => p.Key == key);
-        return Task.CompletedTask;
     }
 
     public Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)

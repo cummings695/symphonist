@@ -108,4 +108,23 @@ public sealed class ProviderLimitsTests
         Assert.False(await limits.TryStartAsync(Claude, ct));
         Assert.True(await limits.TryStartAsync("codex:chatgpt", ct));
     }
+
+    [Fact]
+    public async Task A_pause_during_a_lift_is_not_lost_from_the_store()
+    {
+        var limits = New();
+        await limits.PauseAsync(Claude, new UsageLimit(time.GetUtcNow().AddHours(1)), ct);
+        time.Advance(TimeSpan.FromHours(1));
+
+        var hold = store.HoldPauseRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lift = limits.TryStartAsync(Claude, ct);
+        var repause = limits.PauseAsync(Claude, new UsageLimit(time.GetUtcNow().AddHours(3)), ct);
+        await Task.Delay(50);
+        hold.SetResult();
+        await Task.WhenAll(lift, repause);
+
+        var stored = Assert.Single(await store.ProviderPausesAsync(ct));
+        Assert.Equal(limits.Pauses, [stored]);
+        Assert.Equal(time.GetUtcNow().AddHours(3), stored.ResetsAt);
+    }
 }

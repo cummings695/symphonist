@@ -12,6 +12,8 @@ public sealed class ProviderLimits(ITicketStore store, TimeProvider time)
     /// <summary>How often one job may probe a paused provider whose reset time is unknown.</summary>
     public static readonly TimeSpan ProbeInterval = TimeSpan.FromMinutes(30);
 
+    // gate serializes whole mutate-and-persist operations so store order matches memory order; sync guards the dictionary for reads.
+    private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Lock sync = new();
     private readonly Dictionary<string, ProviderPause> pauses = new(StringComparer.Ordinal);
 
@@ -26,12 +28,17 @@ public sealed class ProviderLimits(ITicketStore store, TimeProvider time)
 
     public async Task LoadAsync(CancellationToken ct)
     {
-        var stored = await store.ProviderPausesAsync(ct);
-        lock (sync)
+        await gate.WaitAsync(ct);
+        try
         {
-            pauses.Clear();
-            foreach (var p in stored) pauses[p.Key] = p;
+            var stored = await store.ProviderPausesAsync(ct);
+            lock (sync)
+            {
+                pauses.Clear();
+                foreach (var p in stored) pauses[p.Key] = p;
+            }
         }
+        finally { gate.Release(); }
         Changed?.Invoke();
     }
 
@@ -39,36 +46,40 @@ public sealed class ProviderLimits(ITicketStore store, TimeProvider time)
     public async Task<bool> TryStartAsync(string key, CancellationToken ct)
     {
         var now = time.GetUtcNow();
-        ProviderPause? probed = null;
         var lifted = false;
+        var probed = false;
         bool allowed;
-        lock (sync)
+        await gate.WaitAsync(ct);
+        try
         {
-            if (!pauses.TryGetValue(key, out var pause)) return true;
+            ProviderPause? pause;
+            lock (sync) pauses.TryGetValue(key, out pause);
+            if (pause is null) return true;
+
             if (pause.ResetsAt is { } resets)
             {
                 allowed = now >= resets;
-                if (allowed) lifted = pauses.Remove(key);
+                if (allowed)
+                {
+                    await store.RemoveProviderPauseAsync(key, ct);
+                    lock (sync) pauses.Remove(key);
+                    lifted = true;
+                }
             }
             else if (pause.NextProbeAt is not { } next || now >= next)
             {
                 allowed = true;
-                pauses[key] = probed = pause with { NextProbeAt = now + ProbeInterval };
+                var probe = pause with { NextProbeAt = now + ProbeInterval };
+                await store.SaveProviderPauseAsync(probe, ct);
+                lock (sync) pauses[key] = probe;
+                probed = true;
             }
             else allowed = false;
         }
+        finally { gate.Release(); }
 
-        if (lifted)
-        {
-            await store.RemoveProviderPauseAsync(key, ct);
-            Resumed?.Invoke(key);
-            Changed?.Invoke();
-        }
-        else if (probed is not null)
-        {
-            await store.SaveProviderPauseAsync(probed, ct);
-            Changed?.Invoke();
-        }
+        if (lifted) Resumed?.Invoke(key);
+        if (lifted || probed) Changed?.Invoke();
         return allowed;
     }
 
@@ -78,15 +89,18 @@ public sealed class ProviderLimits(ITicketStore store, TimeProvider time)
         var now = time.GetUtcNow();
         ProviderPause pause;
         bool isNew;
-        lock (sync)
+        await gate.WaitAsync(ct);
+        try
         {
-            isNew = !pauses.TryGetValue(key, out var existing);
+            ProviderPause? existing;
+            lock (sync) isNew = !pauses.TryGetValue(key, out existing);
             pause = new ProviderPause(key, existing?.Since ?? now, limit.ResetsAt,
                 limit.ResetsAt is null ? now + ProbeInterval : null);
-            pauses[key] = pause;
+            await store.SaveProviderPauseAsync(pause, ct);
+            lock (sync) pauses[key] = pause;
         }
+        finally { gate.Release(); }
 
-        await store.SaveProviderPauseAsync(pause, ct);
         if (isNew) Paused?.Invoke(pause);
         Changed?.Invoke();
     }
@@ -96,11 +110,17 @@ public sealed class ProviderLimits(ITicketStore store, TimeProvider time)
 
     public async Task ResumeAsync(string key, CancellationToken ct)
     {
-        bool removed;
-        lock (sync) removed = pauses.Remove(key);
-        if (!removed) return;
+        await gate.WaitAsync(ct);
+        try
+        {
+            bool present;
+            lock (sync) present = pauses.ContainsKey(key);
+            if (!present) return;
+            await store.RemoveProviderPauseAsync(key, ct);
+            lock (sync) pauses.Remove(key);
+        }
+        finally { gate.Release(); }
 
-        await store.RemoveProviderPauseAsync(key, ct);
         Resumed?.Invoke(key);
         Changed?.Invoke();
     }
