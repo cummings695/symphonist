@@ -57,6 +57,10 @@ namespace Symphonist.Integrations.Storage.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("LastSourceStatus")
                         .HasColumnType("TEXT");
 
@@ -93,6 +97,12 @@ namespace Symphonist.Integrations.Storage.Migrations
 
                     b.Property<long?>("ReleasePullRequestId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ReleaseSummary")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ReleaseTicketId")
+                        .HasColumnType("TEXT");
 
                     b.Property<bool>("ReviewDue")
                         .HasColumnType("INTEGER");

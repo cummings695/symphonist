@@ -766,7 +766,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             verdict = verdict.WithForcedHighFirst(unconfirmed);
         }
         await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
-            p.Review.Mode, stage.Gate, verdict), ct);
+            p.Review.Mode, p.GateOf(stage), verdict), ct);
 
         var allowAutoApprove = true;
         if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)

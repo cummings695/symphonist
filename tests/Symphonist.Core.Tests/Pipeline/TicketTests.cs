@@ -36,6 +36,7 @@ public class TicketTests
         if (t == typeof(StageStatus)) return (StageStatus)(n % 5 + 1);
         if (t == typeof(bool)) return n != 0;
         if (t == typeof(RiskLevel)) return n == 0 ? RiskLevel.Low : RiskLevel.High;
+        if (t == typeof(TicketKind)) return n == 0 ? TicketKind.Work : TicketKind.Release;
         throw new NotSupportedException($"add a sample value for {type} (property type new to Ticket)");
     }
 }

@@ -202,7 +202,8 @@ public static partial class OnboardingProposalParser
                 var match = statuses.FirstOrDefault(s => string.Equals(s.Name.Trim(), value, StringComparison.OrdinalIgnoreCase));
                 var why = match is null ? "not a status of this project"
                     : stage.Kind == StageKind.Done && field != StatusField.OnEnter ? "a done stage only takes on_enter_status"
-                    : field == StatusField.Gate && stage.Gate == GatePolicy.None ? $"stage {stage.Id} has no gate"
+                    : field == StatusField.Gate && ProjectConfig.EffectiveGate(stage.Kind, stage.Gate) == GatePolicy.None
+                        ? $"stage {stage.Id} has no gate"
                     : null;
                 if (why is null) return match!.Name;
                 dropped.Add($"dropped status '{value}' for stage {stage.Id}: {why}");

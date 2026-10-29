@@ -233,6 +233,47 @@ public sealed class SqliteTicketStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Existing_tickets_load_as_work_kind()
+    {
+        var path = Path.Combine(_dir, "old.db");
+        await using (var db = new SymphonistDbContext(new DbContextOptionsBuilder<SymphonistDbContext>().UseSqlite($"Data Source={path}").Options))
+        {
+            await db.GetService<IMigrator>().MigrateAsync("20261029053802_Touches");
+            // The entity now has release columns the old schema lacks, so insert with raw SQL.
+            await db.Database.OpenConnectionAsync();
+            await using var cmd = (SqliteCommand)db.Database.GetDbConnection().CreateCommand();
+            cmd.CommandText = "INSERT INTO Tickets (Id, ProjectId, Key, Title, StageId, Status, Attempts, CreatedAt, UpdatedAt, " +
+                "ReviewDue, EvidenceDue, MergeHolds) VALUES ($id, 'orders', 'ORD-1', 'old', 'release', 'Pending', 0, $n, $n, 0, 0, 0)";
+            cmd.Parameters.AddWithValue("$id", Guid.NewGuid().ToString().ToUpperInvariant());
+            cmd.Parameters.AddWithValue("$n", new DateTimeOffsetToBinaryConverter().ConvertToProvider(Now));
+            await cmd.ExecuteNonQueryAsync();
+        }
+        SqliteConnection.ClearAllPools();
+
+        var found = await new SqliteTicketStore(path).FindAsync("orders", "ORD-1", default);
+
+        Assert.NotNull(found);
+        Assert.Equal(TicketKind.Work, found.Kind);
+        Assert.Null(found.ReleaseTicketId);
+        Assert.Null(found.ReleaseSummary);
+    }
+
+    [Fact]
+    public async Task Release_fields_round_trip()
+    {
+        var release = NewTicket("_release-1", "release", StageStatus.Pending);
+        release.Kind = TicketKind.Release;
+        release.ReleaseSummary = "Tickets:\n- ORD-1: t";
+        var member = NewTicket("ORD-1", "release", StageStatus.Pending);
+        member.ReleaseTicketId = release.Id;
+        await _store.SaveAsync(release, default);
+        await _store.SaveAsync(member, default);
+
+        Assert.Equivalent(release, await _store.FindAsync("orders", "_release-1", default), strict: true);
+        Assert.Equivalent(member, await _store.FindAsync("orders", "ORD-1", default), strict: true);
+    }
+
+    [Fact]
     public async Task Concurrent_saves_do_not_fail()
     {
         var tickets = Enumerable.Range(0, 20).Select(i => NewTicket("K" + i, "plan", StageStatus.Pending)).ToList();

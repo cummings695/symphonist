@@ -100,11 +100,25 @@ public sealed record ProjectConfig(string Id, string Name, TrackerConfig Tracker
         kind is StageKind.Triage or StageKind.Plan or StageKind.Implement or StageKind.Release;
 
     public bool Reviews(StageDefinition stage) =>
-        Review.Mode != ReviewMode.Off && stage.Gate != GatePolicy.None && IsReviewable(stage.Kind);
+        Review.Mode != ReviewMode.Off && GateOf(stage) != GatePolicy.None && IsReviewable(stage.Kind);
 
     /// <summary>Evidence applies to this stage's gate rounds: mode not off, implement kind, a gate.</summary>
     public bool WantsEvidence(StageDefinition stage) =>
-        Evidence.Mode != EvidenceMode.Off && stage.Gate != GatePolicy.None && stage.Kind == StageKind.Implement;
+        Evidence.Mode != EvidenceMode.Off && GateOf(stage) != GatePolicy.None && stage.Kind == StageKind.Implement;
+
+    /// <summary>
+    /// The gate a stage's rounds actually have: its configured gate, except that a release always needs one more
+    /// approval after Release now, so a release stage with no gate waits on the developer. Every read that decides
+    /// behaviour goes through this; only config editing reads the raw <see cref="StageDefinition.Gate"/>.
+    /// </summary>
+    public GatePolicy GateOf(StageDefinition stage) => EffectiveGate(stage.Kind, stage.Gate);
+
+    /// <inheritdoc cref="GateOf"/>
+    public static GatePolicy EffectiveGate(StageKind kind, GatePolicy gate) =>
+        kind == StageKind.Release && gate == GatePolicy.None ? GatePolicy.Human : gate;
+
+    /// <summary>The first release-kind stage, where tickets wait to ship in a release batch; null when there is none.</summary>
+    public StageDefinition? ReleaseStage => Pipeline.FirstOrDefault(s => s.Kind == StageKind.Release);
 
     /// <summary>The agent a stage's runs use: its override, else the project <see cref="Agent"/> (also for an unknown id).</summary>
     public AgentSettings AgentFor(string stageId) =>

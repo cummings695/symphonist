@@ -4,10 +4,17 @@ namespace Symphonist.Core.Pipeline;
 
 public enum StageStatus { Pending, Running, AwaitingApproval, Approved, Blocked, Done }
 
+/// <summary>
+/// A tracker ticket's work, or a Symphonist-owned release batch (key <c>_release-{n}</c>) at the project's release stage
+/// whose PR ships its members.
+/// </summary>
+public enum TicketKind { Work, Release }
+
 public sealed class Ticket
 {
     public Guid Id { get; set; }
     public string ProjectId { get; set; } = "";
+    public TicketKind Kind { get; set; } = TicketKind.Work;
     public string Key { get; set; } = "";
     public string Title { get; set; } = "";
     public string StageId { get; set; } = "";
@@ -29,6 +36,12 @@ public sealed class Ticket
     public string? MergeCommit { get; set; }
     public long? ReleasePullRequestId { get; set; }
     public string? ReleaseMergeCommit { get; set; }
+
+    /// <summary>For a work ticket: the release ticket of the open batch it ships in; null when in none.</summary>
+    public Guid? ReleaseTicketId { get; set; }
+
+    /// <summary>For a release ticket: the release PR's body, naming every ticket it ships.</summary>
+    public string? ReleaseSummary { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? StageStartedAt { get; set; }

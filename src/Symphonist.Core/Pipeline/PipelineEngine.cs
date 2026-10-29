@@ -50,7 +50,7 @@ public static class PipelineEngine
             return Deferred(pending, SendBackTo(t, target, latestFeedback, now));
 
         TransitionOutcome outcome;
-        if (stage.Gate != GatePolicy.None)
+        if (p.GateOf(stage) != GatePolicy.None)
         {
             t.Status = StageStatus.AwaitingApproval;
             t.WaitingSince = ToStoredPrecision(now);
@@ -124,7 +124,7 @@ public static class PipelineEngine
     /// <summary>The gate isn't waiting on the developer yet: an active auto gate whose review is still owed.</summary>
     public static bool WaitsOnReviewer(ProjectConfig p, Ticket t) =>
         t.Status == StageStatus.AwaitingApproval && t.ReviewDue
-        && p.Stage(t.StageId).Gate == GatePolicy.AutoWhenLowRisk && p.Review.Mode == ReviewMode.Active;
+        && p.GateOf(p.Stage(t.StageId)) == GatePolicy.AutoWhenLowRisk && p.Review.Mode == ReviewMode.Active;
 
     /// <summary>
     /// The reviewer judged the round (<paramref name="waitingSince"/>): record the verdict and, for a low verdict at an
@@ -214,21 +214,109 @@ public static class PipelineEngine
     public static TransitionOutcome PostApprovalCompleted(ProjectConfig p, Ticket t, DateTimeOffset now)
     {
         if (t.Status != StageStatus.Approved) return NoChange($"{t.StageId} is not approved");
+        if (t.Kind == TicketKind.Release)
+        {
+            // The release PR merged: the batch is complete; its members move on, not the release ticket.
+            t.Status = StageStatus.Done;
+            t.UpdatedAt = now;
+            return new(true, null, "release merged");
+        }
         return StageRemoved(p, t) ?? Advance(p, t, p.Stage(t.StageId), now);
     }
 
+    /// <summary>
+    /// A send-back. For a release ticket (whatever the target) it ends the release: the PR is to be closed and its
+    /// members return to ready to release; the developer's comment stays on the release ticket.
+    /// </summary>
     public static TransitionOutcome SendBack(ProjectConfig p, Ticket t, string? feedback, string? toStageId, DateTimeOffset now)
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked))
             return NoChange($"cannot send back from {t.Status}");
-        if (toStageId is null && StageRemoved(p, t) is { } removed) return removed;
         // Only a send-back from the waiting gate decides a round; one from Approved or Blocked does not.
         var decision = t.Status == StageStatus.AwaitingApproval ? DecisionOn(t, GateDecision.SentBack) : null;
+        if (t.Kind == TicketKind.Release)
+        {
+            t.Status = StageStatus.Done;
+            t.Feedback = feedback;
+            t.PendingSourceStatus = null;
+            t.WaitingSince = null;
+            t.ReviewDue = false;
+            t.EvidenceDue = false;
+            t.UpdatedAt = now;
+            ClearApprovedHeads(t);
+            return new(true, null, "release cancelled", decision, TouchKind.SendBack);
+        }
+        if (toStageId is null && StageRemoved(p, t) is { } removed) return removed;
         return SendBackTo(t, p.Stage(toStageId ?? t.StageId), feedback, now) with { Decision = decision };
+    }
+
+    /// <summary>Creates release ticket <c>_release-{number}</c>, waiting to run (open its PR) at the release stage.</summary>
+    public static Ticket CreateRelease(ProjectConfig p, int number, string title, string branch, string summary,
+        DateTimeOffset now) => new()
+        {
+            Id = Guid.NewGuid(),
+            ProjectId = p.Id,
+            Kind = TicketKind.Release,
+            Key = $"_release-{number}",
+            Title = title,
+            StageId = p.ReleaseStage!.Id,
+            Status = StageStatus.Pending,
+            Branch = branch,
+            ReleaseSummary = summary,
+            CreatedAt = now,
+            UpdatedAt = now,
+            StageStartedAt = now,
+        };
+
+    /// <summary>
+    /// A work ticket waiting at the release stage for the next batch: not in one already, and not a ticket that
+    /// opened its own release PR before batches (that one finishes the old way).
+    /// </summary>
+    public static bool IsReadyToRelease(ProjectConfig p, Ticket t) =>
+        t.Kind == TicketKind.Work && p.ReleaseStage is { } release && t.StageId == release.Id
+        && t.Status == StageStatus.Pending && t.ReleaseTicketId is null && t.ReleasePullRequestId is null;
+
+    /// <summary>
+    /// The batch <paramref name="member"/> shipped in merged as <paramref name="mergeCommit"/>: it leaves the batch and
+    /// moves past the release stage (to the next stage, or Done), even from an earlier stage (it shipped anyway). A
+    /// card the developer moved back to an earlier stage while the batch was open sends it there instead.
+    /// </summary>
+    public static TransitionOutcome ReleaseCompleted(ProjectConfig p, Ticket member, string mergeCommit, DateTimeOffset now)
+    {
+        var release = p.ReleaseStage!;
+        member.ReleaseTicketId = null;
+        member.ReleaseMergeCommit = mergeCommit;
+        var pending = member.PendingSourceStatus;
+
+        if (pending is not null && EarlierStageFor(p, release.Id, pending) is { } back)
+        {
+            // Not a touch: the card move was already the developer's.
+            EnterStage(member, back, now);
+            return new(true, back.OnEnterStatus, $"released; sent back to {back.Id}: card moved to '{pending}'");
+        }
+
+        EnterStage(member, release, now); // also ends whatever an also-shipped member was doing at its earlier stage
+        var advanced = Advance(p, member, release, now);
+        return advanced with { Message = $"released; {advanced.Message}" };
+    }
+
+    /// <summary>
+    /// <paramref name="member"/>'s batch (<paramref name="releaseKey"/>) was cancelled: it leaves the batch, ready to
+    /// release again, or, if it was also shipped from an earlier stage, carrying on with its own stages.
+    /// </summary>
+    public static TransitionOutcome ReleaseCancelled(ProjectConfig p, Ticket member, string releaseKey, DateTimeOffset now)
+    {
+        member.ReleaseTicketId = null;
+        member.UpdatedAt = now;
+        return new(true, null, member.StageId == p.ReleaseStage?.Id
+            ? $"{releaseKey} cancelled; ready to release again"
+            : $"{releaseKey} cancelled; back to its own progress");
     }
 
     public static TransitionOutcome SourceStatusChanged(ProjectConfig p, Ticket t, string newStatus, string? latestFeedback, DateTimeOffset now)
     {
+        // A release ticket has no tracker card; card moves never decide a release.
+        if (t.Kind == TicketKind.Release) return NoChange("a release ticket has no tracker card");
         var unchanged = Same(t.LastSourceStatus, newStatus);
         t.LastSourceStatus = newStatus;
         if (unchanged) return NoChange("source status unchanged");

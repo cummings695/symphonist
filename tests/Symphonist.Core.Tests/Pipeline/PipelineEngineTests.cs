@@ -806,4 +806,167 @@ public class PipelineEngineTests
         PipelineEngine.SendBack(p, back, "fix", null, Now);
         Assert.Null(back.PrFeedbackJson);
     }
+
+    // Release batches
+
+    private static Ticket Member(string stageId, StageStatus status = StageStatus.Pending)
+    {
+        var t = At(stageId, status); t.ReleaseTicketId = Guid.NewGuid();
+        return t;
+    }
+
+    private static Ticket WaitingRelease(ProjectConfig p)
+    {
+        var t = PipelineEngine.CreateRelease(p, 1, "Release 1: ORD-1", "symphonist/release-1", "Tickets:", Now);
+        PipelineEngine.StageSucceeded(p, t, Now);
+        return t;
+    }
+
+    [Fact] public void Release_ticket_waits_for_approval_even_with_gate_none()
+    {
+        var p = With("release", GatePolicy.None, ReviewMode.Off);
+        var t = PipelineEngine.CreateRelease(p, 3, "Release 3: ORD-1", "symphonist/release-3", "Tickets:\n- ORD-1: t", Now);
+
+        Assert.Equal(TicketKind.Release, t.Kind);
+        Assert.Equal("_release-3", t.Key);
+        Assert.Equal("Release 3: ORD-1", t.Title);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("symphonist/release-3", t.Branch);
+        Assert.Equal("Tickets:\n- ORD-1: t", t.ReleaseSummary);
+        Assert.Equal("orders", t.ProjectId);
+        Assert.NotEqual(Guid.Empty, t.Id);
+
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+        Assert.Equal(Now, t.WaitingSince);
+    }
+
+    [Fact] public void Ready_to_release_excludes_batched_and_legacy_tickets()
+    {
+        Assert.True(PipelineEngine.IsReadyToRelease(P, At("release")));
+        Assert.Equal(TicketKind.Work, At("release").Kind);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, Member("release")));
+        var legacy = At("release"); legacy.ReleasePullRequestId = 7;
+        Assert.False(PipelineEngine.IsReadyToRelease(P, legacy));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, PipelineEngine.CreateRelease(P, 1, "R", "b", "s", Now)));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, At("build")));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, At("release", StageStatus.Blocked)));
+        var noRelease = P with { Pipeline = P.Pipeline.Where(s => s.Kind != StageKind.Release).ToList() };
+        Assert.False(PipelineEngine.IsReadyToRelease(noRelease, At("deploy")));
+    }
+
+    [Fact] public void Release_completed_moves_member_past_release()
+    {
+        var t = Member("release");
+        var o = PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Null(o.Touch);
+    }
+
+    [Fact] public void Release_completed_without_later_stages_is_done()
+    {
+        var p = P with { Pipeline = P.Pipeline.TakeWhile(s => s.Kind != StageKind.Deploy).ToList() };
+        var t = Member("release");
+        var o = PipelineEngine.ReleaseCompleted(p, t, "abc123", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Null(t.ReleaseTicketId);
+    }
+
+    [Fact] public void Release_completed_applies_a_card_moved_back()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Planned"; t.PendingSourceStatus = "Planned";
+        var o = PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Equal("released; sent back to plan: card moved to 'Planned'", o.Message);
+        Assert.Null(o.Touch);
+        Assert.Null(o.Decision);
+    }
+
+    [Fact] public void Release_completed_ignores_a_card_moved_to_approved_status()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Id == "release" ? s with { ApprovedWhenStatus = "Released" } : s).ToList(),
+        };
+        var t = Member("release"); t.LastSourceStatus = "Released"; t.PendingSourceStatus = "Released";
+        PipelineEngine.ReleaseCompleted(p, t, "abc123", Now);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+    }
+
+    [Fact] public void Release_completed_finishes_an_also_shipped_member()
+    {
+        var t = Member("build", StageStatus.Running);
+        PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+    }
+
+    [Fact] public void Release_cancelled_returns_member_to_ready_or_its_own_progress()
+    {
+        var ready = Member("release");
+        var o = PipelineEngine.ReleaseCancelled(P, ready, "_release-2", Now);
+        Assert.True(o.Changed);
+        Assert.Null(ready.ReleaseTicketId);
+        Assert.Equal("_release-2 cancelled; ready to release again", o.Message);
+        Assert.True(PipelineEngine.IsReadyToRelease(P, ready));
+
+        var shipped = Member("build");
+        Assert.Equal("_release-2 cancelled; back to its own progress", PipelineEngine.ReleaseCancelled(P, shipped, "_release-2", Now).Message);
+        Assert.Null(shipped.ReleaseTicketId);
+        Assert.Equal("build", shipped.StageId);
+    }
+
+    [Fact] public void Send_back_of_release_ticket_cancels_it()
+    {
+        var t = WaitingRelease(P); t.ReviewDue = true;
+        var waiting = t.WaitingSince!.Value;
+        var o = PipelineEngine.SendBack(P, t, "not this week", "plan", Now.AddMinutes(1));
+        Assert.True(o.Changed);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal("not this week", t.Feedback);
+        Assert.Null(t.WaitingSince);
+        Assert.False(t.ReviewDue);
+        Assert.Equal("release cancelled", o.Message);
+        Assert.Equal(new GateDecisionInfo("release", waiting, GateDecision.SentBack, Auto: false), o.Decision);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+        Assert.Null(o.SourceStatusToSet);
+    }
+
+    [Fact] public void Merged_release_ticket_is_done_not_advanced()
+    {
+        var t = WaitingRelease(P);
+        Assert.True(PipelineEngine.Approve(P, t, Now).Changed);
+        Assert.Equal(StageStatus.Approved, t.Status);
+        var o = PipelineEngine.PostApprovalCompleted(P, t, Now);
+        Assert.True(o.Changed);
+        Assert.Equal("release merged", o.Message);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("release", t.StageId);
+    }
+
+    [Fact] public void Card_moves_never_decide_a_release_ticket()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Id == "release" ? s with { ApprovedWhenStatus = "Released" } : s).ToList(),
+        };
+        var t = WaitingRelease(p);
+        Assert.False(PipelineEngine.SourceStatusChanged(p, t, "Released", null, Now).Changed);
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+    }
 }

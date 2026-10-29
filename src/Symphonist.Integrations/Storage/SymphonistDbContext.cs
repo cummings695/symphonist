@@ -111,6 +111,8 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.HasKey(t => t.Id);
             e.HasIndex(t => new { t.ProjectId, t.Key }).IsUnique();
             e.Property(t => t.Status).HasConversion<string>();
+            // Rows from before release batches are work tickets: the migration's column default is "Work".
+            e.Property(t => t.Kind).HasConversion<string>();
             e.Property(t => t.CreatedAt).HasConversion(dto);
             e.Property(t => t.UpdatedAt).HasConversion(dto);
             e.Property(t => t.StageStartedAt).HasConversion(dto);

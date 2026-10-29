@@ -166,7 +166,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
             known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews,
             project?.Name ?? t.ProjectId,
-            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, s.Gate)).ToList() ?? [], evidence);
+            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, project.GateOf(s))).ToList() ?? [], evidence);
     }
 
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
