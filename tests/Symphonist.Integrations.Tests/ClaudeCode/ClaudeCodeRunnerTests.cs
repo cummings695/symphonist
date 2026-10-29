@@ -95,6 +95,32 @@ public class ClaudeCodeRunnerTests
     }
 
     [Fact]
+    public async Task Host_mode_denies_edits_to_attachments_dir()
+    {
+        await runner.RunAsync(Request(Isolation.Host, tools: ["Read", "Edit", "Write"], attachments: "/att/T-1"), default);
+        Assert.Equal("Edit(//att/T-1/**),Write(//att/T-1/**)", ArgAfter(fake.Last, "--disallowedTools"));
+    }
+
+    [Fact]
+    public async Task Host_mode_denies_edits_to_windows_attachments_dir_in_posix_form()
+    {
+        await runner.RunAsync(Request(Isolation.Host, tools: ["Read"], attachments: @"C:\Users\me\.symphonist\att\T-1\"),
+            default);
+        Assert.Equal("Edit(//c/Users/me/.symphonist/att/T-1/**),Write(//c/Users/me/.symphonist/att/T-1/**)",
+            ArgAfter(fake.Last, "--disallowedTools"));
+    }
+
+    [Fact]
+    public async Task Read_only_host_run_with_attachments_passes_one_merged_deny_list()
+    {
+        await runner.RunAsync(Request(Isolation.Host, tools: ["Read"], attachments: "/att/T-1")
+            with { OutputSchema = GateReviewSchema.Json, ReadOnlyWorkspace = true }, default);
+        Assert.Single(fake.Last.Arguments, a => a == "--disallowedTools");
+        Assert.Equal(string.Join(",", [.. ClaudeCodeRunner.ReadOnlyDeniedTools, "Edit(//att/T-1/**)", "Write(//att/T-1/**)"]),
+            ArgAfter(fake.Last, "--disallowedTools"));
+    }
+
+    [Fact]
     public async Task Container_mode_does_not_add_dir()
     {
         await runner.RunAsync(Request(Isolation.Container, attachments: "/att/T-1"), default);
