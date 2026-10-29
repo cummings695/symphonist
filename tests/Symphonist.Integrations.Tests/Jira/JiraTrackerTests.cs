@@ -234,7 +234,7 @@ public class JiraTrackerTests
 
         await tracker.DownloadAttachmentAsync("PROJ-1", Csv, dest, CancellationToken.None);
 
-        Assert.Equal("a,b\n1,2\n",Encoding.UTF8.GetString(dest.ToArray()));
+        Assert.Equal("a,b\n1,2\n", Encoding.UTF8.GetString(dest.ToArray()));
         Assert.StartsWith("Basic ", stub.Authorizations[^1]);
     }
 
