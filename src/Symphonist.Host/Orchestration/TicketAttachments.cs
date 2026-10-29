@@ -120,6 +120,11 @@ public static class TicketAttachments
         return new AttachmentSet(dir, entries);
     }
 
+    /// <summary>Every attachment on the ticket listed as Unavailable for <paramref name="reason"/>, oldest first.</summary>
+    public static AttachmentSet Unavailable(string projectId, string key, SourceTicket? source, string reason) =>
+        new(DirectoryFor(projectId, key), (source?.AttachmentList ?? []).OrderBy(a => a.Created)
+            .Select(a => Entry(a, AttachmentState.Unavailable, null, reason)).ToList());
+
     /// <summary>
     /// The error to fail the stage with when one of <paramref name="paths"/> ('/'-separated, relative to
     /// <paramref name="workspace"/>) is a byte-identical copy of an Available attachment; null otherwise. Empty attachments

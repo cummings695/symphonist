@@ -381,6 +381,36 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Contains("gone.png  unavailable: attachment 2 not found", prompt);
     }
 
+    [Fact] public async Task Attachment_sync_failure_degrades_the_run_instead_of_failing_it()
+    {
+        // A file where the ticket's attachment directory belongs makes creating the directory fail.
+        var dir = TicketAttachments.DirectoryFor("orders", "ORD-1");
+        Directory.CreateDirectory(Path.GetDirectoryName(dir)!);
+        File.WriteAllText(dir, "in the way");
+
+        var r = await executor.ExecuteAsync(project, io, At("triage"), WithAttachments(Attach("10002", "orders.csv", 8)),
+            CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Null(Assert.Single(agent.Requests).AttachmentsDirectory);
+        Assert.Single(store.AgentRuns);
+        Assert.Contains("orders.csv  unavailable: could not sync attachments:", agent.Prompts[0]);
+    }
+
+    [Fact] public async Task Cancelled_attachment_sync_propagates()
+    {
+        using var cts = new CancellationTokenSource();
+        tracker.OnDownload = async (_, _, _) =>
+        {
+            await cts.CancelAsync();
+            throw new OperationCanceledException(cts.Token);
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => executor.ExecuteAsync(project, io, At("triage"),
+            WithAttachments(Attach("10002", "orders.csv", 8)), cts.Token));
+        Assert.Empty(agent.Requests);
+    }
+
     [Fact] public async Task Hostile_attachment_name_is_fenced()
     {
         // Unavailable (no content): the raw name is listed, not the sanitized local name.

@@ -257,7 +257,16 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
-        var attachments = await TicketAttachments.SyncAsync(io.Tracker, p.Id, t.Key, source, ct);
+        AttachmentSet attachments;
+        try
+        {
+            attachments = await TicketAttachments.SyncAsync(io.Tracker, p.Id, t.Key, source, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // Missing attachments degrade the run, never block it.
+            attachments = TicketAttachments.Unavailable(p.Id, t.Key, source, $"could not sync attachments: {e.Message}");
+        }
         var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind),
             PromptValues.For(p, t, source, branch, t.Feedback ?? "", attachments));
 
