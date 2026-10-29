@@ -70,6 +70,14 @@ public sealed class GateDecisionEntity
     public DateTimeOffset At { get; set; }
 }
 
+public sealed class ProviderPauseEntity
+{
+    public string Key { get; set; } = "";
+    public DateTimeOffset Since { get; set; }
+    public DateTimeOffset? ResetsAt { get; set; }
+    public DateTimeOffset? NextProbeAt { get; set; }
+}
+
 public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> options) : DbContext(options)
 {
     public DbSet<Ticket> Tickets => Set<Ticket>();
@@ -78,6 +86,8 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
     public DbSet<GateReviewEntity> GateReviews => Set<GateReviewEntity>();
     public DbSet<GateDecisionEntity> GateDecisions => Set<GateDecisionEntity>();
     public DbSet<EvidenceEntity> Evidence => Set<EvidenceEntity>();
+
+    public DbSet<ProviderPauseEntity> ProviderPauses => Set<ProviderPauseEntity>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -131,6 +141,14 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(x => x.WaitingSince).HasConversion(dto);
             e.Property(x => x.At).HasConversion(dto);
             e.Property(x => x.Decision).HasConversion<string>();
+        });
+
+        b.Entity<ProviderPauseEntity>(e =>
+        {
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Since).HasConversion(dto);
+            e.Property(x => x.ResetsAt).HasConversion(dto);
+            e.Property(x => x.NextProbeAt).HasConversion(dto);
         });
 
         b.Entity<EvidenceEntity>(e =>

@@ -197,6 +197,29 @@ public sealed class FakeTicketStore : ITicketStore
                 .GroupBy(r => r.TicketId).ToDictionary(g => g.Key, g => g.Sum(r => r.CostUsd!.Value)));
     }
 
+    public List<ProviderPause> ProviderPauses { get; } = [];
+
+    public Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)
+    {
+        lock (sync) return Task.FromResult<IReadOnlyList<ProviderPause>>(ProviderPauses.ToList());
+    }
+
+    public Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct)
+    {
+        lock (sync)
+        {
+            ProviderPauses.RemoveAll(p => p.Key == pause.Key);
+            ProviderPauses.Add(pause);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task RemoveProviderPauseAsync(string key, CancellationToken ct)
+    {
+        lock (sync) ProviderPauses.RemoveAll(p => p.Key == key);
+        return Task.CompletedTask;
+    }
+
     public Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)
     {
         if (ResetError is not null) throw ResetError;

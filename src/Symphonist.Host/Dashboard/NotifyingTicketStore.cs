@@ -21,6 +21,12 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
 
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct) => inner.AgentCostsAsync(ct);
 
+    public Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct) => inner.ProviderPausesAsync(ct);
+
+    public Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct) => inner.SaveProviderPauseAsync(pause, ct);
+
+    public Task RemoveProviderPauseAsync(string key, CancellationToken ct) => inner.RemoveProviderPauseAsync(key, ct);
+
     public async Task SaveAsync(Ticket ticket, CancellationToken ct)
     {
         await inner.SaveAsync(ticket, ct);

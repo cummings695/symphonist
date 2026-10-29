@@ -356,6 +356,25 @@ namespace Symphonist.Integrations.Storage.Migrations
 
                     b.ToTable("GateReviews");
                 });
+
+            modelBuilder.Entity("Symphonist.Integrations.Storage.ProviderPauseEntity", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("NextProbeAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ResetsAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Since")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("ProviderPauses");
+                });
 #pragma warning restore 612, 618
         }
     }

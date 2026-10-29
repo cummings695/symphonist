@@ -239,6 +239,42 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         return costs.GroupBy(c => c.TicketId).ToDictionary(g => g.Key, g => g.Sum(c => c.Cost));
     }
 
+    public async Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.ProviderPauses.AsNoTracking().ToListAsync(ct);
+        return rows.OrderBy(x => x.Key, StringComparer.Ordinal)
+            .Select(x => new ProviderPause(x.Key, x.Since, x.ResetsAt, x.NextProbeAt)).ToList();
+    }
+
+    public async Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            var row = await db.ProviderPauses.FirstOrDefaultAsync(x => x.Key == pause.Key, ct);
+            if (row is null) db.ProviderPauses.Add(row = new ProviderPauseEntity { Key = pause.Key });
+            row.Since = pause.Since;
+            row.ResetsAt = pause.ResetsAt;
+            row.NextProbeAt = pause.NextProbeAt;
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task RemoveProviderPauseAsync(string key, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.ProviderPauses.RemoveRange(await db.ProviderPauses.Where(x => x.Key == key).ToListAsync(ct));
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
     public async Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)
     {
         await using var db = await OpenAsync(ct);

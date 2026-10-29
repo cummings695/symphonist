@@ -553,4 +553,21 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Equal([true, false], runs.Select(r => r.IsEvidence));
         Assert.False(runs[0].IsReview);
     }
+
+    [Fact]
+    public async Task Provider_pauses_round_trip_and_upsert_by_key()
+    {
+        await _store.SaveProviderPauseAsync(new ProviderPause("claude-code", Now, Now.AddHours(2), null), default);
+        await _store.SaveProviderPauseAsync(new ProviderPause("codex:chatgpt", Now, null, Now.AddMinutes(30)), default);
+        await _store.SaveProviderPauseAsync(new ProviderPause("claude-code", Now, null, Now.AddMinutes(45)), default);
+
+        var pauses = (await _store.ProviderPausesAsync(default)).OrderBy(p => p.Key).ToList();
+        Assert.Equal(
+            [new ProviderPause("claude-code", Now, null, Now.AddMinutes(45)),
+             new ProviderPause("codex:chatgpt", Now, null, Now.AddMinutes(30))], pauses);
+
+        await _store.RemoveProviderPauseAsync("claude-code", default);
+        await _store.RemoveProviderPauseAsync("missing", default);
+        Assert.Equal(["codex:chatgpt"], (await _store.ProviderPausesAsync(default)).Select(p => p.Key));
+    }
 }

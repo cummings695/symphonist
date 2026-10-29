@@ -27,6 +27,10 @@ public interface ITicketStore
     /// <summary>Per ticket with evidence: whether its latest record has issues.</summary>
     Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct);
     Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct);
+    Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct);
+    /// <summary>Creates or replaces the pause for <see cref="ProviderPause.Key"/>.</summary>
+    Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct);
+    Task RemoveProviderPauseAsync(string key, CancellationToken ct);
     Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct);
 }
 
