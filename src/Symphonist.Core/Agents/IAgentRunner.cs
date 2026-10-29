@@ -16,8 +16,9 @@ public static class StageOutputSchema
 
 /// <param name="OutputSchema">JSON schema the agent's structured output must match.</param>
 /// <param name="ReadOnlyWorkspace">The agent must not be able to modify the workspace (e.g. a reviewer).</param>
+/// <param name="AttachmentsDirectory">Host directory of the ticket's downloaded attachments, readable by the agent.</param>
 public sealed record AgentRunRequest(string WorkingDirectory, string Prompt, AgentSettings Settings,
-    string OutputSchema = StageOutputSchema.Json, bool ReadOnlyWorkspace = false);
+    string OutputSchema = StageOutputSchema.Json, bool ReadOnlyWorkspace = false, string? AttachmentsDirectory = null);
 
 /// <param name="Output">The parsed stage output; set only for runs with <see cref="StageOutputSchema"/>.</param>
 /// <param name="Structured">The agent's schema-validated structured output, whatever the schema.</param>

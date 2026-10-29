@@ -43,9 +43,27 @@ public class DockerLauncherTests
     public DockerLauncherTests() =>
         launcher = new DockerLauncher(fake, "/ctx", name => name == "claude-code-token" ? "tok-123" : null);
 
-    private static AgentRunRequest Request(string workDir, string? image = null) =>
+    private static AgentRunRequest Request(string workDir, string? image = null,
+        string? attachments = null) =>
         new(workDir, "prompt",
-            new AgentSettings("claude-code", Isolation.Container, ["api.nuget.org"], [], 5, null, image));
+            new AgentSettings("claude-code", Isolation.Container, ["api.nuget.org"], [], 5, null, image),
+            AttachmentsDirectory: attachments);
+
+    [Fact]
+    public void Wrap_mounts_attachments_read_only_when_set()
+    {
+        var spec = launcher.Wrap(new("claude", ["-p"]), Request("/work/t1", attachments: "/home/s/att/T-1"));
+        var i = spec.Arguments.ToList().IndexOf("/home/s/att/T-1:/attachments:ro");
+        Assert.True(i > 0);
+        Assert.Equal("-v", spec.Arguments[i - 1]);
+    }
+
+    [Fact]
+    public void Wrap_has_no_attachments_mount_when_unset()
+    {
+        var spec = launcher.Wrap(new("claude", ["-p"]), Request("/work/t1"));
+        Assert.DoesNotContain(spec.Arguments, a => a.Contains("/attachments"));
+    }
 
     [Fact]
     public void Wrap_mounts_only_workspace_and_passes_secrets_by_env_name()

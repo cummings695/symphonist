@@ -48,9 +48,10 @@ public class ClaudeCodeRunnerTests
     public ClaudeCodeRunnerTests() => runner = new ClaudeCodeRunner(fake, launcher);
 
     private static AgentRunRequest Request(Isolation isolation = Isolation.Container, string[]? tools = null,
-        string? model = null) =>
+        string? model = null, string? attachments = null) =>
         new("/work", "do the thing",
-            new AgentSettings("claude-code", isolation, [], tools ?? [], 7, model, null));
+            new AgentSettings("claude-code", isolation, [], tools ?? [], 7, model, null),
+            AttachmentsDirectory: attachments);
 
     private static string Fixture(string name) =>
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", name));
@@ -83,6 +84,21 @@ public class ClaudeCodeRunnerTests
         await onHost.RunAsync(Request(Isolation.Host, tools: ["Read"]), default);
         Assert.DoesNotContain("--dangerously-skip-permissions", fake.Last.Arguments);
         Assert.Equal("Read", ArgAfter(fake.Last, "--allowedTools"));
+    }
+
+    [Fact]
+    public async Task Host_mode_adds_attachments_dir()
+    {
+        await runner.RunAsync(Request(Isolation.Host, tools: ["Read"], attachments: "/att/T-1"), default);
+        Assert.Equal("/att/T-1", ArgAfter(fake.Last, "--add-dir"));
+        Assert.Equal("Read", ArgAfter(fake.Last, "--allowedTools"));
+    }
+
+    [Fact]
+    public async Task Container_mode_does_not_add_dir()
+    {
+        await runner.RunAsync(Request(Isolation.Container, attachments: "/att/T-1"), default);
+        Assert.DoesNotContain("--add-dir", fake.Last.Arguments);
     }
 
     [Fact]

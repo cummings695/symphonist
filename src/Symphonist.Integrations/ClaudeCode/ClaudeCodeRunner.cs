@@ -33,6 +33,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
                 return new AgentRunResult(false, null, null, TimeSpan.Zero,
                     $"read-only run refuses write-capable tool '{tool}'", "");
             args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools));
+            if (request.AttachmentsDirectory is { } attachments) { args.Add("--add-dir"); args.Add(attachments); }
         }
         if (request.ReadOnlyWorkspace)
         {
