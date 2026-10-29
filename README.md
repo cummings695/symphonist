@@ -121,8 +121,7 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
 - The API listens on `127.0.0.1` only, port `5199` by default; override with `SYMPHONIST_PORT`. The CLI reads the same
   variable, so set it for both if you change it. The host refuses to serve if it ends up bound to anything else.
 - Every API call needs the token in `~/.symphonist/api-token` (created on first start); the CLI reads it for you.
-- Desktop notifications (Windows toasts for tickets waiting on you, blocked tickets, releases and usage limits) are
-  folded over 30 seconds; set `SYMPHONIST_NOTIFICATIONS=off` to turn them off.
+- Desktop notifications are on by default on Windows; see "Desktop notifications" below for turning them off.
 - State (ticket database, work copies, API token, `paused.json`) lives in `SYMPHONIST_HOME`, default `~/.symphonist`.
 - If any project uses container isolation, the host first removes agent containers left over from a previous run and
   makes sure the agent image (and any `agent.packages` image) exists. The first image build can take several minutes
@@ -176,6 +175,9 @@ symphonist send-back <project> <key> -m "feedback" [--to <stage>]
 symphonist unblock <project> <key>          retry a blocked ticket
 symphonist forget <project> <key>           drop a ticket from Symphonist only (Jira, Bitbucket and the workspace
                                             are untouched; if it still matches the query it is picked up again as new)
+symphonist release <project> [--yes]        Release now: ship the tickets waiting at the release stage as one release
+symphonist limits                           list providers paused by a usage limit
+symphonist limits resume <key>              let a paused provider start jobs again now
 symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
@@ -206,6 +208,62 @@ when the host is back.
 - The dashboard needs its static assets (`blazor.web.js`), so run the host with `dotnet run` / the launch profile
   (Development) or from a `dotnet publish` output. An unpublished build run in Production returns 500 for
   `blazor.web.js`.
+
+### Releases
+
+Tickets that reach a `release` stage wait there instead of each opening their own pull request. **Release now**
+(the button on the board, or `symphonist release <project>`) ships all of them together as one release.
+
+- Release now lists the tickets that will ship, and under "what else ships" any other tickets already merged to
+  `mainBranch` (and whether they finish with this release) and any commits from outside Symphonist. Confirm to
+  continue; `--yes` on the CLI skips the question.
+- Symphonist freezes a copy of `mainBranch` as `symphonist/release-{n}` and opens one pull request from it into the
+  production branch. Later merges to `mainBranch` do not change what ships.
+- A release always waits for one more approval from you, even when the release stage has `gate: none`. Approve it from
+  the dashboard, the CLI, or the PR.
+- Sending a release back cancels it: the PR is closed and the tickets go back to waiting at the release stage.
+- Moving a tracker card never approves a release. Use Symphonist or the PR.
+- A PR merged outside Symphonist completes the release; one closed outside Symphonist cancels it.
+- Release PRs opened per ticket before release batches existed finish the old way.
+
+The same thing is available over the API: `GET /api/projects/{id}/release` previews the release and
+`POST /api/projects/{id}/release` starts it.
+
+### Usage limits
+
+When Claude Code or Codex says you have used up your plan, Symphonist stops starting jobs for that provider and sign-in
+and keeps everything else running. Pauses are per provider and sign-in: `claude-code`, `codex:chatgpt`, and
+`codex:api-key:{secret}` for each Codex API key.
+
+- A pause ends at the reset time the provider gave. Without one, Symphonist tries again every 30 minutes.
+- A plain rate limit pauses for 5 minutes.
+- A pause never costs a ticket an attempt; the job simply runs later.
+- The board shows a badge for each paused provider with a Resume button.
+
+```
+symphonist limits                  list paused providers and when they resume
+symphonist limits resume <key>     let that provider start jobs again now
+```
+
+The API has `GET /api/limits` and `POST /api/limits/resume`.
+
+### Touch stats
+
+How often does a ticket need you? The strip at the top of the board and the Stats page (`/stats`) count touches:
+sending a ticket back, unblocking it, and approving a round the risk reviewer called high risk. The page shows eight
+weekly buckets; weeks start on Monday in your local time.
+
+### Desktop notifications
+
+On Windows, Symphonist shows a notification when a ticket is waiting on you, a ticket is blocked, a release is ready,
+and when a provider is paused by or resumed from a usage limit. Notifications that arrive close together are folded
+into one over 30 seconds, and clicking one opens the dashboard. Set `SYMPHONIST_NOTIFICATIONS=off` to turn them off.
+On macOS and Linux this does nothing yet.
+
+### Reopened tickets
+
+If QA moves the card of a Done ticket to the entry status of a stage, Symphonist restarts the ticket at that stage on
+a fresh branch from `mainBranch`.
 
 ### Working from Jira instead
 

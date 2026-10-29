@@ -31,3 +31,11 @@ a read-only Codex review ignores the reviewed repo's `AGENTS.md` (`-c project_do
 `.codex/config.toml` (fresh `CODEX_HOME`); an API-key run and a ChatGPT run both complete; the developer's
 `~/.codex/auth.json` is intact after a ChatGPT run. If either repo-file guard fails, have `DockerLauncher` mount an
 empty read-only directory over `/workspace/.codex` for read-only Codex runs.
+
+## Deferred from plan 7
+
+- Scheduled release windows.
+- The daily digest.
+- Per-ticket cost and time limits.
+- macOS and Linux notifications.
+- Counting manual fixes as touches.

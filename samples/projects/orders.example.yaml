@@ -82,6 +82,7 @@ pipeline:
   # A stage that switches provider without a model uses that provider's default model.
   - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
   - { id: build,     kind: build }
+  # release: tickets wait here; Release now (dashboard or `symphonist release orders`) opens one PR for all of them from a frozen copy of mainBranch; it always waits for your approval
   - { id: release,   kind: release,   gate: human }
   - { id: deploy,    kind: deploy }
   - { id: done,      kind: done,      onEnterStatus: Done }
