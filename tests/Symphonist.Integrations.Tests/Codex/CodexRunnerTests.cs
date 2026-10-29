@@ -656,7 +656,41 @@ public sealed class CodexRunnerTests : IDisposable
         Assert.Equal("""{"tokens":{"refresh_token":"mine"}}""", File.ReadAllText(DeveloperAuth));
     }
 
-    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    private sealed class FixedTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    [Fact]
+    public async Task Failed_run_with_limit_text_sets_Limit()
+    {
+        var now = new DateTimeOffset(2026, 10, 28, 10, 0, 0, TimeSpan.Zero);
+        fake.Result = new ProcessResult(1, "", "You've hit your usage limit. Try again in 2 hours 5 minutes.", false);
+        var result = await new CodexRunner(fake, launcher, codexHome, runFiles, new FixedTime(now))
+            .RunAsync(Request(), default);
+        Assert.False(result.Succeeded);
+        Assert.Equal(now.AddHours(2).AddMinutes(5), result.Limit!.ResetsAt);
+        Assert.Equal("You've hit your usage limit. Try again in 2 hours 5 minutes.", result.Error);
+    }
+
+    [Fact]
+    public async Task Failed_run_with_limit_text_on_stdout_sets_Limit()
+    {
+        fake.Result = new ProcessResult(1, "exceeded retry limit, last status: 429 Too Many Requests", "", false);
+        var result = await Runner().RunAsync(Request(), default);
+        Assert.NotNull(result.Limit);
+    }
+
+    [Fact]
+    public async Task Successful_run_mentioning_limit_has_no_Limit()
+    {
+        fake.Result = new ProcessResult(0, "you've hit your usage limit", "usage limit", false);
+        var result = await Runner().RunAsync(Request(), default);
+        Assert.True(result.Succeeded);
+        Assert.Null(result.Limit);
+    }
+
+    private const UnixFileMode OwnerOnlyFile =UnixFileMode.UserRead | UnixFileMode.UserWrite;
     private const UnixFileMode OwnerOnlyDir = OwnerOnlyFile | UnixFileMode.UserExecute;
 
     [Containers.NonWindowsFact, System.Runtime.Versioning.UnsupportedOSPlatform("windows")]

@@ -69,8 +69,9 @@ public sealed record AgentRunRequest(string WorkingDirectory, string Prompt, Age
 
 /// <param name="Output">The parsed stage output; set only for runs with <see cref="StageOutputSchema"/>.</param>
 /// <param name="Structured">The agent's schema-validated structured output, whatever the schema.</param>
+/// <param name="Limit">Set when the run failed because the provider's usage or rate limit was reached.</param>
 public sealed record AgentRunResult(bool Succeeded, StageOutput? Output, decimal? CostUsd, TimeSpan Duration,
-    string? Error, string RawLog, JsonElement? Structured = null);
+    string? Error, string RawLog, JsonElement? Structured = null, UsageLimit? Limit = null);
 
 public interface IAgentRunner
 {

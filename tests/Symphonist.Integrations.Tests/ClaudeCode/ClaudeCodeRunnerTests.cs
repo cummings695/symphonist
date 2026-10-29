@@ -264,6 +264,50 @@ public class ClaudeCodeRunnerTests
         Assert.False(string.IsNullOrWhiteSpace(r.Error));
     }
 
+    private sealed class FixedTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private static readonly DateTimeOffset Now = new(2026, 10, 28, 10, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Failed_run_with_limit_text_sets_Limit()
+    {
+        fake.Returns(1, "", "Claude AI usage limit reached|1793210400");
+        var r = await runner.RunAsync(Request(), default);
+        Assert.False(r.Succeeded);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1793210400), r.Limit!.ResetsAt);
+        Assert.Equal("Claude AI usage limit reached|1793210400", r.Error);
+    }
+
+    [Fact]
+    public async Task Error_result_text_with_rate_limit_sets_Limit()
+    {
+        fake.Returns(1, """{"is_error":true,"result":"API Error: 429 rate_limit_error"}""");
+        var timed = new ClaudeCodeRunner(fake, launcher, new FixedTime(Now));
+        var r = await timed.RunAsync(Request(), default);
+        Assert.Equal(Now.AddMinutes(5), r.Limit!.ResetsAt);
+    }
+
+    [Fact]
+    public async Task Failed_run_with_overloaded_error_has_no_Limit()
+    {
+        fake.Returns(1, Fixture("claude-error.json"));
+        var r = await runner.RunAsync(Request(), default);
+        Assert.False(r.Succeeded);
+        Assert.Null(r.Limit);
+    }
+
+    [Fact]
+    public async Task Successful_run_mentioning_limit_has_no_Limit()
+    {
+        fake.Returns(0, """{"is_error":false,"result":"usage limit reached","structured_output":{"status":"completed","summary":"documented the usage limit reached handling"}}""");
+        var r = await runner.RunAsync(Request(), default);
+        Assert.True(r.Succeeded);
+        Assert.Null(r.Limit);
+    }
+
     [Fact]
     public async Task Stage_schema_behaviour_unchanged()
     {

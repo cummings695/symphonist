@@ -18,9 +18,11 @@ namespace Symphonist.Integrations.Codex;
 /// </remarks>
 /// <param name="codexHome">The developer's Codex home (see <see cref="DefaultCodexHome"/>).</param>
 /// <param name="runFilesRoot">Where per-run directories are created; each is deleted after its run.</param>
-public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, string codexHome, string runFilesRoot)
-    : IAgentRunner
+public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, string codexHome, string runFilesRoot,
+    TimeProvider? time = null) : IAgentRunner
 {
+    private readonly TimeProvider time = time ?? TimeProvider.System;
+
     public const string RunFilesMount = "/symphonist-run";
     public const string RotatedElsewhereHint = "Codex sign-in was refreshed by another run: retry, or run `codex login`";
 
@@ -274,13 +276,17 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
         await stream.WriteAsync(bytes, CancellationToken.None);
     }
 
-    private static AgentRunResult Parse(ProcessResult result, AgentRunRequest request, string lastMessage,
+    private AgentRunResult Parse(ProcessResult result, AgentRunRequest request, string lastMessage,
         TimeSpan duration, string rawLog)
     {
-        AgentRunResult Failed(string error) => new(false, null, null, duration, error, rawLog);
+        AgentRunResult Failed(string error, UsageLimit? limit = null) =>
+            new(false, null, null, duration, error, rawLog, Limit: limit);
 
         if (result.TimedOut) return Failed($"timed out after {request.Settings.TimeoutMinutes} minutes");
-        if (result.ExitCode != 0) return Failed(Tail(result.StandardError) ?? $"agent exited with code {result.ExitCode}");
+        if (result.ExitCode != 0)
+            // Only a failed run's output is searched: a successful run may talk about limits all it likes.
+            return Failed(Tail(result.StandardError) ?? $"agent exited with code {result.ExitCode}",
+                CodexUsageLimit.Detect(result.StandardError + "\n" + result.StandardOutput, time.GetUtcNow(), TimeZoneInfo.Local));
 
         JsonElement? structured = null;
         if (ReadRunFile(Path.GetDirectoryName(lastMessage)!, Path.GetFileName(lastMessage), MaxLastMessageBytes, out _)
