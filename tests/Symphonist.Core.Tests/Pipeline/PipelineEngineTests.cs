@@ -930,6 +930,46 @@ public class PipelineEngineTests
         Assert.Equal("build", shipped.StageId);
     }
 
+    [Fact] public void Ready_ticket_card_moved_back_is_sent_back_now()
+    {
+        var t = At("release"); t.LastSourceStatus = "Done";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", "rethink", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("rethink", t.Feedback);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, t));
+    }
+
+    [Fact] public void Batch_member_card_moved_back_stays_deferred()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Done";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", null, Now);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal("Planned", t.PendingSourceStatus);
+        Assert.Null(o.Touch);
+
+        var legacy = At("release"); legacy.ReleasePullRequestId = 7; legacy.LastSourceStatus = "Done";
+        PipelineEngine.SourceStatusChanged(P, legacy, "Planned", null, Now);
+        Assert.Equal("release", legacy.StageId);
+        Assert.Equal("Planned", legacy.PendingSourceStatus);
+    }
+
+    [Fact] public void Release_cancelled_applies_a_card_moved_back()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Planned"; t.PendingSourceStatus = "Planned";
+        var o = PipelineEngine.ReleaseCancelled(P, t, "_release-2", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Equal("_release-2 cancelled; sent back to plan: card moved to 'Planned'", o.Message);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, t));
+    }
+
     [Fact] public void Send_back_of_release_ticket_cancels_it()
     {
         var t = WaitingRelease(P); t.ReviewDue = true;

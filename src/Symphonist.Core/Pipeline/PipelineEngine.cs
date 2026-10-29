@@ -308,6 +308,14 @@ public static class PipelineEngine
     {
         member.ReleaseTicketId = null;
         member.UpdatedAt = now;
+        // A card moved back while the batch was open: the release stage never runs for it, so apply the move now
+        // rather than letting the ticket ship in the next batch. Not a touch, as in ReleaseCompleted.
+        if (member.StageId == p.ReleaseStage?.Id && member.PendingSourceStatus is { } pending
+            && EarlierStageFor(p, member.StageId, pending) is { } back)
+        {
+            EnterStage(member, back, now);
+            return new(true, back.OnEnterStatus, $"{releaseKey} cancelled; sent back to {back.Id}: card moved to '{pending}'");
+        }
         return new(true, null, member.StageId == p.ReleaseStage?.Id
             ? $"{releaseKey} cancelled; ready to release again"
             : $"{releaseKey} cancelled; back to its own progress");
@@ -322,6 +330,11 @@ public static class PipelineEngine
         if (unchanged) return NoChange("source status unchanged");
 
         var stage = p.Stage(t.StageId);
+        // A ticket ready to release never runs its release stage, so a deferred move would wait until it had shipped:
+        // send it back now. Batch members keep the deferred move (ReleaseCompleted/ReleaseCancelled apply it).
+        if (IsReadyToRelease(p, t) && EarlierStageFor(p, t.StageId, newStatus) is { } readyBack)
+            return SendBackTo(t, readyBack, latestFeedback, now);
+
         if (t.Status is StageStatus.Pending or StageStatus.Running)
         {
             // The stage's result isn't in yet: remember the developer's latest decision and apply it when it is.
