@@ -109,6 +109,9 @@
 }
 
 .top-button {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
     min-height: 2rem;
     padding: 0.3rem 0.9rem;
     border: 0;

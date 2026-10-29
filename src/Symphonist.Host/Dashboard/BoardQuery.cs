@@ -8,8 +8,12 @@ using Symphonist.Integrations;
 namespace Symphonist.Host.Dashboard;
 
 /// <summary>Builds the board the dashboard renders: tickets grouped into stage columns, with links, cost and counts.</summary>
-public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orchestrator orchestrator, ProviderLimits limits)
+public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orchestrator orchestrator, ProviderLimits limits,
+    TimeProvider? clock = null)
 {
+    /// <summary>How many weekly buckets the touch trend covers.</summary>
+    public const int TrendWeeks = 8;
+
     public const string UnknownColumnId = "?unknown";
     public const int DoneLimit = 20;
 
@@ -29,10 +33,15 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), costs, issues.GetValueOrDefault(t.Id)))).ToList();
 
         var pauses = limits.Pauses;
+        var touchData = await LoadTouchDataAsync(filter?.Id, ct);
         var boardProjects = configured.OrderBy(p => p.Id, StringComparer.Ordinal)
-            .Select(p => new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
-                orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList(),
-                UsagePausesOf(p, pauses)))
+            .Select(p =>
+            {
+                var own = touchData.ForProject(p.Id);
+                return new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
+                    orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList(),
+                    UsagePausesOf(p, pauses), own.Summary, own.Stages);
+            })
             .ToList();
 
         var columns = new List<BoardColumn>();
@@ -57,6 +66,48 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             cards.Count(c => c.Card.Status == StageStatus.Running),
             cards.Count(c => c.Card.Status == StageStatus.Blocked));
         return new BoardModel(boardProjects, filter?.Id, columns, counts);
+    }
+
+    /// <summary>Each project's stages with their touches over the trend window; one project when <paramref name="projectFilter"/> names one.</summary>
+    public async Task<StatsModel> LoadStatsAsync(string? projectFilter, CancellationToken ct)
+    {
+        var filter = projects.Projects.FirstOrDefault(p => p.Id == projectFilter);
+        var data = await LoadTouchDataAsync(filter?.Id, ct);
+        var shown = filter is not null ? [filter] : projects.Projects.OrderBy(p => p.Id, StringComparer.Ordinal).ToList();
+        var model = shown.Select(p =>
+        {
+            var byStage = data.ForProject(p.Id).Stages.ToDictionary(s => s.StageId);
+            var stages = p.Pipeline.Where(s => s.Kind != StageKind.Done)
+                .Select(s => new StatsStage(s.Id, byStage.GetValueOrDefault(s.Id)
+                    ?? new StageTouches(p.Id, s.Id, 0, 0, 0, 0, 0, new int[TrendWeeks])))
+                .ToList();
+            return new StatsProject(p.Id, p.Name, stages);
+        }).ToList();
+        return new StatsModel(model, filter?.Id);
+    }
+
+    private sealed class TouchData(IReadOnlyList<TouchRecord> touches, IReadOnlyList<GateDecisionRecord> decisions,
+        IReadOnlyList<GateReview> reviews, DateTimeOffset now, TimeZoneInfo zone)
+    {
+        public (TouchSummary Summary, IReadOnlyList<StageTouches> Stages) ForProject(string id)
+        {
+            var t = touches.Where(x => x.ProjectId == id).ToList();
+            var d = decisions.Where(x => x.ProjectId == id).ToList();
+            var r = reviews.Where(x => x.ProjectId == id).ToList();
+            var stages = TouchStats.Compute(t, d, r, now, zone, TrendWeeks);
+            return (TouchStats.Summarize(stages, t, d, r, now, zone), stages);
+        }
+    }
+
+    /// <summary>The records the trend needs, loaded once for all projects (or the filtered one).</summary>
+    private async Task<TouchData> LoadTouchDataAsync(string? projectId, CancellationToken ct)
+    {
+        var time = clock ?? TimeProvider.System;
+        var now = time.GetUtcNow();
+        var zone = time.LocalTimeZone;
+        var since = TouchStats.WeekStart(now, zone).AddDays(-7 * (TrendWeeks - 1));
+        return new TouchData(await store.TouchesAsync(projectId, since, ct), await store.GateDecisionsAsync(projectId, since, ct),
+            await store.GateReviewsSinceAsync(projectId, since, ct), now, zone);
     }
 
     /// <summary>Every configured project with its counts, and totals across all tickets; the app frame shows these on every page.</summary>

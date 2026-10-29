@@ -1,0 +1,125 @@
+@page "/stats"
+@using Symphonist.Core.Storage
+@implements IAsyncDisposable
+@inject BoardQuery Query
+@inject BoardNotifier Notifier
+@inject DashboardChrome Chrome
+
+@* Exactly one page <h1>, always this element (see the board). *@
+<div class="page-head">
+    <h1 class="page-title">Touch stats</h1>
+</div>
+<p class="stats-intro">How often you stepped in over the last @BoardQuery.TrendWeeks weeks: send-backs, unblocks, and approvals of rounds the reviewer called high. Overrules count both ways you disagreed with the reviewer; auto approvals are not touches.</p>
+
+@if (model is null)
+{
+    @if (loadError is null)
+    {
+        <p class="loading">Loading the stats…</p>
+    }
+}
+else
+{
+    <div data-stats-loaded>
+        @if (model.Projects.Count == 0)
+        {
+            <p class="empty">No projects configured.</p>
+        }
+        @foreach (var project in model.Projects)
+        {
+            <section class="stats-project" data-stats-project="@project.Id" aria-labelledby="stats-@project.Id">
+                <h2 id="stats-@project.Id"><a href="@($"/?project={Uri.EscapeDataString(project.Id)}")">@project.Name</a></h2>
+                <div class="table-wrap">
+                    <table class="stats">
+                        <thead>
+                            <tr>
+                                <th>Stage</th><th>Send-backs</th><th>Unblocks</th><th>Overrules</th><th>Approved by you / auto</th>
+                                <th>Trend (@BoardQuery.TrendWeeks weeks)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var stage in project.Stages)
+                            {
+                                var t = stage.Touches;
+                                <tr data-stage="@stage.StageId">
+                                    <td>@stage.StageId</td>
+                                    <td>@t.SendBacks</td>
+                                    <td>@t.Unblocks</td>
+                                    <td>@t.Overrules</td>
+                                    <td>@t.ApprovedByYou / @t.AutoApproved</td>
+                                    <td class="stats-trend" data-trend title="@string.Join(", ", t.WeeklyTouches) (oldest first)">@TouchStats.Trend(t.WeeklyTouches)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    </div>
+}
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private StatsModel? model;
+    private string? loadError;
+    private string? loadedFilter;
+    private bool loaded;
+    private int loadVersion;
+
+    [SupplyParameterFromQuery(Name = "project")]
+    public string? Project { get; set; }
+
+    protected override void OnInitialized()
+    {
+        Chrome.ClearForNavigation();
+        Notifier.Changed += OnBoardChanged;
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded && loadedFilter == Project) return;
+        loaded = true;
+        loadedFilter = Project;
+        Chrome.SetPage("Stats", Project);
+        await ReloadAsync();
+    }
+
+    private void OnBoardChanged() => _ = InvokeAsync(async () =>
+    {
+        await ReloadAsync();
+        StateHasChanged();
+    });
+
+    /// <summary>Loads the stats; a failure keeps the last ones and reports the error in the layout's status line.</summary>
+    private async Task ReloadAsync()
+    {
+        var version = ++loadVersion;
+        try
+        {
+            var loadedModel = await Query.LoadStatsAsync(Project, disposed.Token);
+            if (disposed.IsCancellationRequested || version != loadVersion) return;
+            model = loadedModel;
+            loadError = null;
+            Chrome.SetError(StatusSource.Board, null);
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            if (!disposed.IsCancellationRequested && version == loadVersion)
+            {
+                loadError = $"Could not load the stats: {e.Message}";
+                Chrome.SetError(StatusSource.Board, loadError);
+            }
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Notifier.Changed -= OnBoardChanged;
+        disposed.Cancel();
+        return ValueTask.CompletedTask;
+    }
+}

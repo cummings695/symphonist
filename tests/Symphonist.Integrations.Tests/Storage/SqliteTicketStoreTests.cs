@@ -589,4 +589,24 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Empty(await _store.TouchesAsync("orders", Now.AddDays(-4), default));
         Assert.Single(await _store.TouchesAsync(null, Now.AddDays(-4), default));
     }
+
+    [Fact]
+    public async Task Gate_decisions_and_recent_reviews_filter_by_project_and_time()
+    {
+        var t = new Ticket { Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-8", StageId = "plan", Title = "x" };
+        await _store.SaveAsync(t, default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now.AddDays(-9), GateDecision.Approved, false, Now.AddDays(-8)), default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now.AddDays(-1), GateDecision.SentBack, false, Now), default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "billing", "plan", Now.AddDays(-1), GateDecision.Approved, true, Now), default);
+        await _store.AddGateReviewAsync(Review(t, "plan", Now.AddDays(-40), RiskLevel.Low), default);
+        await _store.AddGateReviewAsync(Review(t, "plan", Now.AddDays(-9), RiskLevel.High), default);
+
+        Assert.Equal(2, (await _store.GateDecisionsAsync(null, Now.AddDays(-1), default)).Count);
+        var orders = Assert.Single(await _store.GateDecisionsAsync("orders", Now.AddDays(-1), default));
+        Assert.Equal(GateDecision.SentBack, orders.Decision);
+        Assert.Equal(3, (await _store.GateDecisionsAsync(null, Now.AddDays(-10), default)).Count);
+
+        var reviews = await _store.GateReviewsSinceAsync(null, Now.AddDays(-1), default);
+        Assert.Equal([Now.AddDays(-9)], reviews.Select(r => r.WaitingSince)); // the 40-day-old round is more than 30 days before
+    }
 }

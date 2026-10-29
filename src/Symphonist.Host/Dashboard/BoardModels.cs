@@ -6,9 +6,20 @@ using Symphonist.Core.Storage;
 namespace Symphonist.Host.Dashboard;
 
 /// <param name="UsagePauses">The usage-limit pauses of providers some job of this project runs on.</param>
+/// <param name="Touches">This week's touches against last week's; null when not loaded.</param>
+/// <param name="StageTouches">The project's per-stage touches over the trend window (the strip's hover text).</param>
 public sealed record BoardProject(string Id, string Name, bool Paused, Isolation Isolation, string? Problem, string Source,
     ReviewMode Review = ReviewMode.Off, IReadOnlyList<StageAgreement>? Agreement = null,
-    IReadOnlyList<ProviderPause>? UsagePauses = null);
+    IReadOnlyList<ProviderPause>? UsagePauses = null, TouchSummary? Touches = null,
+    IReadOnlyList<StageTouches>? StageTouches = null);
+
+/// <summary>A pipeline stage's touches; all zero when the developer never stepped in there.</summary>
+public sealed record StatsStage(string StageId, StageTouches Touches);
+
+public sealed record StatsProject(string Id, string Name, IReadOnlyList<StatsStage> Stages);
+
+/// <summary>What the Stats page shows: per project, the stages (pipeline order, Done-kind left out) with their touches.</summary>
+public sealed record StatsModel(IReadOnlyList<StatsProject> Projects, string? ProjectFilter);
 
 /// <param name="Reviewing">An active auto gate whose review is still owed: not waiting on the developer yet.</param>
 /// <param name="StageNumber">1-based position in the card's own project pipeline; null for an unknown project or stage and for a Done-kind stage.</param>

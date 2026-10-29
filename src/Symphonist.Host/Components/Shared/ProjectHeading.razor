@@ -1,5 +1,6 @@
 @using Symphonist.Core.Risk
 @using Symphonist.Core.Agents
+@using Symphonist.Core.Storage
 @* The filtered board's project heading, placed after the board's <h1> (which holds the name and stays one element). *@
 <div class="project" data-project="@Project.Id">
     <div class="project-row">
@@ -32,6 +33,13 @@
             <button type="button" class="button button-quiet" aria-label="@($"Pause {Project.Name}")" @onclick="OnTogglePause">Pause</button>
         }
     </div>
+    @if (Project.Touches is { } touches)
+    {
+        <p class="project-touches" data-touches title="@TouchTitle()">
+            Touches this week: @touches.ThisWeek (last week @touches.LastWeek) · send-backs @touches.SendBacks · unblocks @touches.Unblocks · overrules @touches.Overrules · auto-approved @touches.AutoApproved of @touches.Decided gates
+            <a href="@($"/stats?project={Uri.EscapeDataString(Project.Id)}")" aria-label="@($"Touch stats for {Project.Name}")">Stats</a>
+        </p>
+    }
     @foreach (var pause in Project.UsagePauses ?? [])
     {
         <p class="project-usage-pause" data-usage-pause="@pause.Key">
@@ -58,6 +66,9 @@
     [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Local;
 
     [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    private string TouchTitle() => string.Join("\n", (Project.StageTouches ?? []).Select(s =>
+        $"{s.StageId}: {s.SendBacks} send-backs, {s.Unblocks} unblocks, {s.Overrules} overrules over 8 weeks"));
 
     private IEnumerable<StageAgreement> Agreement() =>
         (Project.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);

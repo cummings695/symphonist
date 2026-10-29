@@ -418,6 +418,35 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Heading_shows_touch_strip_with_link_to_stats()
+    {
+        // Now is Wednesday 2026-10-21 12:00 UTC; this week began Monday the 19th.
+        for (var i = 0; i < 2; i++)
+            await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "implement", TouchKind.SendBack, Now.AddHours(-i - 1)), default);
+        await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "plan", TouchKind.Unblock, Now.AddHours(-3)), default);
+        for (var i = 0; i < 9; i++)
+            await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "implement", TouchKind.SendBack, Now.AddDays(-7)), default);
+        await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "billing", "plan", TouchKind.SendBack, Now.AddHours(-1)), default); // another project
+        for (var i = 0; i < 11; i++)
+        {
+            var id = Guid.NewGuid();
+            var since = Now.AddHours(-20);
+            var auto = i < 6;
+            await store.AddGateReviewAsync(new GateReview(id, "orders", "implement", since, since, ReviewMode.Shadow,
+                GatePolicy.Human, new GateVerdict(i == 6 ? RiskLevel.High : RiskLevel.Low, "s", [], [], [])), default);
+            await store.AddGateDecisionAsync(new GateDecisionRecord(id, "orders", "implement", since, GateDecision.Approved, auto, Now.AddHours(-2)), default);
+        }
+
+        var cut = RenderBoard("/?project=orders");
+
+        var strip = cut.Find("[data-project='orders'] [data-touches]");
+        Assert.Equal("Touches this week: 4 (last week 9) · send-backs 2 · unblocks 1 · overrules 1 · auto-approved 6 of 11 gates Stats",
+            string.Join(' ', strip.TextContent.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
+        Assert.Equal("/stats?project=orders", strip.QuerySelector("a")!.GetAttribute("href"));
+        Assert.Contains("implement: 11 send-backs, 0 unblocks, 1 overrules", strip.GetAttribute("title"));
+    }
+
+    [Fact]
     public async Task Heading_shows_usage_pause_with_reset_and_resume_button()
     {
         await limits.PauseAsync("claude-code", new UsageLimit(Now.AddHours(1)), default);

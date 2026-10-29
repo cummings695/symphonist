@@ -265,6 +265,24 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             .Select(x => new TouchRecord(x.TicketId, x.ProjectId, x.StageId, x.Kind, x.At)).ToList();
     }
 
+    public async Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.GateDecisions.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        // Filtered and ordered client-side: At is stored as a binary long, which does not compare as a time.
+        return (await query.ToListAsync(ct)).Where(x => x.At >= since).OrderBy(x => x.At).ThenBy(x => x.Id).Select(ToRecord).ToList();
+    }
+
+    public async Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.GateReviews.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        var from = since - TimeSpan.FromDays(30);
+        return (await query.ToListAsync(ct)).Where(x => x.WaitingSince >= from).OrderBy(x => x.At).ThenBy(x => x.Id).Select(ToReview).ToList();
+    }
+
     public async Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)
     {
         await using var db = await OpenAsync(ct);

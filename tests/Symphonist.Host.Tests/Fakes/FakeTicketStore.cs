@@ -178,6 +178,21 @@ public sealed class FakeTicketStore : ITicketStore
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<GateDecisionRecord>>(GateDecisions
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.At >= since).OrderBy(x => x.At).ToList());
+    }
+
+    public Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<GateReview>>(GateReviews
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.WaitingSince >= since - TimeSpan.FromDays(30))
+                .OrderBy(x => x.At).ToList());
+    }
+
     public Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
     {
         lock (sync)

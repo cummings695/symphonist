@@ -30,6 +30,10 @@ public interface ITicketStore
     Task AddTouchAsync(TouchRecord touch, CancellationToken ct);
     /// <summary>Touches at or after <paramref name="since"/>, oldest first; all projects when <paramref name="projectId"/> is null.</summary>
     Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
+    /// <summary>Gate decisions made at or after <paramref name="since"/>, oldest first; all projects when <paramref name="projectId"/> is null.</summary>
+    Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
+    /// <summary>Gate reviews whose round began at or after <paramref name="since"/> minus 30 days (enough to join the decisions made since), oldest first.</summary>
+    Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
     Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct);
     /// <summary>Creates or replaces the pause for <see cref="ProviderPause.Key"/>.</summary>
     Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct);
