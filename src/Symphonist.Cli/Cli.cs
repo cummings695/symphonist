@@ -116,6 +116,24 @@ public static class Cli
         projects.Add(reload);
         root.Add(projects);
 
+        var limits = new Command("limits", "List agent providers paused by a usage limit, or resume one");
+        Run(limits, async (_, ct) =>
+        {
+            var pauses = await client.ListLimitsAsync(ct);
+            if (pauses.Count == 0) stdout.WriteLine("No provider is paused by a usage limit");
+            else stdout.Write(StatusTable.RenderLimits(pauses));
+        });
+        var limitKey = new Argument<string>("key") { Description = "Usage-limit key, as `symphonist limits` lists it" };
+        var limitResume = new Command("resume", "Let jobs on a paused provider start again now") { limitKey };
+        Run(limitResume, async (r, ct) =>
+        {
+            var key = r.GetValue(limitKey)!;
+            await client.ResumeLimitAsync(key, ct);
+            stdout.WriteLine($"Resumed {key}");
+        });
+        limits.Add(limitResume);
+        root.Add(limits);
+
         var secret = new Command("secret", "Manage secrets in the OS credential store");
         var secretSet = new Command("set", "Store a secret; the value is read from stdin, never from arguments");
         var secretName = new Argument<string>("name") { Description = "Secret name" };

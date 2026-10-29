@@ -43,10 +43,11 @@ public sealed class MainLayoutTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
+        var limits = new ProviderLimits(store, time);
         orchestrator = new Orchestrator(registry, store, integrations,
             new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
-            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
 
         ctx.JSInterop.Mode = JSRuntimeMode.Strict;
@@ -59,6 +60,7 @@ public sealed class MainLayoutTests : IDisposable
         ctx.Services.AddSingleton(registry);
         ctx.Services.AddSingleton<ITicketStore>(store);
         ctx.Services.AddSingleton(orchestrator);
+        ctx.Services.AddSingleton(limits);
         ctx.Services.AddSingleton<BoardQuery>();
         ctx.Services.AddScoped(_ => chrome);
     }

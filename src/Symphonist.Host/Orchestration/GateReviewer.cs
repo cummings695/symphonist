@@ -17,8 +17,9 @@ namespace Symphonist.Host.Orchestration;
 /// </param>
 /// <param name="ReviewedBranch">The branch <paramref name="ReviewedHead"/> is the head of; null when there is none.</param>
 /// <param name="ReviewedBase">The commit the change was diffed against (main for implement, production for release).</param>
+/// <param name="Limit">The reviewer provider's usage limit stopped the run: no verdict was reached (the review is still owed).</param>
 public sealed record GateReviewOutcome(GateVerdict Verdict, string? ReviewedHead, string? ReviewedBranch = null,
-    string? ReviewedBase = null);
+    string? ReviewedBase = null, UsageLimit? Limit = null);
 
 /// <summary>
 /// Runs the read-only reviewer at a gate and returns its verdict. Fails closed: every error, and every risk-area path in
@@ -137,6 +138,20 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             result = new AgentRunResult(false, null, null, time.GetUtcNow() - startedAt, e.Message, "");
         }
 
+        var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
+        var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-review-{stamp}.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        await File.WriteAllTextAsync(logPath, result.RawLog, ct);
+
+        if (!result.Succeeded && result.Limit is { } limit)
+        {
+            // Not a verdict: the caller keeps the review owed until the provider lets runs through again.
+            var error = result.Error ?? "usage limit reached";
+            await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, false,
+                result.CostUsd, result.Error, logPath, $"stopped by a usage limit: {error}", IsReview: true), ct);
+            return new GateReviewOutcome(GateVerdict.Failed(error), head, head is null ? null : headBranch, baseSha, limit);
+        }
+
         // Structured output may be present on a failed run: only a successful run's output is judged.
         var verdict = result.Succeeded
             ? GateVerdictParser.Parse(result.Structured)
@@ -144,10 +159,6 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         verdict = Guard(p, changed, diff, truncated, verdict);
         foreach (var reason in forced) verdict = verdict.WithForcedHigh(reason);
 
-        var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
-        var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-review-{stamp}.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        await File.WriteAllTextAsync(logPath, result.RawLog, ct);
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, $"{Level(verdict.Risk)} risk: {verdict.Summary}", IsReview: true), ct);
         return new GateReviewOutcome(verdict, head, head is null ? null : headBranch, baseSha);

@@ -519,4 +519,45 @@ public sealed class CliTests
         Assert.Equal("skipped a.yaml: project id 'x' is declared by 2 files" + Environment.NewLine
             + "skipped bad.yaml: missing required 'tracker'" + Environment.NewLine, failed.Err);
     }
+
+    private static string Local(string at) => DateTimeOffset.Parse(at).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    [Fact]
+    public async Task Cli_limits_prints_pauses()
+    {
+        var handler = new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/limits", HttpStatusCode.OK,
+                """[{"key":"claude-code","provider":"Claude","since":"2026-10-21T11:00:00+00:00","resetsAt":"2026-10-21T13:00:00+00:00","nextProbeAt":null},"""
+                + """{"key":"codex:chatgpt","provider":"Codex","since":"2026-10-21T11:30:00+00:00","resetsAt":null,"nextProbeAt":"2026-10-21T12:15:00+00:00"}]""")
+            .On(HttpMethod.Post, "/api/limits/resume", HttpStatusCode.NoContent, "");
+
+        var list = await RunAsync(handler, "", "limits");
+        var resume = await RunAsync(handler, "", "limits", "resume", "codex:chatgpt");
+
+        Assert.Equal(0, list.Exit);
+        var lines = list.Out.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Matches(@"^PROVIDER\s+KEY\s+SINCE\s+RESETS / NEXT TRY$", lines[0]);
+        Assert.Matches($@"^Claude\s+claude-code\s+{Local("2026-10-21T11:00:00Z")}\s+resets {Local("2026-10-21T13:00:00Z")}$", lines[1]);
+        Assert.Matches($@"^Codex\s+codex:chatgpt\s+{Local("2026-10-21T11:30:00Z")}\s+next try {Local("2026-10-21T12:15:00Z")}$", lines[2]);
+        Assert.Equal((0, "Resumed codex:chatgpt" + Environment.NewLine), (resume.Exit, resume.Out));
+        Assert.Contains(handler.Requests, r => r.Method == HttpMethod.Post && r.PathAndQuery == "/api/limits/resume"
+            && r.Body!.Contains("\"key\":\"codex:chatgpt\""));
+    }
+
+    [Fact]
+    public async Task Cli_limits_says_when_nothing_is_paused()
+    {
+        var r = await RunAsync(new StubHttpHandler().On(HttpMethod.Get, "/api/limits", HttpStatusCode.OK, "[]"), "", "limits");
+
+        Assert.Equal((0, "No provider is paused by a usage limit" + Environment.NewLine), (r.Exit, r.Out));
+    }
+
+    [Fact]
+    public async Task Cli_limits_resume_reports_a_provider_not_paused()
+    {
+        var r = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/limits/resume", HttpStatusCode.NotFound,
+            """{"error":"'claude-code' is not paused"}"""), "", "limits", "resume", "claude-code");
+
+        Assert.Equal((1, "'claude-code' is not paused" + Environment.NewLine), (r.Exit, r.Err));
+    }
 }

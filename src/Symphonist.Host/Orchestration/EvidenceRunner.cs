@@ -12,13 +12,15 @@ using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
 
-public enum EvidenceStatus { NotNeeded, AlreadyGathered, Gathered, Failed }
+/// <summary>UsageLimited: the evidence provider's usage limit stopped the run; the evidence is still owed.</summary>
+public enum EvidenceStatus { NotNeeded, AlreadyGathered, Gathered, Failed, UsageLimited }
 
 /// <param name="Head">The pushed branch head the evidence is about; null when it could not be resolved.</param>
 /// <param name="Screenshots">Stored paths relative to evidence/{project}/{key}/, e.g. "20261025T101500Z/home.png".</param>
-/// <param name="Error">Why the run failed; set only for <see cref="EvidenceStatus.Failed"/>.</param>
+/// <param name="Error">Why the run failed; set only for <see cref="EvidenceStatus.Failed"/> and <see cref="EvidenceStatus.UsageLimited"/>.</param>
+/// <param name="Limit">The usage limit that stopped the run; set only for <see cref="EvidenceStatus.UsageLimited"/>.</param>
 public sealed record EvidenceOutcome(EvidenceStatus Status, string? Head, EvidenceReport? Report,
-    IReadOnlyList<string> Screenshots, string? Error, string Message);
+    IReadOnlyList<string> Screenshots, string? Error, string Message, UsageLimit? Limit = null);
 
 /// <summary>
 /// Gathers evidence (regressions, test coverage, an app walkthrough) for an implement round: a fresh, writable agent
@@ -144,10 +146,14 @@ public sealed class EvidenceRunner(IGitWorkspace git, IAgentRunners agents, ITic
         {
             log?.LogWarning(e, "Could not write the evidence log {Path}", logPath);
         }
-        var summary = error ?? report!.Headline.FirstOrDefault() ?? "evidence gathered";
+        var limit = result.Succeeded ? null : result.Limit;
+        var summary = limit is not null ? $"stopped by a usage limit: {error}"
+            : error ?? report!.Headline.FirstOrDefault() ?? "evidence gathered";
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, summary, IsEvidence: true), CancellationToken.None);
 
+        if (limit is not null)
+            return new(EvidenceStatus.UsageLimited, head, null, [], error, $"evidence for {Short(head)} stopped by a usage limit", limit);
         if (report is null) return Failed(head, error!);
 
         var copied = CopyScreenshots(p, t, workspace, stamp);

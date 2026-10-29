@@ -1,3 +1,4 @@
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
@@ -31,6 +32,14 @@ public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation I
 /// <param name="Projects">The projects loaded after the reload.</param>
 /// <param name="Errors">Each skipped project file (by file name) and why.</param>
 public sealed record ProjectReloadDto(IReadOnlyList<string> Projects, IReadOnlyDictionary<string, string> Errors);
+
+/// <summary>An agent provider paused by a usage limit (see <see cref="ProviderLimits"/>).</summary>
+/// <param name="Provider">"Claude" or "Codex".</param>
+/// <param name="NextProbeAt">With no known reset, when one job may next try the provider.</param>
+public sealed record ProviderPauseDto(string Key, string Provider, DateTimeOffset Since, DateTimeOffset? ResetsAt,
+    DateTimeOffset? NextProbeAt);
+
+public sealed record ResumeLimitRequest(string? Key);
 
 /// <param name="Url">Single-use sign-in link for the dashboard (see <see cref="DashboardLogin"/>).</param>
 public sealed record DashboardLinkDto(Uri Url);
@@ -116,6 +125,19 @@ public static class TicketsApi
 
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));
         api.MapPost("/projects/{id}/resume", (string id, ProjectRegistry projects) => SetPaused(projects, id, false));
+
+        api.MapGet("/limits", (ProviderLimits limits) =>
+            limits.Pauses.Select(p => new ProviderPauseDto(p.Key, UsageLimits.ProviderName(p.Key), p.Since, p.ResetsAt,
+                p.NextProbeAt)));
+
+        api.MapPost("/limits/resume", async (ResumeLimitRequest? body, ProviderLimits limits, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(body?.Key)) return Results.BadRequest(new ApiError("key is required"));
+            if (limits.Pauses.All(p => p.Key != body.Key))
+                return Results.NotFound(new ApiError($"'{body.Key}' is not paused by a usage limit"));
+            await limits.ResumeAsync(body.Key, ct);
+            return Results.NoContent();
+        });
 
         api.MapPost("/dashboard/login-code", (DashboardLogin login, DashboardAddress address) =>
             new DashboardLinkDto(address.LoginUrl(login.IssueCode())));

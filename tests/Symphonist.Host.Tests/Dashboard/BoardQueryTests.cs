@@ -30,12 +30,13 @@ public sealed class BoardQueryTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         var time = new FakeTimeProvider(Now);
+        var limits = new ProviderLimits(store, time);
         orchestrator = new Orchestrator(registry, store, integrations,
             new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
-            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
-        query = new BoardQuery(registry, store, orchestrator);
+        query = new BoardQuery(registry, store, orchestrator, limits);
     }
 
     public void Dispose() => home.Dispose();

@@ -83,6 +83,17 @@ public static class PipelineEngine
         return new(true, null, $"{t.StageId} failed (attempt {t.Attempts}/{p.MaxAttemptsPerStage}): {error}");
     }
 
+    /// <summary>
+    /// The provider's usage limit stopped the run: the stage waits to run again, without spending an attempt (a limit
+    /// says nothing about the ticket) and without a tracker move.
+    /// </summary>
+    public static TransitionOutcome StageLimited(Ticket t, string message, DateTimeOffset now)
+    {
+        t.Status = StageStatus.Pending;
+        t.UpdatedAt = now;
+        return new(true, null, message);
+    }
+
     public static TransitionOutcome Approve(ProjectConfig p, Ticket t, DateTimeOffset now)
     {
         if (StageRemoved(p, t) is { } removed) return removed;

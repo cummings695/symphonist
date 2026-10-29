@@ -460,4 +460,29 @@ public sealed class TicketsApiTests : IDisposable
         var projects = await Json(await Authorized().GetAsync("/api/projects"));
         Assert.Equal(2, projects.GetArrayLength()); // not reloaded
     }
+
+    [Fact]
+    public async Task Limits_endpoint_lists_and_resumes()
+    {
+        var limits = factory.Services.GetRequiredService<ProviderLimits>();
+        var resets = DateTimeOffset.UtcNow.AddHours(1);
+        await limits.PauseAsync("codex:chatgpt", new UsageLimit(resets), default);
+
+        var list = await Json(await Authorized().GetAsync("/api/limits"));
+
+        var pause = Assert.Single(list.EnumerateArray());
+        Assert.Equal("codex:chatgpt", pause.GetProperty("key").GetString());
+        Assert.Equal("Codex", pause.GetProperty("provider").GetString());
+        Assert.Equal(resets, pause.GetProperty("resetsAt").GetDateTimeOffset());
+        Assert.Equal(JsonValueKind.Null, pause.GetProperty("nextProbeAt").ValueKind);
+
+        var resumed = await Authorized().PostAsJsonAsync("/api/limits/resume", new { key = "codex:chatgpt" });
+        Assert.Equal(HttpStatusCode.NoContent, resumed.StatusCode);
+        Assert.Empty(limits.Pauses);
+        Assert.Equal(0, (await Json(await Authorized().GetAsync("/api/limits"))).GetArrayLength());
+
+        var again = await Authorized().PostAsJsonAsync("/api/limits/resume", new { key = "codex:chatgpt" });
+        Assert.Equal(HttpStatusCode.NotFound, again.StatusCode);
+        Assert.Contains("codex:chatgpt", await again.Content.ReadAsStringAsync());
+    }
 }

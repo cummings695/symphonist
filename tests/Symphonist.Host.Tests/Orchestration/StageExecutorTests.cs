@@ -390,6 +390,31 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Equal(0, t.Attempts);
     }
 
+    [Fact] public async Task Usage_limited_run_returns_usage_limited_with_the_key()
+    {
+        var resets = Now.AddHours(1);
+        agent.Results.Enqueue(FakeAgentRunner.Limited(resets));
+        var t = At("plan");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.UsageLimited, "Claude usage limit reached",
+            Limit: new UsageLimit(resets), LimitKey: "claude-code"), r);
+        Assert.False(Assert.Single(store.AgentRuns).Succeeded); // still recorded
+        Assert.Empty(git.Commits);
+        Assert.Empty(tracker.Comments);
+    }
+
+    [Fact] public async Task Usage_limited_codex_stage_names_the_codex_key()
+    {
+        var (two, _, codex) = TwoRunners();
+        codex.Results.Enqueue(FakeAgentRunner.Limited(null, "Codex usage limit"));
+
+        var r = await two.ExecuteAsync(WithImplementOn(AgentTypes.Codex), io, At("implement"), source, CancellationToken.None);
+
+        Assert.Equal((ExecutionStatus.UsageLimited, $"codex:api-key:{CodexSettings.DefaultApiKeySecret}"), (r.Status, r.LimitKey));
+    }
+
     [Fact] public async Task Git_failure_returns_failed_with_message()
     {
         git.PushError = new GitCommandException("git push failed: rejected");

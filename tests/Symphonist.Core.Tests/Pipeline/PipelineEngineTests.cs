@@ -95,6 +95,14 @@ public class PipelineEngineTests
         Assert.Equal(StageStatus.Blocked, t.Status); Assert.Equal("plan failed 3 times: boom", t.BlockedReason);
     }
 
+    [Fact] public void Usage_limit_returns_to_pending_without_an_attempt()
+    {
+        var t = At("plan", StageStatus.Running); t.Attempts = 2;
+        var o = PipelineEngine.StageLimited(t, "plan paused: Claude usage limit", Now);
+        Assert.Equal((StageStatus.Pending, 2, Now), (t.Status, t.Attempts, t.UpdatedAt));
+        Assert.Equal(new TransitionOutcome(true, null, "plan paused: Claude usage limit"), o);
+    }
+
     [Fact] public void Approve_implement_goes_to_Approved_then_build()
     {
         var t = Awaiting("implement"); PipelineEngine.Approve(P, t, Now); Assert.Equal(StageStatus.Approved, t.Status);

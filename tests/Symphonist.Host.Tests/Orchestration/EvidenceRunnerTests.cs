@@ -141,6 +141,23 @@ public sealed class EvidenceRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Usage_limited_run_returns_the_limit_without_a_report()
+    {
+        var resets = Now.AddHours(1);
+        agent.Results.Enqueue(FakeAgentRunner.Limited(resets));
+
+        var outcome = await Gather(Implement(RiskLevel.High));
+
+        Assert.Equal(EvidenceStatus.UsageLimited, outcome.Status);
+        Assert.Equal(new UsageLimit(resets), outcome.Limit);
+        Assert.Null(outcome.Report);
+        var run = Assert.Single(store.AgentRuns);
+        Assert.True(run.IsEvidence);
+        Assert.False(run.Succeeded);
+        Assert.Empty(store.Evidence);
+    }
+
+    [Fact]
     public async Task Runs_when_risk_area_path_touched_with_review_off()
     {
         Assert.Equal(ReviewMode.Off, project.Review.Mode);

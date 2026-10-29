@@ -64,6 +64,7 @@ public sealed class OrchestratorTests : IDisposable
     /// <summary>The evidence runner's own clone (a separate fake, so stage tests see only their workspace's calls).</summary>
     private readonly FakeGitWorkspace evidenceGit = new();
     private readonly ProjectRegistry registry;
+    private readonly ProviderLimits limits;
 
     private static AgentRunResult StageResult => FakeAgentRunner.Ok(FakeAgentRunner.Output(
         summary: "done", specPath: "docs/spec.md", planPath: "docs/plan.md", prTitle: "Export orders"));
@@ -74,6 +75,7 @@ public sealed class OrchestratorTests : IDisposable
         Directory.CreateDirectory(Path.Combine(home, "projects"));
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
+        limits = new ProviderLimits(store, time);
         agent.OnRun = r => r.OutputSchema == PrFixOutputSchema.Json ? FakeAgentRunner.PrFix() : StageResult;
         evidenceGit.WorkspacePath = Path.Combine(home, "evidence-ws");
     }
@@ -89,7 +91,7 @@ public sealed class OrchestratorTests : IDisposable
     /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time,
+            new StageExecutor(git, Runners(), store, time), Reviewer(), Evidence(), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
 
     private GateReviewer Reviewer() =>
@@ -1147,7 +1149,7 @@ public sealed class OrchestratorTests : IDisposable
         tracker.OnQuery = () => Interlocked.Increment(ref queries) % 2 == 0 ? throw new HttpRequestException("flaky") : [];
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1173,7 +1175,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1206,7 +1208,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -2786,6 +2788,175 @@ public sealed class OrchestratorTests : IDisposable
         Assert.False(record.Posted);
         Assert.Contains("evidence for implement finished after the gate was decided; not posted",
             store.EventMessages("ORD-1"));
+    }
+
+    #endregion
+
+    #region Usage limits
+
+    private const string ClaudeKey = "claude-code";
+
+    private bool Paused(string key) => limits.Pauses.Any(p => p.Key == key);
+
+    [Fact] public async Task Limited_stage_run_goes_back_to_pending_without_an_attempt()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(Now.AddHours(1)));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Pending, 0), (t.StageId, t.Status, t.Attempts));
+        Assert.Equal("implement paused: Claude usage limit, resets 11:00", store.EventMessages("ORD-1")[^1]);
+        var pause = Assert.Single(limits.Pauses);
+        Assert.Equal((ClaudeKey, (DateTimeOffset?)Now.AddHours(1)), (pause.Key, pause.ResetsAt));
+        Assert.Empty(tracker.Transitions);
+        Assert.False(Assert.Single(store.AgentRuns).Succeeded); // the run is still recorded
+    }
+
+    [Fact] public async Task Limited_key_starts_no_job_until_reset()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        await Seed("ORD-2", "plan", StageStatus.Pending, "Planned");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(Now.AddHours(1)));
+        var o = Create();
+
+        await TickIdle(o); // the first run hits the limit
+        var events = store.Events.Count;
+        await TickIdle(o);
+        time.Advance(TimeSpan.FromMinutes(59));
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.All(store.Tickets, t => Assert.Equal(StageStatus.Pending, t.Status));
+        Assert.Equal(events, store.Events.Count); // waiting for the reset leaves the tickets as they are
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        await TickIdle(o);
+
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Contains(store.Tickets, t => t.Status == StageStatus.AwaitingApproval);
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Other_provider_keeps_running()
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, OrdersYaml.Replace("onGateStatus: In Review }", "onGateStatus: In Review, agent: { type: codex } }"));
+        registry.Reload();
+        await limits.PauseAsync(ClaudeKey, new UsageLimit(Now.AddHours(1)), CancellationToken.None);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        await Seed("ORD-2", "plan", StageStatus.Pending, "Planned");
+        var o = Create(maxRuns: 2);
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-2").Status);
+        Assert.Single(codex.Requests);
+        Assert.Empty(agent.Requests);
+        Assert.True(Paused(ClaudeKey));
+    }
+
+    [Fact] public async Task Limited_review_keeps_the_review_owed()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Limited(Now.AddHours(1)));
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o); // paused: the review is not started again
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, true), (t.StageId, t.Status, t.ReviewDue));
+        Assert.Empty(store.GateReviews);
+        Assert.Empty(AutoApprovalComments);
+        Assert.Equal(1, ReviewRequests);
+        Assert.True(Paused(ClaudeKey));
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "review of plan paused: Claude usage limit, resets 11:00");
+
+        time.Advance(TimeSpan.FromHours(1));
+        AnswerReviews(Low);
+        await TickIdle(o);
+
+        Assert.Equal("implement", store.Single("ORD-1").StageId); // reviewed and auto-approved after the reset
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Limited_evidence_keeps_evidence_owed()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, () => FakeAgentRunner.Limited(null));
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (t.Status, t.EvidenceDue));
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.Equal(1, EvidenceRequests);
+        Assert.True(Paused(ClaudeKey));
+        Assert.Single(store.EventMessages("ORD-1"),
+            m => m == "evidence for implement paused: Claude usage limit, trying again every 30 minutes");
+    }
+
+    [Fact] public async Task Successful_probe_lifts_the_pause()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal("implement paused: Claude usage limit, trying again every 30 minutes", store.EventMessages("ORD-1")[^1]);
+        time.Advance(TimeSpan.FromMinutes(29));
+        await TickIdle(o);
+        Assert.Single(agent.Requests);
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        await TickIdle(o);
+
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Three_limited_runs_never_block()
+    {
+        Assert.Equal(3, registry.Get("orders").MaxAttemptsPerStage);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        for (var i = 0; i < 3; i++) agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        var o = Create();
+
+        for (var i = 0; i < 3; i++)
+        {
+            await TickIdle(o);
+            time.Advance(ProviderLimits.ProbeInterval);
+        }
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Pending, 0), (t.Status, t.Attempts));
+        Assert.Equal(3, agent.Requests.Count);
+        Assert.True(Paused(ClaudeKey));
+    }
+
+    [Fact] public async Task Failed_run_lifts_the_pause_and_counts_an_attempt()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        agent.Results.Enqueue(FakeAgentRunner.Fail("boom"));
+        var o = Create();
+
+        await TickIdle(o);
+        time.Advance(ProviderLimits.ProbeInterval);
+        await TickIdle(o);
+
+        Assert.Equal(1, store.Single("ORD-1").Attempts);
+        Assert.Empty(limits.Pauses);
     }
 
     #endregion

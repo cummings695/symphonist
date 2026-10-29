@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Symphonist.Core.Risk;
 
@@ -38,6 +39,18 @@ public static class StatusTable
 
         return sb.ToString();
     }
+
+    /// <summary>Providers paused by a usage limit, with when each resets or (no reset known) is next tried; local times.</summary>
+    public static string RenderLimits(IEnumerable<ProviderPauseDto> pauses) =>
+        Table(["PROVIDER", "KEY", "SINCE", "RESETS / NEXT TRY"], pauses.Select(p => new[]
+        {
+            p.Provider, p.Key, Local(p.Since),
+            p.ResetsAt is { } resets ? $"resets {Local(resets)}"
+            : p.NextProbeAt is { } next ? $"next try {Local(next)}"
+            : "",
+        }));
+
+    private static string Local(DateTimeOffset at) => at.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
     private static IEnumerable<StageAgreementDto> Agreement(ProjectDto p) =>
         (p.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);

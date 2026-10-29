@@ -12,11 +12,14 @@ using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
 
-public enum ExecutionStatus { Completed, InProgress, Failed }
+/// <summary>UsageLimited: the agent provider's usage limit stopped the run; nothing about the ticket failed.</summary>
+public enum ExecutionStatus { Completed, InProgress, Failed, UsageLimited }
 
 /// <param name="MergeStarted">Post-approval: the host accepted the merge request and is still merging.</param>
+/// <param name="Limit">The usage limit that stopped the run; set only for <see cref="ExecutionStatus.UsageLimited"/>.</param>
+/// <param name="LimitKey">The usage-limit key of the stage's agent (see <see cref="UsageLimits.KeyFor"/>), with <paramref name="Limit"/>.</param>
 public sealed record ExecutionResult(ExecutionStatus Status, string? Error = null, string? Event = null,
-    bool MergeStarted = false);
+    bool MergeStarted = false, UsageLimit? Limit = null, string? LimitKey = null);
 
 /// <summary>
 /// Performs each stage's side effects through the plug-in interfaces. Only mutates the ticket's artifact fields
@@ -375,7 +378,9 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         // The runner only fills Output for the stage schema; other schemas carry the stage fields in Structured.
         var output = schema == StageOutputSchema.Json ? result.Output : StageOutputSchema.Read(result.Structured);
         ExecutionResult? failure =
-            !result.Succeeded ? Failed(result.Error ?? "agent run failed")
+            !result.Succeeded && result.Limit is { } limit
+                ? new ExecutionResult(ExecutionStatus.UsageLimited, result.Error, Limit: limit, LimitKey: UsageLimits.KeyFor(settings))
+            : !result.Succeeded ? Failed(result.Error ?? "agent run failed")
             : output is null ? Failed("agent returned no structured output")
             : output.Status != "completed" ? Failed(string.IsNullOrWhiteSpace(output.Summary) ? $"stage status '{output.Status}'" : output.Summary)
             : null;

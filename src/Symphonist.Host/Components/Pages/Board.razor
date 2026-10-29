@@ -1,8 +1,10 @@
 @page "/"
+@using Symphonist.Core.Agents
 @implements IAsyncDisposable
 @inject BoardQuery Query
 @inject BoardNotifier Notifier
 @inject Orchestrator Orchestrator
+@inject ProviderLimits Limits
 @inject ProjectRegistry Registry
 @inject TimeProvider Time
 @inject DashboardChrome Chrome
@@ -22,7 +24,8 @@
     @* Only the project the heading names: during a switch the last board is still the previous project's. *@
     @if (filtered is not null && filtered.Id == Project)
     {
-        <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
+        <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" OnResumeUsage="ResumeUsageAsync"
+                        Zone="Time.LocalTimeZone" Now="now" />
     }
     <div class="page-head-action">
         <a class="button button-quiet" href="/projects/new">Add project</a>
@@ -297,6 +300,27 @@ else
             // E.g. paused.json cannot be written: report it rather than kill the circuit.
             Log.LogError(e, "{Action} {Project} from the dashboard failed", p.Paused ? "Resuming" : "Pausing", p.Id);
             Chrome.ShowMessage($"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}");
+        }
+        await ReloadAsync();
+    }
+
+    /// <summary>Lets jobs on a provider paused by a usage limit start again now (e.g. after switching plans).</summary>
+    private async Task ResumeUsageAsync(string key)
+    {
+        var provider = UsageLimits.ProviderName(key);
+        try
+        {
+            await Limits.ResumeAsync(key, disposed.Token);
+            Chrome.ShowMessage($"{provider} resumed");
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Resuming {Key} from the dashboard failed", key);
+            Chrome.ShowMessage($"Could not resume {provider}: {e.Message}");
         }
         await ReloadAsync();
     }

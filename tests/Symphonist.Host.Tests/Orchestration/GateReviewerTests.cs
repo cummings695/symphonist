@@ -237,6 +237,22 @@ public sealed class GateReviewerTests : IDisposable
     }
 
     [Fact]
+    public async Task Usage_limited_run_returns_the_limit_and_is_recorded()
+    {
+        var t = At("implement");
+        var resets = Now.AddHours(1);
+        agent.Results.Enqueue(FakeAgentRunner.Limited(resets));
+
+        var outcome = await reviewer.ReviewAsync(project, t, source, CancellationToken.None);
+
+        Assert.Equal(new UsageLimit(resets), outcome.Limit);
+        var run = Assert.Single(store.AgentRuns);
+        Assert.True(run.IsReview);
+        Assert.False(run.Succeeded);
+        Assert.Equal("Claude usage limit reached", run.Error);
+    }
+
+    [Fact]
     public async Task Failed_run_with_low_structured_output_is_still_high()
     {
         agent.Results.Enqueue(FakeAgentRunner.Review("low") with { Succeeded = false, Error = "max turns" });

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
@@ -21,10 +22,12 @@ public enum ForgetResult { Forgotten, NotFound, Running }
 /// Syncs tracker tickets into the store, drives each ticket through the pipeline, and mirrors state back to the tracker.
 /// Ticks, commands (approve / send back / unblock) and agent-run and review completions all run under one lock, and
 /// every one of them loads the ticket fresh from the store, so no two writers ever save a ticket from stale copies.
+/// A job (stage run, review or evidence) starts only while its provider is not paused by a usage limit
+/// (<see cref="ProviderLimits"/>); a run the limit stops pauses the provider and costs the ticket nothing.
 /// </summary>
 public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, IIntegrationFactory integrations,
-    StageExecutor executor, GateReviewer reviewer, EvidenceRunner evidence, TimeProvider time, OrchestratorOptions options,
-    ILogger<Orchestrator> log) : IDisposable
+    StageExecutor executor, GateReviewer reviewer, EvidenceRunner evidence, ProviderLimits limits, TimeProvider time,
+    OrchestratorOptions options, ILogger<Orchestrator> log) : IDisposable
 {
     private const string LeftQuery = "no longer matches tracker query";
 
@@ -498,6 +501,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             case StageStatus.Pending when agentStage:
                 if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                // A paused provider leaves the ticket exactly as it is until the reset (or the next probe).
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.AgentFor(t.StageId)), ct)) return;
                 t.Status = StageStatus.Running;
                 t.UpdatedAt = time.GetUtcNow();
                 await store.SaveAsync(t, ct);
@@ -508,6 +513,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 when t is { ReviewDue: true, WaitingSince: not null } && p.Reviews(p.Stage(t.StageId)):
                 // The round's review (also one interrupted by a restart): runs like an agent stage; nothing is saved.
                 if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.Review.Agent), ct)) return;
                 inFlight[t.Id] = RunReviewAsync(p, io, t.Clone(), source);
                 await AddEventOnceAsync(t, $"reviewing {t.StageId}", ct);
                 return;
@@ -517,6 +523,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 // The round's evidence (also one interrupted by a restart), after its review; cancelled when the round
                 // is decided (see ApplyAsync). Nothing is saved until it completes.
                 if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.Evidence.Agent), ct)) return;
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
                 evidenceRuns[t.Id] = (t.WaitingSince!.Value, cts);
                 inFlight[t.Id] = RunEvidenceAsync(p, io, t.Clone(), source, cts);
@@ -628,7 +635,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(CancellationToken.None);
         try
         {
-            if (result is not null) await CompleteAgentStageAsync(p, io, run, result, CancellationToken.None);
+            if (result is not null)
+            {
+                await NoteProviderAsync(UsageLimits.KeyFor(p.AgentFor(run.StageId)), result.Limit);
+                await CompleteAgentStageAsync(p, io, run, result, CancellationToken.None);
+            }
         }
         catch (Exception e)
         {
@@ -668,9 +679,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var fromStageId = t.StageId;
         // The newest query result, not the run's start snapshot: a deferred send-back's comment came during the run.
         var source = latestSources.GetValueOrDefault(p.Id)?.GetValueOrDefault(t.Key);
-        var outcome = result.Status == ExecutionStatus.Completed
-            ? PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t))
-            : PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now);
+        var outcome = result.Status switch
+        {
+            ExecutionStatus.Completed => PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t)),
+            ExecutionStatus.UsageLimited =>
+                PipelineEngine.StageLimited(t, $"{t.StageId} paused: {Describe(result.LimitKey!, result.Limit!)}", now),
+            _ => PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now),
+        };
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, fromStageId, outcome, ct);
     }
@@ -697,7 +712,18 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(CancellationToken.None);
         try
         {
-            if (result is not null) await CompleteReviewAsync(p, io, run, result, CancellationToken.None);
+            var key = UsageLimits.KeyFor(p.Review.Agent);
+            if (result?.Limit is { } limit)
+            {
+                // Not a verdict: the review stays owed and runs again once the provider lets it.
+                if (await NoteProviderAsync(key, limit))
+                    await AddEventAsync(run, $"review of {run.StageId} paused: {Describe(key, limit)}", CancellationToken.None);
+            }
+            else if (result is not null)
+            {
+                await NoteProviderAsync(key, null);
+                await CompleteReviewAsync(p, io, run, result, CancellationToken.None);
+            }
         }
         catch (Exception e)
         {
@@ -798,10 +824,20 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(CancellationToken.None);
         try
         {
+            var key = UsageLimits.KeyFor(p.Evidence.Agent);
             if (decided)
                 await AddEventAsync(run, $"evidence for {run.StageId} cancelled: the gate was decided", CancellationToken.None);
+            else if (outcome is { Status: EvidenceStatus.UsageLimited, Limit: { } limit })
+            {
+                // Nothing recorded or posted: the evidence stays owed and is gathered once the provider lets it.
+                if (await NoteProviderAsync(key, limit))
+                    await AddEventAsync(run, $"evidence for {run.StageId} paused: {Describe(key, limit)}", CancellationToken.None);
+            }
             else if (outcome is not null)
+            {
+                await NoteProviderAsync(key, null);
                 await CompleteEvidenceAsync(p, io, run, outcome, CancellationToken.None);
+            }
         }
         catch (Exception e)
         {
@@ -1080,6 +1116,34 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             log.LogWarning(e, "Cancelling the evidence run of {Project}/{Key} raised", t.ProjectId, t.Key);
         }
     }
+
+    /// <summary>
+    /// What a finished job says about its provider: a usage limit pauses <paramref name="key"/>, any other result lifts
+    /// its pause. Returns whether this started a pause (so its event is posted once per pause, not per probe). Best
+    /// effort: a failure is logged, and the job's own result is still applied.
+    /// </summary>
+    private async Task<bool> NoteProviderAsync(string key, UsageLimit? limit)
+    {
+        try
+        {
+            if (limit is null)
+            {
+                await limits.SucceededAsync(key, CancellationToken.None);
+                return false;
+            }
+            var started = limits.Pauses.All(p => p.Key != key);
+            await limits.PauseAsync(key, limit, CancellationToken.None);
+            return started;
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Recording the usage limit state of {Key} failed", key);
+            return false;
+        }
+    }
+
+    private string Describe(string key, UsageLimit limit) =>
+        UsageLimitText.Describe(key, limit.ResetsAt, time.LocalTimeZone, time.GetUtcNow());
 
     private Task SaveRetryAsync(Ticket t, string target, CancellationToken ct)
     {

@@ -30,6 +30,7 @@ public sealed class BoardComponentTests : IDisposable
     private readonly FakeTimeProvider time = new(Now);
     private readonly BoardNotifier notifier;
     private readonly ProjectRegistry registry;
+    private readonly ProviderLimits limits;
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
@@ -39,10 +40,11 @@ public sealed class BoardComponentTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
+        limits = new ProviderLimits(store, time);
         var orchestrator = new Orchestrator(registry, store, integrations,
             new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
-            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
 
         ctx.Services.AddSingleton<TimeProvider>(time);
@@ -50,6 +52,7 @@ public sealed class BoardComponentTests : IDisposable
         ctx.Services.AddSingleton(registry);
         ctx.Services.AddSingleton<ITicketStore>(store);
         ctx.Services.AddSingleton(orchestrator);
+        ctx.Services.AddSingleton(limits);
         ctx.Services.AddSingleton<BoardQuery>();
         ctx.Services.AddScoped<DashboardChrome>();
     }
@@ -412,6 +415,36 @@ public sealed class BoardComponentTests : IDisposable
 
         cut.WaitForAssertion(() => Assert.Contains("Could not pause Project orders:", StatusLine()));
         Assert.NotEmpty(cut.FindAll("[data-board-loaded]"));
+    }
+
+    [Fact]
+    public async Task Heading_shows_usage_pause_with_reset_and_resume_button()
+    {
+        await limits.PauseAsync("claude-code", new UsageLimit(Now.AddHours(1)), default);
+        await limits.PauseAsync("codex:chatgpt", new UsageLimit(null), default); // no orders job runs on Codex
+        var cut = RenderBoard("/?project=orders");
+
+        var pause = cut.Find("[data-project='orders'] [data-usage-pause='claude-code']");
+        Assert.Contains("Paused: Claude usage limit, resets 13:00", pause.TextContent);
+        Assert.Empty(cut.FindAll("[data-usage-pause='codex:chatgpt']"));
+        Assert.Empty(RenderBoard("/").FindAll("[data-usage-pause]")); // the filtered board's heading only
+
+        cut = RenderBoard("/?project=orders");
+        cut.Find("[data-usage-pause='claude-code'] button").Click();
+
+        cut.WaitForAssertion(() => Assert.Empty(cut.FindAll("[data-usage-pause]")));
+        Assert.Equal(["codex:chatgpt"], limits.Pauses.Select(p => p.Key));
+        Assert.Contains("Claude resumed", StatusLine());
+    }
+
+    [Fact]
+    public async Task Heading_shows_an_unknown_reset_as_retrying()
+    {
+        await limits.PauseAsync("claude-code", new UsageLimit(null), default);
+
+        var pause = RenderBoard("/?project=orders").Find("[data-usage-pause='claude-code']");
+
+        Assert.Contains("Paused: Claude usage limit, trying again every 30 minutes", pause.TextContent);
     }
 
     [Fact]

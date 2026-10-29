@@ -85,6 +85,7 @@ builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictiona
 builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<GateReviewer>();
 builder.Services.AddSingleton<EvidenceRunner>();
+builder.Services.AddSingleton<ProviderLimits>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
 builder.Services.AddSingleton<ProjectFileStore>();
@@ -103,6 +104,7 @@ var app = builder.Build();
 
 var notifier = app.Services.GetRequiredService<BoardNotifier>();
 app.Services.GetRequiredService<Orchestrator>().ProblemsChanged += notifier.Notify;
+app.Services.GetRequiredService<ProviderLimits>().Changed += notifier.Notify;
 var registry = app.Services.GetRequiredService<ProjectRegistry>();
 registry.PausedChanged += notifier.Notify;
 registry.ProjectsChanged += notifier.Notify;

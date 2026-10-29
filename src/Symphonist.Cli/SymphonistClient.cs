@@ -31,6 +31,11 @@ public sealed record OutcomeDto(bool Changed, string Message);
 
 public sealed record DashboardLinkDto(Uri Url);
 
+/// <summary>An agent provider paused by a usage limit.</summary>
+/// <param name="NextProbeAt">With no known reset, when one job may next try the provider.</param>
+public sealed record ProviderPauseDto(string Key, string Provider, DateTimeOffset Since, DateTimeOffset? ResetsAt,
+    DateTimeOffset? NextProbeAt);
+
 /// <summary>The host is unreachable (not running, or no API token exists yet).</summary>
 public sealed class HostNotRunningException(int port)
     : Exception($"Symphonist host is not running on 127.0.0.1:{port}");
@@ -89,6 +94,13 @@ public sealed class SymphonistClient : IDisposable
     /// <summary>Asks the host to reload the project files (after a hand edit).</summary>
     public Task<ProjectReloadDto> ReloadProjectsAsync(CancellationToken ct) =>
         SendAsync<ProjectReloadDto>(HttpMethod.Post, "/api/projects/reload", null, ct);
+
+    public Task<List<ProviderPauseDto>> ListLimitsAsync(CancellationToken ct) =>
+        SendAsync<List<ProviderPauseDto>>(HttpMethod.Get, "/api/limits", null, ct);
+
+    /// <summary>Lets jobs on the provider paused under <paramref name="key"/> start again now.</summary>
+    public Task ResumeLimitAsync(string key, CancellationToken ct) =>
+        SendAsync<object>(HttpMethod.Post, "/api/limits/resume", JsonContent.Create(new { key }, options: Json), ct);
 
     /// <summary>A single-use sign-in link for the dashboard, valid for two minutes.</summary>
     public async Task<Uri> CreateDashboardLinkAsync(CancellationToken ct) =>

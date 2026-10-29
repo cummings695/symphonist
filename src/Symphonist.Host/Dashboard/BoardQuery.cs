@@ -1,3 +1,4 @@
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Storage;
@@ -7,7 +8,7 @@ using Symphonist.Integrations;
 namespace Symphonist.Host.Dashboard;
 
 /// <summary>Builds the board the dashboard renders: tickets grouped into stage columns, with links, cost and counts.</summary>
-public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orchestrator orchestrator)
+public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orchestrator orchestrator, ProviderLimits limits)
 {
     public const string UnknownColumnId = "?unknown";
     public const int DoneLimit = 20;
@@ -27,9 +28,11 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         var cards = tickets.Select(t => (Ticket: t,
             Card: ToCard(t, byId.GetValueOrDefault(t.ProjectId), costs, issues.GetValueOrDefault(t.Id)))).ToList();
 
+        var pauses = limits.Pauses;
         var boardProjects = configured.OrderBy(p => p.Id, StringComparer.Ordinal)
             .Select(p => new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
-                orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList()))
+                orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList(),
+                UsagePausesOf(p, pauses)))
             .ToList();
 
         var columns = new List<BoardColumn>();
@@ -158,6 +161,12 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             known, t.Risk, known && PipelineEngine.WaitsOnReviewer(p!, t),
             placed ? index + 1 : null, placed ? stages!.Count : null,
             known && PipelineEngine.WaitsOnEvidence(p!, t), evidenceIssues);
+    }
+
+    private static IReadOnlyList<ProviderPause> UsagePausesOf(ProjectConfig p, IReadOnlyList<ProviderPause> pauses)
+    {
+        var keys = UsageLimits.KeysInUse(p);
+        return pauses.Where(x => keys.Contains(x.Key)).ToList();
     }
 
     private static DateTimeOffset? Since(Ticket t) => t.Status switch

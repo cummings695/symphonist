@@ -36,6 +36,10 @@ public sealed class FakeAgentRunner : IAgentRunner
     public static AgentRunResult Fail(string error) =>
         new(false, null, null, TimeSpan.FromSeconds(1), error, """{"raw":false}""");
 
+    /// <summary>A run the provider's usage limit stopped; <paramref name="resetsAt"/> null when it named no reset.</summary>
+    public static AgentRunResult Limited(DateTimeOffset? resetsAt, string error = "Claude usage limit reached") =>
+        new(false, null, null, TimeSpan.FromSeconds(1), error, """{"raw":"limited"}""", Limit: new UsageLimit(resetsAt));
+
     /// <summary>A successful review run whose structured output is a gate verdict.</summary>
     public static AgentRunResult Review(string risk, string summary = "reviewed", string[]? reasons = null,
         string[]? checkedItems = null, string[]? areas = null)

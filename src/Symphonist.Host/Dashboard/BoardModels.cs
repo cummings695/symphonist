@@ -5,8 +5,10 @@ using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Dashboard;
 
+/// <param name="UsagePauses">The usage-limit pauses of providers some job of this project runs on.</param>
 public sealed record BoardProject(string Id, string Name, bool Paused, Isolation Isolation, string? Problem, string Source,
-    ReviewMode Review = ReviewMode.Off, IReadOnlyList<StageAgreement>? Agreement = null);
+    ReviewMode Review = ReviewMode.Off, IReadOnlyList<StageAgreement>? Agreement = null,
+    IReadOnlyList<ProviderPause>? UsagePauses = null);
 
 /// <param name="Reviewing">An active auto gate whose review is still owed: not waiting on the developer yet.</param>
 /// <param name="StageNumber">1-based position in the card's own project pipeline; null for an unknown project or stage and for a Done-kind stage.</param>
