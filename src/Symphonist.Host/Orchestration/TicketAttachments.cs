@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using Symphonist.Core;
 using Symphonist.Core.Integrations;
@@ -96,6 +97,53 @@ public static class TicketAttachments
             TryDelete(() => Directory.Delete(sub, true));
 
         return new AttachmentSet(dir, entries);
+    }
+
+    /// <summary>
+    /// The error to fail the stage with when one of <paramref name="paths"/> ('/'-separated, relative to
+    /// <paramref name="workspace"/>) is a byte-identical copy of an Available attachment; null otherwise. Empty attachments
+    /// are skipped (they would match every empty file), as are paths that are not files inside the workspace.
+    /// </summary>
+    public static async Task<string?> FindCopyAsync(AttachmentSet set, string workspace, IEnumerable<string> paths,
+        CancellationToken ct)
+    {
+        var attachments = new List<(AttachmentEntry Entry, long Length, byte[] Hash)>();
+        foreach (var e in set.Entries)
+        {
+            if (e is not { State: AttachmentState.Available, LocalName: { } local }) continue;
+            var file = new FileInfo(Path.Combine(set.Directory, local));
+            if (!file.Exists || file.Length == 0) continue;
+            attachments.Add((e, file.Length, await HashAsync(file.FullName, ct)));
+        }
+        if (attachments.Count == 0) return null;
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace)) + Path.DirectorySeparatorChar;
+        foreach (var path in paths)
+        {
+            var full = Path.GetFullPath(Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!full.StartsWith(root, PathComparison)) continue;
+            var file = new FileInfo(full);
+            if (!file.Exists) continue;
+
+            byte[]? hash = null;
+            foreach (var a in attachments)
+            {
+                if (a.Length != file.Length) continue;
+                hash ??= await HashAsync(full, ct);
+                if (hash.AsSpan().SequenceEqual(a.Hash))
+                    return $"agent copied attachment \"{a.Entry.FileName}\" into {path}; attachments must not be committed";
+            }
+        }
+        return null;
+    }
+
+    private static readonly StringComparison PathComparison =
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private static async Task<byte[]> HashAsync(string path, CancellationToken ct)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return await SHA256.HashDataAsync(stream, ct);
     }
 
     /// <summary>Removes the ticket's attachment directory; no-op when it does not exist.</summary>

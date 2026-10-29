@@ -151,6 +151,26 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Uncommitted_files_lists_modified_added_and_untracked_but_not_ignored()
+    {
+        var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
+        WriteFile(ws, ".gitignore", "bin/\n");
+        WriteFile(ws, "gone.txt", "bye");
+        await git.CommitAllAsync(ws, "base", default);
+
+        WriteFile(ws, "README.md", "changed");
+        WriteFile(ws, "staged/new.cs", "class N {}");
+        Git(ws, "add staged/new.cs");
+        WriteFile(ws, "tests/Fixtures/Prix é.csv", "id\n");
+        WriteFile(ws, "bin/out.dll", "binary");
+        File.Delete(Path.Combine(ws, "gone.txt"));
+
+        var files = await git.UncommittedFilesAsync(ws, default);
+
+        Assert.Equal(["README.md", "gone.txt", "staged/new.cs", "tests/Fixtures/Prix é.csv"], files.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task Changed_files_keep_non_ascii_and_spaced_paths_exact_and_force_risk_area_match()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);

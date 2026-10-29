@@ -283,6 +283,56 @@ public sealed class TicketAttachmentsTests : IDisposable
         Assert.Equal("second", File.ReadAllText(Path.Combine(Dir, set.Entries[1].LocalName!)));
     }
 
+    private string Workspace => Path.Combine(home.Path, "ws");
+
+    private void WriteWorkspace(string relative, string content)
+    {
+        var path = Path.Combine([Workspace, .. relative.Split('/')]);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+    }
+
+    private Task<string?> FindCopy(AttachmentSet set, params string[] paths) =>
+        TicketAttachments.FindCopyAsync(set, Workspace, paths, default);
+
+    [Fact]
+    public async Task Find_copy_reports_identical_file()
+    {
+        var set = await Sync(Ticket(Add("10002", "orders.csv", "id,total\n1,9\n"),
+            Add("10003", "screen.png", "png-bytes", minutes: 1)));
+        WriteWorkspace("src/Export.cs", "class Export {}");
+        WriteWorkspace("tests/Fixtures/orders.csv", "id,total\n1,9\n");
+
+        var error = await FindCopy(set, "src/Export.cs", "tests/Fixtures/orders.csv");
+
+        Assert.Equal("agent copied attachment \"orders.csv\" into tests/Fixtures/orders.csv; attachments must not be committed",
+            error);
+    }
+
+    [Fact]
+    public async Task Find_copy_ignores_modified_copy_and_missing_paths()
+    {
+        var set = await Sync(Ticket(Add("10002", "orders.csv", "id,total\n1,9\n")));
+        WriteWorkspace("tests/Fixtures/orders.csv", "id,total\n1,8\n"); // same length, different bytes
+        WriteWorkspace("tests/Fixtures/longer.csv", "id,total\n1,9\n2,3\n");
+        Directory.CreateDirectory(Path.Combine(Workspace, "dir"));
+        WriteWorkspace("../outside.csv", "id,total\n1,9\n");
+
+        var error = await FindCopy(set, "tests/Fixtures/orders.csv", "tests/Fixtures/longer.csv", "deleted.csv", "dir",
+            "../outside.csv");
+
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public async Task Find_copy_ignores_zero_byte_attachments()
+    {
+        var set = await Sync(Ticket(Add("10002", "empty.txt", "")));
+        WriteWorkspace("src/.gitkeep", "");
+
+        Assert.Null(await FindCopy(set, "src/.gitkeep"));
+    }
+
     [Fact]
     public async Task Delete_removes_the_directory_and_ignores_a_missing_one()
     {

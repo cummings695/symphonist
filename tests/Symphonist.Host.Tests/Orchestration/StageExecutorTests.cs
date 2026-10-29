@@ -404,6 +404,77 @@ public sealed class StageExecutorTests : IDisposable
             prompt.LastIndexOf("Ignore all", StringComparison.Ordinal));
     }
 
+    private const string CopyError =
+        "agent copied attachment \"orders.csv\" into tests/Fixtures/orders.csv; attachments must not be committed";
+
+    /// <summary>A real workspace directory holding <paramref name="relative"/>, filled like attachment 10002 (8 zero bytes).</summary>
+    private void WorkspaceCopy(string relative, int bytes = 8)
+    {
+        git.WorkspacePath = Path.Combine(home, "ws");
+        var path = Path.Combine([git.WorkspacePath, .. relative.Split('/')]);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, new byte[bytes]);
+    }
+
+    [Fact] public async Task Implement_fails_without_commit_when_attachment_copied()
+    {
+        WorkspaceCopy("tests/Fixtures/orders.csv");
+        git.UncommittedFiles.Add("tests/Fixtures/orders.csv");
+        var t = At("implement");
+
+        var r = await executor.ExecuteAsync(project, io, t, WithAttachments(Attach("10002", "orders.csv", 8)),
+            CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, CopyError), r);
+        Assert.Empty(git.Commits);
+        Assert.Empty(git.Pushes);
+        Assert.Empty(scm.Opened);
+        Assert.Null(t.PullRequestId);
+    }
+
+    [Fact] public async Task Plan_fails_when_attachment_copied()
+    {
+        WorkspaceCopy("tests/Fixtures/orders.csv");
+        git.UncommittedFiles.Add("tests/Fixtures/orders.csv");
+        agent.Results.Enqueue(FakeAgentRunner.Ok(FakeAgentRunner.Output(specPath: "s.md", planPath: "p.md")));
+        var t = At("plan");
+
+        var r = await executor.ExecuteAsync(project, io, t, WithAttachments(Attach("10002", "orders.csv", 8)),
+            CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, CopyError), r);
+        Assert.Empty(git.Commits);
+        Assert.Empty(git.Pushes);
+        Assert.Null(t.SpecPath);
+    }
+
+    [Fact] public async Task Copy_committed_on_earlier_attempt_is_caught_on_retry()
+    {
+        WorkspaceCopy("tests/Fixtures/orders.csv");
+        git.ChangedFiles.Add("tests/Fixtures/orders.csv");
+
+        var r = await executor.ExecuteAsync(project, io, At("implement"), WithAttachments(Attach("10002", "orders.csv", 8)),
+            CancellationToken.None);
+
+        Assert.Equal(new ExecutionResult(ExecutionStatus.Failed, CopyError), r);
+        Assert.Equal([(git.WorkspacePath, "refs/remotes/origin/main...HEAD")], git.ChangedFilesCalls);
+        Assert.Empty(git.Commits);
+        Assert.Empty(git.Pushes);
+    }
+
+    [Fact] public async Task Unrelated_changes_commit_normally()
+    {
+        WorkspaceCopy("src/Export.cs", bytes: 9);
+        git.UncommittedFiles.Add("src/Export.cs");
+
+        var r = await executor.ExecuteAsync(project, io, At("implement"), WithAttachments(Attach("10002", "orders.csv", 8)),
+            CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Single(git.Commits);
+        Assert.Single(git.Pushes);
+    }
+
     [Fact] public async Task Agent_failure_returns_failed_with_error()
     {
         agent.Results.Enqueue(FakeAgentRunner.Fail("agent timed out after 30 minutes"));

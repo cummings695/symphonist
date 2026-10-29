@@ -101,6 +101,20 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         return output.Split('\0', StringSplitOptions.RemoveEmptyEntries);
     }
 
+    /// <summary>
+    /// Porcelain v1 with <c>-z</c> is "XY path\0" per entry, never C-quoted and always relative to the repository root;
+    /// with --no-renames there is no second (original) path.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> UncommittedFilesAsync(string workspace, CancellationToken ct)
+    {
+        var output = await GitAsync(workspace, ct,
+            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames");
+        return output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(e => e.Length > 3)
+            .Select(e => e[3..])
+            .ToList();
+    }
+
     public async Task<string> DiffAsync(string workspace, string range, CancellationToken ct) =>
         await GitAsync(workspace, ct, [.. DiffArgs, range, "--"]);
 

@@ -93,6 +93,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         if (string.IsNullOrWhiteSpace(output.SpecPath) || string.IsNullOrWhiteSpace(output.PlanPath))
             return Failed("agent did not report spec_path and plan_path");
 
+        if (await FindAttachmentCopyAsync(p, run, ct) is { } copied) return Failed(copied);
         if (!await CommitAsync(p, run.Workspace, $"{t.Key}: spec and plan", ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
         t.SpecPath = output.SpecPath;
@@ -113,6 +114,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
 
+        if (await FindAttachmentCopyAsync(p, run, ct) is { } copied) return Failed(copied);
         if (!await CommitAsync(p, run.Workspace, title, ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
 
@@ -137,6 +139,19 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<bool> CommitAsync(ProjectConfig p, string workspace, string message, CancellationToken ct) =>
         await git.CommitAllAsync(workspace, message, ct)
         || await git.HasCommitsAheadAsync(workspace, p.Repo.MainBranch, ct);
+
+    /// <summary>
+    /// Ticket attachments (customer data, screenshots) must never reach the repository: checks what this commit would add
+    /// and what earlier attempts already committed on the branch for a byte-identical copy of one.
+    /// </summary>
+    private async Task<string?> FindAttachmentCopyAsync(ProjectConfig p, AgentStep run, CancellationToken ct)
+    {
+        if (!run.Attachments.HasFiles) return null;
+        var uncommitted = await git.UncommittedFilesAsync(run.Workspace, ct);
+        var committed = await git.ChangedFilesAsync(run.Workspace, $"refs/remotes/origin/{p.Repo.MainBranch}...HEAD", ct);
+        return await TicketAttachments.FindCopyAsync(run.Attachments, run.Workspace,
+            uncommitted.Concat(committed).Distinct(StringComparer.Ordinal), ct);
+    }
 
     private async Task<ExecutionResult> WatchBuildAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, string? commit,
         BuildPurpose purpose, CancellationToken ct)
