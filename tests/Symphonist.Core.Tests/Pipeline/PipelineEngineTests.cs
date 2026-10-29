@@ -2,6 +2,7 @@ using Symphonist.Integrations;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
 
 namespace Symphonist.Core.Tests.Pipeline;
 
@@ -505,6 +506,40 @@ public class PipelineEngineTests
         Assert.Null(PipelineEngine.SendBack(P, At("implement", StageStatus.Blocked), "fix", null, Now).Decision);
         Assert.Null(PipelineEngine.SendBack(P, At("implement", StageStatus.Approved), "fix", null, Now).Decision);
         Assert.Null(PipelineEngine.PostApprovalCompleted(P, approved, Now).Decision);
+    }
+
+    [Theory]
+    [InlineData(StageStatus.AwaitingApproval)]
+    [InlineData(StageStatus.Approved)]
+    [InlineData(StageStatus.Blocked)]
+    public void Send_back_from_gate_approved_or_blocked_is_a_touch(StageStatus status)
+    {
+        var o = PipelineEngine.SendBack(P, At("implement", status), "fix", null, Now);
+        Assert.True(o.Changed);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+    }
+
+    [Fact] public void Unblock_is_a_touch()
+    {
+        var o = PipelineEngine.Unblock(At("implement", StageStatus.Blocked), Now);
+        Assert.Equal(TouchKind.Unblock, o.Touch);
+        Assert.Null(PipelineEngine.Unblock(At("implement"), Now).Touch);
+    }
+
+    [Fact] public void Deferred_card_move_back_is_a_touch()
+    {
+        var t = At("implement", StageStatus.Running);
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", null, Now);
+        Assert.NotNull(t.PendingSourceStatus);
+        var done = PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal(TouchKind.SendBack, done.Touch);
+    }
+
+    [Fact] public void Stage_failure_and_merge_hold_are_not_touches()
+    {
+        Assert.Null(PipelineEngine.StageFailed(P, At("implement", StageStatus.Running), "boom", Now).Touch);
+        Assert.Null(PipelineEngine.StageSucceeded(P, At("implement", StageStatus.Running), Now).Touch);
+        Assert.Null(PipelineEngine.MergeHeld(P, At("implement", StageStatus.Approved), "dirty", Now).Touch);
     }
 
     [Fact] public void Block_clears_waiting_since_and_review_due()

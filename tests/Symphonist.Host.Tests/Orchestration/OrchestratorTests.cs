@@ -8,6 +8,7 @@ using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 
@@ -2107,6 +2108,48 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(["@claude PR comment from me: rerunning implement", "sent back to implement"], events.Take(2));
         var decision = Assert.Single(store.GateDecisions);
         Assert.Equal(("implement", GateDecision.SentBack, false), (decision.StageId, decision.Decision, decision.Auto));
+    }
+
+    [Fact] public async Task Touch_is_recorded_against_the_stage_it_left()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var touch = Assert.Single(store.Touches);
+        Assert.Equal(("orders", "implement", TouchKind.SendBack), (touch.ProjectId, touch.StageId, touch.Kind));
+    }
+
+    [Fact] public async Task Teammate_pr_comment_rerun_is_not_a_touch()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo", mine: false, author: "sam"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+        Assert.Empty(store.Touches);
+    }
+
+    [Fact] public async Task Own_marker_comment_rerun_is_a_touch()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Single(store.Touches);
     }
 
     [Fact] public async Task Pr_comment_triggers_once()

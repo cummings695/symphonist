@@ -570,4 +570,23 @@ public sealed class SqliteTicketStoreTests : IDisposable
         await _store.RemoveProviderPauseAsync("missing", default);
         Assert.Equal(["codex:chatgpt"], (await _store.ProviderPausesAsync(default)).Select(p => p.Key));
     }
+
+    [Fact]
+    public async Task Touches_filter_by_project_and_time_and_go_with_the_ticket()
+    {
+        var t = new Ticket { Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-9", StageId = "plan", Title = "x" };
+        await _store.SaveAsync(t, default);
+        await _store.AddTouchAsync(new TouchRecord(t.Id, "orders", "implement", TouchKind.SendBack, Now), default);
+        await _store.AddTouchAsync(new TouchRecord(t.Id, "orders", "implement", TouchKind.Unblock, Now.AddDays(-3)), default);
+        await _store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "billing", "plan", TouchKind.SendBack, Now), default);
+
+        Assert.Equal(2, (await _store.TouchesAsync(null, Now.AddDays(-1), default)).Count);
+        Assert.Equal(3, (await _store.TouchesAsync(null, Now.AddDays(-4), default)).Count);
+        var orders = await _store.TouchesAsync("orders", Now.AddDays(-1), default);
+        Assert.Equal([new TouchRecord(t.Id, "orders", "implement", TouchKind.SendBack, Now)], orders);
+
+        Assert.True(await _store.DeleteAsync("orders", "ORD-9", default));
+        Assert.Empty(await _store.TouchesAsync("orders", Now.AddDays(-4), default));
+        Assert.Single(await _store.TouchesAsync(null, Now.AddDays(-4), default));
+    }
 }

@@ -76,6 +76,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             db.GateReviews.RemoveRange(await db.GateReviews.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
             db.GateDecisions.RemoveRange(await db.GateDecisions.Where(d => d.TicketId == ticket.Id).ToListAsync(ct));
             db.Evidence.RemoveRange(await db.Evidence.Where(x => x.TicketId == ticket.Id).ToListAsync(ct));
+            db.Touches.RemoveRange(await db.Touches.Where(x => x.TicketId == ticket.Id).ToListAsync(ct));
             db.Tickets.Remove(ticket);
             await db.SaveChangesAsync(ct);
             return true;
@@ -237,6 +238,31 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var costs = await db.AgentRuns.AsNoTracking().Where(r => r.CostUsd != null)
             .Select(r => new { r.TicketId, Cost = r.CostUsd!.Value }).ToListAsync(ct);
         return costs.GroupBy(c => c.TicketId).ToDictionary(g => g.Key, g => g.Sum(c => c.Cost));
+    }
+
+    public async Task AddTouchAsync(TouchRecord touch, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.Touches.Add(new TouchEntity
+            {
+                TicketId = touch.TicketId, ProjectId = touch.ProjectId, StageId = touch.StageId, Kind = touch.Kind, At = touch.At,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.Touches.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        // Filtered and ordered client-side: At is stored as a binary long, which does not compare as a time.
+        return (await query.ToListAsync(ct)).Where(x => x.At >= since).OrderBy(x => x.At).ThenBy(x => x.Id)
+            .Select(x => new TouchRecord(x.TicketId, x.ProjectId, x.StageId, x.Kind, x.At)).ToList();
     }
 
     public async Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)

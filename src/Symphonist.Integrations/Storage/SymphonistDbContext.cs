@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
 
 namespace Symphonist.Integrations.Storage;
 
@@ -70,6 +71,16 @@ public sealed class GateDecisionEntity
     public DateTimeOffset At { get; set; }
 }
 
+public sealed class TouchEntity
+{
+    public long Id { get; set; }
+    public Guid TicketId { get; set; }
+    public string ProjectId { get; set; } = "";
+    public string StageId { get; set; } = "";
+    public TouchKind Kind { get; set; }
+    public DateTimeOffset At { get; set; }
+}
+
 public sealed class ProviderPauseEntity
 {
     public string Key { get; set; } = "";
@@ -87,6 +98,7 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
     public DbSet<GateDecisionEntity> GateDecisions => Set<GateDecisionEntity>();
     public DbSet<EvidenceEntity> Evidence => Set<EvidenceEntity>();
 
+    public DbSet<TouchEntity> Touches => Set<TouchEntity>();
     public DbSet<ProviderPauseEntity> ProviderPauses => Set<ProviderPauseEntity>();
 
     protected override void OnModelCreating(ModelBuilder b)
@@ -141,6 +153,14 @@ public sealed class SymphonistDbContext(DbContextOptions<SymphonistDbContext> op
             e.Property(x => x.WaitingSince).HasConversion(dto);
             e.Property(x => x.At).HasConversion(dto);
             e.Property(x => x.Decision).HasConversion<string>();
+        });
+
+        b.Entity<TouchEntity>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => x.TicketId);
+            e.Property(x => x.At).HasConversion(dto);
+            e.Property(x => x.Kind).HasConversion<string>();
         });
 
         b.Entity<ProviderPauseEntity>(e =>

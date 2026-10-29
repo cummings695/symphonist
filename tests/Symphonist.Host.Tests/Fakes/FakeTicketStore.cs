@@ -19,6 +19,7 @@ public sealed class FakeTicketStore : ITicketStore
     public List<GateReview> GateReviews { get; } = [];
     public List<GateDecisionRecord> GateDecisions { get; } = [];
     public List<EvidenceRecord> Evidence { get; } = [];
+    public List<TouchRecord> Touches { get; } = [];
 
     /// <summary>Thrown from ResetInterruptedRunsAsync when set.</summary>
     public Exception? ResetError { get; set; }
@@ -166,8 +167,22 @@ public sealed class FakeTicketStore : ITicketStore
             GateReviews.RemoveAll(r => r.TicketId == ticket.Id);
             GateDecisions.RemoveAll(d => d.TicketId == ticket.Id);
             Evidence.RemoveAll(x => x.TicketId == ticket.Id);
+            Touches.RemoveAll(x => x.TicketId == ticket.Id);
             return Task.FromResult(true);
         }
+    }
+
+    public Task AddTouchAsync(TouchRecord touch, CancellationToken ct)
+    {
+        lock (sync) Touches.Add(touch);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<TouchRecord>>(Touches
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.At >= since).OrderBy(x => x.At).ToList());
     }
 
     public Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)

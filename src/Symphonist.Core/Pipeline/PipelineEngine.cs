@@ -1,5 +1,6 @@
 using Symphonist.Core.Config;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
 
 namespace Symphonist.Core.Pipeline;
 
@@ -279,7 +280,7 @@ public static class PipelineEngine
         t.PendingSourceStatus = null;
         t.StageStartedAt = now; // a fresh start: build/deploy timeouts count from here, not from the original entry
         t.UpdatedAt = now;
-        return new(true, null, "unblocked");
+        return new(true, null, "unblocked", Touch: TouchKind.Unblock);
     }
 
     /// <summary>
@@ -309,7 +310,7 @@ public static class PipelineEngine
     {
         EnterStage(t, target, now);
         t.Feedback = feedback;
-        return new(true, target.OnEnterStatus, $"sent back to {target.Id}");
+        return new(true, target.OnEnterStatus, $"sent back to {target.Id}", Touch: TouchKind.SendBack);
     }
 
     private static TransitionOutcome Deferred(string status, TransitionOutcome applied) =>

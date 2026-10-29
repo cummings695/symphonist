@@ -13,7 +13,7 @@ public interface ITicketStore
     Task<IReadOnlyList<TicketEvent>> EventsAsync(Guid ticketId, CancellationToken ct);
     Task AddAgentRunAsync(AgentRunRecord run, CancellationToken ct);
     Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct);
-    /// <summary>Deletes the ticket with its events, agent runs, gate reviews, gate decisions and evidence; false when there is no such ticket.</summary>
+    /// <summary>Deletes the ticket with its events, agent runs, gate reviews, gate decisions, evidence and touches; false when there is no such ticket.</summary>
     Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct);
     Task AddGateReviewAsync(GateReview review, CancellationToken ct);
     Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct);
@@ -27,6 +27,9 @@ public interface ITicketStore
     /// <summary>Per ticket with evidence: whether its latest record has issues.</summary>
     Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct);
     Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct);
+    Task AddTouchAsync(TouchRecord touch, CancellationToken ct);
+    /// <summary>Touches at or after <paramref name="since"/>, oldest first; all projects when <paramref name="projectId"/> is null.</summary>
+    Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
     Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct);
     /// <summary>Creates or replaces the pause for <see cref="ProviderPause.Key"/>.</summary>
     Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct);

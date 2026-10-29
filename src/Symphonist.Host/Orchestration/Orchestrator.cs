@@ -421,7 +421,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var stageId = t.StageId;
         var outcome = PipelineEngine.SendBack(p, t, feedback, stageId, now);
         // Only the developer's own comments decide the gate round; a teammate's request reruns without deciding it.
-        if (comments.Count == 0 && !prComments.Any(c => c.IsMine)) outcome = outcome with { Decision = null };
+        if (comments.Count == 0 && !prComments.Any(c => c.IsMine)) outcome = outcome with { Decision = null, Touch = null };
         if (prComments.Count > 0)
         {
             t.PrFeedbackJson = PrFeedback.ToJson(prComments.Select(c => PrFeedback.From(c, p.CommentMarker)).ToList()); // after the send-back clears it
@@ -1051,6 +1051,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (!outcome.Changed) return;
         CancelDecidedEvidence(t);
         await AddEventAsync(t, outcome.Message, ct);
+        if (outcome.Touch is { } touch)
+            await store.AddTouchAsync(new TouchRecord(t.Id, t.ProjectId, fromStageId, touch, time.GetUtcNow()), ct);
         if (outcome.Decision is { } d)
             await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, t.ProjectId, d.StageId, d.WaitingSince, d.Decision,
                 d.Auto, time.GetUtcNow()), ct);
