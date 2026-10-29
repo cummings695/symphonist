@@ -117,7 +117,8 @@ symphonist approve <project> <key>          approve the stage the ticket is wait
 symphonist send-back <project> <key> -m "feedback" [--to <stage>]
 symphonist unblock <project> <key>          retry a blocked ticket
 symphonist forget <project> <key>           drop a ticket from Symphonist only (Jira, Bitbucket and the workspace
-                                            are untouched; if it still matches the query it is picked up again as new)
+                                            are untouched, its downloaded attachments are deleted; if it still
+                                            matches the query it is picked up again as new)
 symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
@@ -218,6 +219,23 @@ review:
   `symphonist projects` and the dashboard show how often you agreed with the reviewer per stage, how many low-risk
   verdicts you sent back, and how many gates were auto-approved. Look at these in `shadow` before turning on `active`.
 
+### Ticket attachments
+
+Before each triage, plan or implement stage, Symphonist downloads the ticket's Jira attachments into
+`SYMPHONIST_HOME/attachments/<project>/<key>/`, so the agent can read specs, screenshots and data files.
+
+- In container mode the folder is mounted read-only at `/attachments`. In host mode the agent gets it through
+  `--add-dir`. Gate reviews get no attachments.
+- Limits: 25 MB per file, 100 MB and 50 files per ticket. Attachments over a limit are listed to the agent as skipped
+  and never downloaded. A download that fails is listed as unavailable and retried on the next run; it never fails a
+  stage.
+- Attachments must not end up in the repository. If a plan or implement stage commits a byte-identical copy of one, the
+  stage fails with `agent copied attachment "<file name>" into <repo path>; attachments must not be committed`.
+- The default prompts list the attachments through the `{{ticket.attachments}}` placeholder. A custom prompt file must
+  add `{{ticket.attachments}}` for the agent to see them.
+- Jira only: GitHub Projects tickets have no attachments for now.
+- `symphonist forget` deletes the ticket's attachment folder.
+
 ### Sandbox
 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network
@@ -234,7 +252,8 @@ review:
   that calls out at run time needs its hosts in `agent.allowedDomains`. pip packages go into a virtualenv on `PATH`
   (python3 is installed for you). Items must be plain package names with an optional version (`graphifyy==0.8.33`,
   `@scope/tool@1.2.0`); anything else is rejected when the project file loads. The image is rebuilt when the package
-  list or the base image changes. A failed build fails that project's agent stages with the build error.
+  list or the base image changes. A failed build fails that project's agent stages with the build error. The default
+  agent image ships Node 22 LTS.
 
   ```yaml
   agent:

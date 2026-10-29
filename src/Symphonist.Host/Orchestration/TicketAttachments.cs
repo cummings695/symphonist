@@ -146,11 +146,14 @@ public static class TicketAttachments
         return await SHA256.HashDataAsync(stream, ct);
     }
 
-    /// <summary>Removes the ticket's attachment directory; no-op when it does not exist.</summary>
+    /// <summary>
+    /// Removes the ticket's attachment directory; no-op when it does not exist. Best-effort: a locked file leaves the
+    /// directory behind rather than throwing.
+    /// </summary>
     public static void Delete(string projectId, string key)
     {
         var dir = DirectoryFor(projectId, key);
-        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        if (Directory.Exists(dir)) TryDelete(() => Directory.Delete(dir, true));
     }
 
     /// <summary>Downloads via a <c>.part</c> file and renames it into place; returns the error message on failure.</summary>

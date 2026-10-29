@@ -92,5 +92,6 @@ review:
   #   host mode: allowedTools defaults to [Read, Grep, Glob], and a review refuses to run with any other tool
 
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
+# A custom prompt must include {{ticket.attachments}} for the agent to see the ticket's downloaded attachments.
 # prompts:
 #   plan: prompts/plan.md

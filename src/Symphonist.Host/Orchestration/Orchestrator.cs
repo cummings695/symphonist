@@ -136,7 +136,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         CommandAsync(projectId, key, (_, t, now) => PipelineEngine.Unblock(t, now), ct);
 
     /// <summary>
-    /// Removes a ticket (with its events and runs) from Symphonist only; the tracker, repo and workspace are untouched.
+    /// Removes a ticket (with its events, runs and downloaded attachments) from Symphonist only; the tracker, repo and
+    /// workspace are untouched.
     /// Refused while an agent or review run for it is in flight, since the run's completion would write to the deleted
     /// ticket.
     /// </summary>
@@ -149,7 +150,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (await store.FindAsync(projectId, key, ct) is not { } t) return ForgetResult.NotFound;
             if (inFlight.ContainsKey(t.Id)) return ForgetResult.Running;
             retryFailureRecorded.Remove(t.Id);
-            return await store.DeleteAsync(projectId, key, ct) ? ForgetResult.Forgotten : ForgetResult.NotFound;
+            if (!await store.DeleteAsync(projectId, key, ct)) return ForgetResult.NotFound;
+            TicketAttachments.Delete(projectId, key);
+            return ForgetResult.Forgotten;
         }
         finally
         {

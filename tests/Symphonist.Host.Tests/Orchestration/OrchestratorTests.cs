@@ -544,6 +544,52 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(ForgetResult.NotFound, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
     }
 
+    private static string SeedAttachment(string key = "ORD-1")
+    {
+        var dir = TicketAttachments.DirectoryFor("orders", key);
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "10001-spec.pdf");
+        File.WriteAllText(file, "x");
+        return file;
+    }
+
+    [Fact] public async Task Forget_deletes_attachment_directory()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        SeedAttachment();
+        var o = Create();
+
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+        Assert.False(Directory.Exists(TicketAttachments.DirectoryFor("orders", "ORD-1")));
+    }
+
+    [Fact] public async Task Forget_succeeds_when_attachment_file_cannot_be_deleted()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var file = SeedAttachment();
+        var o = Create();
+
+        using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.None))
+            Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+        Assert.Empty(store.Tickets);
+    }
+
+    [Fact] public async Task Forget_refused_while_running_keeps_attachments()
+    {
+        Source("ORD-1", "Backlog");
+        var o = Create();
+        var release = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => release.Task;
+        await o.TickAsync(CancellationToken.None);
+        var file = SeedAttachment();
+
+        Assert.Equal(ForgetResult.Running, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
+        Assert.True(File.Exists(file));
+
+        release.SetResult(FakeAgentRunner.Ok(FakeAgentRunner.Output()));
+        await o.WhenIdleAsync();
+    }
+
     [Fact] public async Task Forget_refused_while_running()
     {
         Source("ORD-1", "Backlog");
