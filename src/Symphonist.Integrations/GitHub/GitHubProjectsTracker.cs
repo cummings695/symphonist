@@ -100,6 +100,9 @@ public sealed class GitHubProjectsTracker(HttpClient http, GitHubProjectsTracker
             Vars(("subject", item.IssueId), ("body", markdown)), ct);
     }
 
+    public Task DownloadAttachmentAsync(string key, SourceAttachment attachment, Stream destination, CancellationToken ct) =>
+        throw new NotSupportedException("GitHub Projects tickets have no attachments.");
+
     /// <summary>The board and item behind a key; queries once when the key is not known yet.</summary>
     private async Task<(Board Board, ItemRef Item)> ResolveAsync(string key, CancellationToken ct)
     {

@@ -44,6 +44,25 @@ public sealed class FakeTracker : ITracker
         if (index >= 0) Tickets[index] = Tickets[index] with { Status = status };
     }
 
+    /// <summary>Attachment bytes by attachment id; an unknown id fails like a rejected download.</summary>
+    public Dictionary<string, byte[]> AttachmentContent { get; } = [];
+
+    /// <summary>Overrides the download (e.g. to throw or stall); default writes <see cref="AttachmentContent"/>.</summary>
+    public Func<SourceAttachment, Stream, CancellationToken, Task>? OnDownload { get; set; }
+
+    public async Task DownloadAttachmentAsync(string key, SourceAttachment attachment, Stream destination, CancellationToken ct)
+    {
+        if (OnDownload is not null)
+        {
+            await OnDownload(attachment, destination, ct);
+            return;
+        }
+
+        if (!AttachmentContent.TryGetValue(attachment.Id, out var bytes))
+            throw new HttpRequestException($"attachment {attachment.Id} not found");
+        await destination.WriteAsync(bytes, ct);
+    }
+
     /// <summary>Thrown from CommentAsync when set (e.g. an HttpRequestException).</summary>
     public Exception? CommentError { get; set; }
 
