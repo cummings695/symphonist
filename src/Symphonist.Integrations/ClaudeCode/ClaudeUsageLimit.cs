@@ -19,7 +19,9 @@ public static class ClaudeUsageLimit
     private static readonly Regex ResetsAt = new(
         @"resets?\s+(?:at\s+)?(?<h>\d{1,2})(?::(?<m>\d{2}))?\s*(?<ap>am|pm)(?:\s*\((?<zone>[A-Za-z_/+\-0-9]+)\))?", Options);
     private static readonly Regex Overloaded = new(@"overloaded|\b529\b", Options);
-    private static readonly Regex Rate = new(@"rate[_ -]?limit|\b429\b|too many requests", Options);
+    // Only the API's own wording: a bare "429" or "rate limit" also turns up in logs and prose about other things.
+    private static readonly Regex Rate = new(
+        @"rate_limit_error|api error:?\s*429|\b429\s+too many requests|\brate limited\b|rate limit (?:exceeded|reached)", Options);
 
     public static UsageLimit? Detect(string text, DateTimeOffset now, TimeZoneInfo local)
     {

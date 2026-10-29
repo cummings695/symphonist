@@ -54,6 +54,15 @@ public class CodexUsageLimitTests
         Assert.Equal(Now.AddMinutes(5), ResetsAt("exceeded retry limit, last status: 429 Too Many Requests"));
     }
 
+    [Fact]
+    public void Stdout_trusts_only_strict_phrasings()
+    {
+        Assert.Null(CodexUsageLimit.DetectInOutput("tests cover the rate limit and the 429 path", Now, London));
+        Assert.Equal(Now.AddMinutes(5),
+            CodexUsageLimit.DetectInOutput("exceeded retry limit, last status: 429 Too Many Requests", Now, London)!.ResetsAt);
+        Assert.Equal(Now.AddHours(1), CodexUsageLimit.DetectInOutput("You've hit your usage limit. Try again in 1 hour.", Now, London)!.ResetsAt);
+    }
+
     [Theory]
     [InlineData("exceeded retry limit, last status: 503 Service Unavailable")]
     [InlineData("server overloaded")]

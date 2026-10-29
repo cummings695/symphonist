@@ -22,6 +22,21 @@ public static class CodexUsageLimit
         Options);
     private static readonly Regex Rate = new(@"rate[_ -]?limit|\b429\b|too many requests", Options);
 
+    // What Codex itself prints when the provider refuses; the only rate-limit wording trusted outside stderr.
+    private static readonly Regex StrictRate = new(@"exceeded retry limit, last status:\s*429", Options);
+    private static readonly Regex StrictUsage = new(@"hit your usage limit|usage limit reached", Options);
+
+    /// <summary>
+    /// For stdout, which carries agent prose and tool output: only Codex's own strict phrasings count, so a ticket or log
+    /// that merely mentions "rate limit" or "429" is not taken for a limit.
+    /// </summary>
+    public static UsageLimit? DetectInOutput(string text, DateTimeOffset now, TimeZoneInfo local)
+    {
+        if (StrictUsage.IsMatch(text)) return Detect(text, now, local);
+        return StrictRate.IsMatch(text) ? new UsageLimit(now + UsageLimit.RateLimitPause) : null;
+    }
+
+    /// <summary>For stderr, the CLI's error channel.</summary>
     public static UsageLimit? Detect(string text, DateTimeOffset now, TimeZoneInfo local)
     {
         if (Usage.IsMatch(text))

@@ -286,7 +286,8 @@ public sealed class CodexRunner(IProcessRunner runner, IAgentLauncher launcher, 
         if (result.ExitCode != 0)
             // Only a failed run's output is searched: a successful run may talk about limits all it likes.
             return Failed(Tail(result.StandardError) ?? $"agent exited with code {result.ExitCode}",
-                CodexUsageLimit.Detect(result.StandardError + "\n" + result.StandardOutput, time.GetUtcNow(), TimeZoneInfo.Local));
+                CodexUsageLimit.Detect(result.StandardError, time.GetUtcNow(), TimeZoneInfo.Local)
+                ?? CodexUsageLimit.DetectInOutput(result.StandardOutput, time.GetUtcNow(), TimeZoneInfo.Local));
 
         JsonElement? structured = null;
         if (ReadRunFile(Path.GetDirectoryName(lastMessage)!, Path.GetFileName(lastMessage), MaxLastMessageBytes, out _)

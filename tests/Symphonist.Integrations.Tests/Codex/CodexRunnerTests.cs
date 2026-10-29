@@ -674,11 +674,20 @@ public sealed class CodexRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Failed_run_with_limit_text_on_stdout_sets_Limit()
+    public async Task Failed_run_with_strict_limit_phrasing_on_stdout_sets_Limit()
     {
         fake.Result = new ProcessResult(1, "exceeded retry limit, last status: 429 Too Many Requests", "", false);
         var result = await Runner().RunAsync(Request(), default);
         Assert.NotNull(result.Limit);
+    }
+
+    [Fact]
+    public async Task Failed_run_with_rate_limit_prose_on_stdout_has_no_Limit()
+    {
+        fake.Result = new ProcessResult(1, "I will add a rate limit: return 429 Too Many Requests after 10 calls", "boom", false);
+        var result = await Runner().RunAsync(Request(), default);
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Limit);
     }
 
     [Fact]

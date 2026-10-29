@@ -72,6 +72,16 @@ public class ClaudeUsageLimitTests
     [InlineData("API Error: overloaded")]
     public void Overloaded_is_not_a_limit(string text) => Assert.Null(ClaudeUsageLimit.Detect(text, Now, London));
 
+    [Theory]
+    [InlineData("API Error: 429 Too Many Requests")]
+    [InlineData("429 Too Many Requests")]
+    public void Real_429_wordings_are_rate_limits(string text) =>
+        Assert.Equal(Now.AddMinutes(5), ResetsAt(text));
+
+    [Fact]
+    public void Bare_429_in_other_text_is_not_a_limit() =>
+        Assert.Null(ClaudeUsageLimit.Detect("fetched 429 rows; added a rate limit to the endpoint", Now, London));
+
     [Fact]
     public void Unrelated_error_is_not_a_limit() =>
         Assert.Null(ClaudeUsageLimit.Detect("agent exited with code 1", Now, London));
