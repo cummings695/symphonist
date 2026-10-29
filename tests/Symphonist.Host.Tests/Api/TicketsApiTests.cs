@@ -46,6 +46,7 @@ public sealed class TicketsApiTests : IDisposable
     private readonly FakeTracker tracker = new();
     private readonly FakeAgentRunner agent = new();
     private readonly FakeProcessRunner processes = new();
+    private readonly FakeGitWorkspace gitWorkspace = new();
     private readonly FakeIntegrationFactory integrations;
     private readonly WebApplicationFactory<Program> factory;
     private readonly HttpClient client;
@@ -59,7 +60,7 @@ public sealed class TicketsApiTests : IDisposable
         {
             s.AddSingleton<ITicketStore>(store);
             s.AddSingleton<IIntegrationFactory>(integrations);
-            s.AddSingleton<IGitWorkspace>(new FakeGitWorkspace());
+            s.AddSingleton<IGitWorkspace>(gitWorkspace);
             s.AddSingleton<IAgentRunner>(agent);
             s.AddSingleton<IProcessRunner>(processes);
             s.AddSingleton<ISecretStore>(new NoSecrets());
@@ -104,6 +105,40 @@ public sealed class TicketsApiTests : IDisposable
     {
         Assert.True(response.IsSuccessStatusCode, $"{(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
         return await response.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    [Fact]
+    public async Task Api_release_preview_and_start()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var ready = await Seed("ORD-1", "release", StageStatus.Pending);
+        ready.MergeCommit = "merge-1";
+        await store.SaveAsync(ready, default);
+        gitWorkspace.FirstParentCommits = ["merge-1"];
+
+        var preview = await Json(await Authorized().GetAsync("/api/projects/orders/release"));
+        Assert.Equal(["ORD-1"], preview.GetProperty("ready").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(JsonValueKind.Null, preview.GetProperty("unavailable").ValueKind);
+        Assert.Equal("production", preview.GetProperty("productionBranch").GetString());
+
+        // A stale confirmation is refused.
+        var stale = Authorized().PostAsJsonAsync("/api/projects/orders/release",
+            new ReleasePreview("orders", ["ORD-1", "ORD-2"], [], 0, "main000", null));
+        var refused = await stale;
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Equal("the release changed; review it again", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+
+        // Posting the preview as received starts it.
+        var started = await Authorized().PostAsync("/api/projects/orders/release", JsonContent.Create(preview));
+        var result = await Json(started);
+        Assert.True(result.GetProperty("started").GetBoolean());
+        Assert.Equal("_release-1", result.GetProperty("releaseKey").GetString());
+        Assert.Contains(store.Tickets, t => t.Kind == TicketKind.Release && t.Key == "_release-1");
+
+        Assert.Equal(HttpStatusCode.NotFound, (await Authorized().GetAsync("/api/projects/nope/release")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateClient().GetAsync("/api/projects/orders/release")).StatusCode);
     }
 
     [Fact]

@@ -154,6 +154,48 @@ h1 {
     background: var(--lane);
 }
 
+.ticket-release {
+    margin: 0.75rem 0 0;
+}
+
+/* A release ticket's panel: the batch summary, then its tickets, a moved-back card flagged in the caution colour. */
+.release-summary {
+    margin: 0 0 0.6rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius);
+    background: var(--lane);
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.release-members {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.release-members li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.75rem;
+    padding: 0.3rem 0;
+}
+
+.release-member-stage {
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.release-moved {
+    flex-basis: 100%;
+    padding: 0.25rem 0.6rem;
+    border-left: 3px solid var(--caution-border);
+    background: var(--caution-tint);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+
 /* Desktop: the history on the left, Actions and Links in a rail on the right. */
 .detail-grid {
     display: grid;

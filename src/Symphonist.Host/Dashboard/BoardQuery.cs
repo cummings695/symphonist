@@ -40,7 +40,8 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
                 var own = touchData.ForProject(p.Id);
                 return new BoardProject(p.Id, p.Name, projects.IsPaused(p.Id), p.Agent.Isolation,
                     orchestrator.ProblemOf(p.Id), SourceName(p), p.Review.Mode, agreements[p.Id].ToList(),
-                    UsagePausesOf(p, pauses), own.Summary, own.Stages);
+                    UsagePausesOf(p, pauses), own.Summary, own.Stages,
+                    filter is null || filter.Id == p.Id ? ReleaseBannerOf(p, tickets) : null);
             })
             .ToList();
 
@@ -66,6 +67,17 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             cards.Count(c => c.Card.Status == StageStatus.Running),
             cards.Count(c => c.Card.Status == StageStatus.Blocked));
         return new BoardModel(boardProjects, filter?.Id, columns, counts);
+    }
+
+    /// <summary>The release state of the project's tickets; null when the project has no release stage.</summary>
+    private static ReleaseBanner? ReleaseBannerOf(ProjectConfig p, IReadOnlyList<Ticket> tickets)
+    {
+        if (p.ReleaseStage is null) return null;
+        var own = tickets.Where(t => t.ProjectId == p.Id).ToList();
+        var ready = own.Where(t => PipelineEngine.IsReadyToRelease(p, t)).Select(t => t.Key).Order(StringComparer.Ordinal).ToList();
+        var open = own.Where(t => t.Kind == TicketKind.Release && t.Status != StageStatus.Done)
+            .OrderBy(t => t.Key, StringComparer.Ordinal).FirstOrDefault();
+        return new ReleaseBanner(ready, open?.Key, open is null ? null : TicketLinks.PullRequest(p, open.ReleasePullRequestId));
     }
 
     /// <summary>Each project's stages with their touches over the trend window; one project when <paramref name="projectFilter"/> names one.</summary>
@@ -156,17 +168,33 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
         // stage was removed (hand edit) can only be sent back, to any stage but done.
         var known = card.Known;
         var stageRemoved = !known && project is not null;
-        var targets = known
+        var targets = known && t.Kind == TicketKind.Release ? [t.StageId]
+            : known
             ? project!.Pipeline.Take(project.Pipeline.ToList().FindIndex(s => s.Id == t.StageId) + 1).Reverse().Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
             : stageRemoved ? project!.Pipeline.Where(s => s.Kind != StageKind.Done).Select(s => s.Id).ToList()
             : [];
         var sendBack = (known || (stageRemoved && targets.Count > 0))
             && t.Status is (StageStatus.AwaitingApproval or StageStatus.Approved or StageStatus.Blocked);
+        var (members, releaseOf) = await ReleaseLinksAsync(t, project, ct);
         return new TicketDetailModel(card, t.Branch, t.SpecPath, t.PlanPath,
             TicketLinks.PullRequest(project, t.ReleasePullRequestId), t.Feedback, runs, events, targets,
             known && t.Status == StageStatus.AwaitingApproval, sendBack, known && t.Status == StageStatus.Blocked, reviews,
             project?.Name ?? t.ProjectId,
-            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, project.GateOf(s))).ToList() ?? [], evidence);
+            project?.Pipeline.Select(s => new PipelineStage(s.Id, s.Kind, project.GateOf(s))).ToList() ?? [], evidence,
+            members, t.Kind == TicketKind.Release ? t.ReleaseSummary : null, releaseOf);
+    }
+
+    /// <summary>A release ticket's members (cards, key order), or a member's release key; both null for any other ticket.</summary>
+    private async Task<(IReadOnlyList<BoardCard>? Members, string? ReleaseOf)> ReleaseLinksAsync(Ticket t, ProjectConfig? project,
+        CancellationToken ct)
+    {
+        if (t.Kind != TicketKind.Release && t.ReleaseTicketId is null) return (null, null);
+        var all = await store.ListAsync(t.ProjectId, ct);
+        if (t.Kind != TicketKind.Release)
+            return (null, all.FirstOrDefault(r => r.Kind == TicketKind.Release && r.Id == t.ReleaseTicketId)?.Key);
+        var noCosts = new Dictionary<Guid, decimal>();
+        return (all.Where(m => m.ReleaseTicketId == t.Id).OrderBy(m => m.Key, StringComparer.Ordinal)
+            .Select(m => ToCard(m, project, noCosts)).ToList(), null);
     }
 
     private static BoardColumn Column(string id, string title, IEnumerable<BoardCard> cards, bool isDone,
@@ -211,7 +239,7 @@ public sealed class BoardQuery(ProjectRegistry projects, ITicketStore store, Orc
             TicketLinks.Issue(p, t.Key), TicketLinks.PullRequest(p, t.PullRequestId), p is null ? UnknownSource : SourceName(p),
             known, t.Risk, known && PipelineEngine.WaitsOnReviewer(p!, t),
             placed ? index + 1 : null, placed ? stages!.Count : null,
-            known && PipelineEngine.WaitsOnEvidence(p!, t), evidenceIssues);
+            known && PipelineEngine.WaitsOnEvidence(p!, t), evidenceIssues, t.PendingSourceStatus);
     }
 
     private static IReadOnlyList<ProviderPause> UsagePausesOf(ProjectConfig p, IReadOnlyList<ProviderPause> pauses)

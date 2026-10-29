@@ -544,6 +544,55 @@ public sealed class CliTests
             && r.Body!.Contains("\"key\":\"codex:chatgpt\""));
     }
 
+    private const string PreviewJson = """
+        {"projectId":"orders","ready":["ORD-1","ORD-2"],"alsoShipped":[{"key":"ORD-9","stageId":"build","status":"Pending","finishes":true},
+        {"key":"ORD-8","stageId":"implement","status":"Running","finishes":false}],"outsideCommits":1,"mainHead":"abc1234","unavailable":null,"productionBranch":"production"}
+        """;
+
+    [Fact]
+    public async Task Cli_release_asks_before_starting()
+    {
+        var handler = new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK, PreviewJson)
+            .On(HttpMethod.Post, "/api/projects/orders/release", HttpStatusCode.OK,
+                """{"started":true,"message":"started _release-1; approve it to open the release","releaseKey":"_release-1"}""");
+
+        var declined = await RunAsync(handler, "n\n", "release", "orders");
+
+        Assert.Equal(0, declined.Exit);
+        Assert.Contains("ORD-1, ORD-2", declined.Out);
+        Assert.Contains("ORD-9", declined.Out);
+        Assert.Contains("1 commit(s) from outside Symphonist", declined.Out);
+        Assert.Contains("Release 3 ticket(s) to production? [y/N]", declined.Out);
+        Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Post);
+
+        var answered = await RunAsync(handler, "y\n", "release", "orders");
+        var assumed = await RunAsync(handler, "", "release", "orders", "--yes");
+
+        Assert.Equal((0, 0), (answered.Exit, assumed.Exit));
+        Assert.DoesNotContain("[y/N]", assumed.Out);
+        Assert.Contains("started _release-1", assumed.Out);
+        var posts = handler.Requests.Where(r => r.Method == HttpMethod.Post).ToList();
+        Assert.Equal(2, posts.Count);
+        Assert.All(posts, p => Assert.Contains("\"ready\":[\"ORD-1\",\"ORD-2\"]", p.Body));
+        Assert.All(posts, p => Assert.Contains("\"mainHead\":\"abc1234\"", p.Body));
+    }
+
+    [Fact]
+    public async Task Cli_release_reports_a_refusal_and_an_unavailable_release()
+    {
+        var refused = await RunAsync(new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK, PreviewJson)
+            .On(HttpMethod.Post, "/api/projects/orders/release", HttpStatusCode.Conflict,
+                """{"error":"the release changed; review it again"}"""), "", "release", "orders", "--yes");
+        var unavailable = await RunAsync(new StubHttpHandler().On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK,
+            """{"projectId":"orders","ready":[],"alsoShipped":[],"outsideCommits":0,"mainHead":null,"unavailable":"_release-1 is still open"}"""),
+            "", "release", "orders", "--yes");
+
+        Assert.Equal((1, "the release changed; review it again" + Environment.NewLine), (refused.Exit, refused.Err));
+        Assert.Equal((1, "_release-1 is still open" + Environment.NewLine), (unavailable.Exit, unavailable.Err));
+    }
+
     [Fact]
     public async Task Cli_limits_says_when_nothing_is_paused()
     {

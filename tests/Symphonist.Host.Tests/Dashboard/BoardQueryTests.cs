@@ -466,6 +466,34 @@ public sealed class BoardQueryTests : IDisposable
     }
 
     [Fact]
+    public async Task Release_banner_lists_ready_tickets_and_the_open_release()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        registry.Reload();
+        await Seed("ORD-2", "release", StageStatus.Pending);
+        await Seed("ORD-1", "release", StageStatus.Pending);
+        await Seed("ORD-3", "release", StageStatus.Running); // not ready
+        await Seed("BIL-1", "plan", StageStatus.Pending, "billing");
+
+        var banner = (await query.LoadBoardAsync(null, default)).Projects.Single(p => p.Id == "orders").Release;
+
+        Assert.Equal(["ORD-1", "ORD-2"], banner!.ReadyKeys);
+        Assert.Null(banner.OpenReleaseKey);
+        Assert.Null(banner.OpenReleasePrUrl);
+        Assert.Null((await query.LoadBoardAsync(null, default)).Projects.Single(p => p.Id == "billing").Release);
+
+        await Seed("_release-1", "release", StageStatus.AwaitingApproval, with: t =>
+        {
+            t.Kind = TicketKind.Release;
+            t.ReleasePullRequestId = 7;
+        });
+        banner = (await query.LoadBoardAsync("orders", default)).Projects.Single(p => p.Id == "orders").Release;
+
+        Assert.Equal("_release-1", banner!.OpenReleaseKey);
+        Assert.Equal("https://bitbucket.org/acme/orders/pull-requests/7", banner.OpenReleasePrUrl!.ToString());
+    }
+
+    [Fact]
     public async Task Missing_ticket_detail_is_null()
     {
         Assert.Null(await query.LoadTicketAsync("orders", "NOPE-1", default));

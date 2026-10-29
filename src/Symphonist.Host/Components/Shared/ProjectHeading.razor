@@ -48,6 +48,7 @@
                     @onclick="() => OnResumeUsage.InvokeAsync(pause.Key)">Resume</button>
         </p>
     }
+    <ReleaseBanner Project="Project" OnChanged="OnReleaseChanged" />
     @if (Project.Problem is { Length: > 0 } problem)
     {
         <p class="project-problem"><strong>Problem:</strong> @problem</p>
@@ -61,6 +62,9 @@
 
     /// <summary>Lifts a provider's usage-limit pause by its key.</summary>
     [Parameter] public EventCallback<string> OnResumeUsage { get; set; }
+
+    /// <summary>Called after Release now started a release, so the board reloads.</summary>
+    [Parameter] public EventCallback OnReleaseChanged { get; set; }
 
     /// <summary>The time zone the reset time is shown in, and the current time (to leave out today's date).</summary>
     [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Local;

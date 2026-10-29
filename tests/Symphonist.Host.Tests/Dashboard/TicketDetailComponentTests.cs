@@ -30,13 +30,14 @@ public sealed class TicketDetailComponentTests : IDisposable
     private readonly FakeTicketStore store = new();
     private readonly FakeTimeProvider time = new(Now);
     private readonly BoardNotifier notifier;
+    private readonly ProjectRegistry registry;
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
     public TicketDetailComponentTests()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
-        var registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
+        registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
         var limits = new ProviderLimits(store, time);
         var orchestrator = new Orchestrator(registry, store, integrations,
@@ -105,6 +106,70 @@ public sealed class TicketDetailComponentTests : IDisposable
 
     private static IElement Button(IRenderedComponent<TicketDetail> cut, string text) =>
         cut.FindAll("button").Single(b => b.TextContent.Trim() == text);
+
+    /// <summary>Gives "orders" a release stage and a release ticket with ORD-3 and ORD-4 as members.</summary>
+    private async Task<Ticket> SeedRelease(Action<Ticket>? member4 = null)
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        registry.Reload();
+        var release = await Seed("_release-1", "release", StageStatus.AwaitingApproval, t =>
+        {
+            t.Kind = TicketKind.Release;
+            t.Title = "Release 1: ORD-3, ORD-4";
+            t.ReleasePullRequestId = 7;
+            t.ReleaseSummary = "Tickets:\n- ORD-3: Title ORD-3\n- ORD-4: Title ORD-4";
+        });
+        await Seed("ORD-3", "release", StageStatus.Pending, t => t.ReleaseTicketId = release.Id);
+        await Seed("ORD-4", "release", StageStatus.Pending, t =>
+        {
+            t.ReleaseTicketId = release.Id;
+            member4?.Invoke(t);
+        });
+        return release;
+    }
+
+    [Fact]
+    public async Task Release_ticket_page_lists_members_summary_and_warns_on_moved_cards()
+    {
+        await SeedRelease(t => t.PendingSourceStatus = "In Progress");
+
+        var cut = Loaded(Render("_release-1"));
+
+        var panel = cut.Find("[data-release-panel]");
+        Assert.Contains("- ORD-3: Title ORD-3", panel.QuerySelector("[data-release-summary]")!.TextContent);
+        Assert.Equal(["ORD-3", "ORD-4"], panel.QuerySelectorAll("[data-release-member]").Select(m => m.GetAttribute("data-release-member")));
+        Assert.Equal("/tickets/orders/ORD-3", panel.QuerySelector("[data-release-member='ORD-3'] a")!.GetAttribute("href"));
+        var warnings = panel.QuerySelectorAll("[data-moved-card]").Select(w => w.TextContent.Trim()).ToList();
+        Assert.Equal(["ORD-4 was moved back to 'In Progress'"], warnings);
+    }
+
+    [Fact]
+    public async Task Release_ticket_send_back_reads_cancel_release()
+    {
+        await SeedRelease();
+
+        var cut = Loaded(Render("_release-1"));
+
+        Assert.Equal(["Cancel release"], cut.FindAll("select option").Select(o => o.TextContent.Trim()));
+        cut.Find("textarea").Input("not before the holidays");
+        Button(cut, "Cancel release").Click();
+        cut.WaitForAssertion(() => Assert.Contains("_release-1", StatusLine(cut)));
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-3").Status);
+        Assert.Null(store.Single("ORD-3").ReleaseTicketId);
+    }
+
+    [Fact]
+    public async Task Member_page_links_its_release()
+    {
+        await SeedRelease();
+
+        var cut = Loaded(Render("ORD-3"));
+
+        var link = cut.Find("[data-release-of] a");
+        Assert.Equal("/tickets/orders/_release-1", link.GetAttribute("href"));
+        Assert.Contains("_release-1", link.TextContent);
+        Assert.Empty(cut.FindAll("[data-release-panel]"));
+    }
 
     [Fact]
     public async Task Send_back_requires_feedback()

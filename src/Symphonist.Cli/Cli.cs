@@ -134,6 +134,37 @@ public static class Cli
         limits.Add(limitResume);
         root.Add(limits);
 
+        var releaseProject = new Argument<string>("project") { Description = "Project id" };
+        var releaseYes = new Option<bool>("--yes", "-y") { Description = "Start without asking" };
+        var release = new Command("release", "Release now: ship the tickets ready to release as one release") { releaseProject, releaseYes };
+        RunWithExitCode(release, async (r, ct) =>
+        {
+            var project = r.GetValue(releaseProject)!;
+            var preview = await client.PreviewReleaseAsync(project, ct);
+            if (preview.Unavailable is { Length: > 0 } unavailable)
+            {
+                stderr.WriteLine(unavailable);
+                return ApiError;
+            }
+            stdout.Write(StatusTable.RenderReleasePreview(preview));
+            if (!r.GetValue(releaseYes))
+            {
+                var count = preview.Ready.Count + preview.AlsoShipped.Count(a => a.Finishes);
+                stdout.Write($"Release {count} ticket(s) to {preview.ProductionBranch ?? "production"}? [y/N] ");
+                var answer = stdin.ReadLine()?.Trim();
+                if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    stdout.WriteLine();
+                    stdout.WriteLine("Not released");
+                    return Ok;
+                }
+            }
+            stdout.WriteLine((await client.ReleaseNowAsync(project, preview, ct)).Message);
+            return Ok;
+        });
+        root.Add(release);
+
         var secret = new Command("secret", "Manage secrets in the OS credential store");
         var secretSet = new Command("set", "Store a secret; the value is read from stdin, never from arguments");
         var secretName = new Argument<string>("name") { Description = "Secret name" };

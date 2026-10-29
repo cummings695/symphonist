@@ -54,5 +54,9 @@ public sealed class TestHome : IDisposable
         ProjectYaml(id).Replace("{ id: implement, kind: implement, gate: human,", "{ id: implement, kind: implement, gate: auto,")
         + $"\nreview:\n  mode: {mode}\n";
 
+    /// <summary>The same project with a release stage after implement (release batches).</summary>
+    public static string ReleaseProjectYaml(string id) =>
+        ProjectYaml(id).Replace("  - { id: done,", "  - { id: release,   kind: release,   gate: human }\n  - { id: done,");
+
     public const string HostAgent = "type: claude-code\n  isolation: host\n  allowedTools: [Read]";
 }

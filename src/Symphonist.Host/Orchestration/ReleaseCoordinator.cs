@@ -18,8 +18,9 @@ public sealed record AlsoShipped(string Key, string StageId, StageStatus Status,
 /// <param name="OutsideCommits">Commits on main, not in production, that match no tracked ticket.</param>
 /// <param name="MainHead">The main commit the release branch is created at.</param>
 /// <param name="Unavailable">Why Release now is unavailable (nothing to release, an open release, ...); null when it is.</param>
+/// <param name="ProductionBranch">The branch the release goes to (shown in the confirmation).</param>
 public sealed record ReleasePreview(string ProjectId, IReadOnlyList<string> Ready, IReadOnlyList<AlsoShipped> AlsoShipped,
-    int OutsideCommits, string? MainHead, string? Unavailable);
+    int OutsideCommits, string? MainHead, string? Unavailable, string? ProductionBranch = null);
 
 public sealed record ReleaseStartResult(bool Started, string Message, string? ReleaseKey);
 
@@ -159,7 +160,7 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
     private async Task<Computed> ComputeAsync(ProjectConfig p, CancellationToken ct)
     {
         Computed Unavailable(string why, IReadOnlyList<Ticket>? tickets = null) =>
-            new(new ReleasePreview(p.Id, [], [], 0, null, why), tickets ?? [], [], []);
+            new(new ReleasePreview(p.Id, [], [], 0, null, why, p.Repo.ProductionBranch), tickets ?? [], [], []);
 
         if (p.ReleaseStage is not { } releaseStage) return Unavailable("the pipeline has no release stage");
         var tickets = await store.ListAsync(p.Id, ct);
@@ -203,7 +204,7 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
         var members = ready.Concat(also.Where(a => a.Finishes).Select(a => a.Ticket)).ToList();
         var preview = new ReleasePreview(p.Id, ready.Select(t => t.Key).ToList(),
             also.Select(a => new AlsoShipped(a.Ticket.Key, a.Ticket.StageId, a.Ticket.Status, a.Finishes)).ToList(),
-            outside, mainHead, null);
+            outside, mainHead, null, production);
         return new Computed(preview, tickets, members, ready);
     }
 

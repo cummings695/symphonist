@@ -31,6 +31,7 @@ public sealed class BoardComponentTests : IDisposable
     private readonly BoardNotifier notifier;
     private readonly ProjectRegistry registry;
     private readonly ProviderLimits limits;
+    private readonly FakeGitWorkspace git = new();
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
@@ -42,7 +43,7 @@ public sealed class BoardComponentTests : IDisposable
         notifier = new BoardNotifier(time);
         limits = new ProviderLimits(store, time);
         var orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
             new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
             new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
@@ -85,6 +86,16 @@ public sealed class BoardComponentTests : IDisposable
         await Seed("BIL-1", "plan", StageStatus.AwaitingApproval, "billing");
     }
 
+    /// <summary>Gives "orders" a release stage and <paramref name="ready"/> tickets ready to release (merged as merge-{key}).</summary>
+    private async Task ReleaseProject(params string[] ready)
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        registry.Reload();
+        git.FirstParentCommits = ready.Select(k => $"merge-{k}").ToList();
+        foreach (var key in ready)
+            await Seed(key, "release", StageStatus.Pending, with: t => t.MergeCommit = $"merge-{key}");
+    }
+
     private IRenderedComponent<Board> RenderBoard(string uri = "/")
     {
         ctx.Services.GetRequiredService<NavigationManager>().NavigateTo(uri);
@@ -97,6 +108,113 @@ public sealed class BoardComponentTests : IDisposable
 
     /// <summary>The status line now belongs to the layout: what the board reported to it.</summary>
     private string StatusLine() => ctx.Services.GetRequiredService<DashboardChrome>().Message ?? "";
+
+    [Fact]
+    public async Task Banner_shows_ready_count_and_release_now()
+    {
+        await ReleaseProject("ORD-1", "ORD-2", "ORD-3");
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-release-banner='orders']");
+        Assert.Contains("3 tickets ready to release", banner.TextContent);
+        Assert.Contains(banner.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Release now");
+        Assert.DoesNotContain(cut.FindAll("[data-release-banner]"), e => e.GetAttribute("data-release-banner") != "orders");
+    }
+
+    [Fact]
+    public async Task Banner_shows_open_release_with_pr_link_instead()
+    {
+        await ReleaseProject("ORD-2");
+        await Seed("_release-1", "release", StageStatus.AwaitingApproval, title: "Release 1: ORD-1", with: t =>
+        {
+            t.Kind = TicketKind.Release;
+            t.ReleasePullRequestId = 7;
+        });
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-release-banner='orders']");
+        Assert.Contains("_release-1", banner.TextContent);
+        Assert.DoesNotContain("Release now", banner.TextContent);
+        Assert.Equal("https://bitbucket.org/acme/orders/pull-requests/7",
+            banner.QuerySelector("a[data-release-pr]")?.GetAttribute("href"));
+        Assert.Equal("/tickets/orders/_release-1", banner.QuerySelector("a[data-release-ticket]")?.GetAttribute("href"));
+    }
+
+    [Fact]
+    public async Task Filtered_board_shows_the_banner_in_the_project_heading()
+    {
+        await ReleaseProject("ORD-1");
+
+        var cut = RenderBoard("/?project=orders");
+
+        Assert.Contains("1 ticket ready to release", cut.Find(".project [data-release-banner='orders']").TextContent);
+    }
+
+    [Fact]
+    public async Task Release_now_shows_preview_then_confirm_starts()
+    {
+        await ReleaseProject("ORD-1");
+        await Seed("ORD-9", "build", StageStatus.Pending, with: t => t.MergeCommit = "merge-ORD-9");
+        git.FirstParentCommits = ["merge-ORD-1", "merge-ORD-9", "stranger"];
+        var cut = RenderBoard();
+
+        cut.Find("[data-release-banner='orders'] button").Click();
+
+        var preview = cut.Find("[data-release-preview]");
+        Assert.Contains("ORD-1", preview.QuerySelector("[data-release-ready]")!.TextContent);
+        Assert.Contains("ORD-9", preview.QuerySelector("[data-release-also]")!.TextContent);
+        Assert.Contains("1 commit(s) from outside Symphonist", preview.TextContent);
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+
+        preview.QuerySelectorAll("button").Single(b => b.TextContent.Trim() == "Confirm").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var release = Assert.Single(store.Tickets, t => t.Kind == TicketKind.Release);
+            Assert.Equal("_release-1", release.Key);
+            Assert.Contains("_release-1", StatusLine());
+            Assert.Empty(cut.FindAll("[data-release-preview]"));
+        });
+    }
+
+    [Fact]
+    public async Task Release_now_with_nothing_to_release_shows_why_instead_of_a_button()
+    {
+        await ReleaseProject("ORD-1");
+        var cut = RenderBoard();
+        git.FirstParentCommits = [];
+        var only = store.Single("ORD-1");
+        only.Status = StageStatus.Running; // no longer ready, and nothing new on main
+        await store.SaveAsync(only, default);
+
+        cut.Find("[data-release-banner='orders'] button").Click();
+
+        var preview = cut.Find("[data-release-preview]");
+        Assert.Contains("nothing to release", preview.TextContent);
+        Assert.DoesNotContain(preview.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Confirm");
+    }
+
+    [Fact]
+    public async Task Changed_preview_shows_the_refusal_and_reloads()
+    {
+        await ReleaseProject("ORD-1");
+        var cut = RenderBoard();
+        cut.Find("[data-release-banner='orders'] button").Click();
+        Assert.DoesNotContain("ORD-2", cut.Find("[data-release-ready]").TextContent);
+        await Seed("ORD-2", "release", StageStatus.Pending, with: t => t.MergeCommit = "merge-ORD-2");
+        git.FirstParentCommits = ["merge-ORD-1", "merge-ORD-2"];
+
+        cut.Find("[data-release-preview] button.button-primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            Assert.Contains("the release changed; review it again", cut.Find("[data-release-refusal]").TextContent);
+            Assert.Contains("ORD-2", cut.Find("[data-release-ready]").TextContent);
+        });
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+    }
 
     [Fact]
     public async Task Renders_columns_and_cards()

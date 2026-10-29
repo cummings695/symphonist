@@ -36,6 +36,15 @@ public sealed record DashboardLinkDto(Uri Url);
 public sealed record ProviderPauseDto(string Key, string Provider, DateTimeOffset Since, DateTimeOffset? ResetsAt,
     DateTimeOffset? NextProbeAt);
 
+/// <summary>A ticket that ships with a release without joining it, or joins it (<paramref name="Finishes"/>).</summary>
+public sealed record AlsoShippedDto(string Key, string StageId, string Status, bool Finishes);
+
+/// <summary>What Release now would ship. It is posted back unchanged to confirm it.</summary>
+public sealed record ReleasePreviewDto(string ProjectId, IReadOnlyList<string> Ready, IReadOnlyList<AlsoShippedDto> AlsoShipped,
+    int OutsideCommits, string? MainHead, string? Unavailable, string? ProductionBranch = null);
+
+public sealed record ReleaseStartDto(bool Started, string Message, string? ReleaseKey);
+
 /// <summary>The host is unreachable (not running, or no API token exists yet).</summary>
 public sealed class HostNotRunningException(int port)
     : Exception($"Symphonist host is not running on 127.0.0.1:{port}");
@@ -101,6 +110,15 @@ public sealed class SymphonistClient : IDisposable
     /// <summary>Lets jobs on the provider paused under <paramref name="key"/> start again now.</summary>
     public Task ResumeLimitAsync(string key, CancellationToken ct) =>
         SendAsync<object>(HttpMethod.Post, "/api/limits/resume", JsonContent.Create(new { key }, options: Json), ct);
+
+    /// <summary>What Release now would ship for the project.</summary>
+    public Task<ReleasePreviewDto> PreviewReleaseAsync(string project, CancellationToken ct) =>
+        SendAsync<ReleasePreviewDto>(HttpMethod.Get, $"/api/projects/{Uri.EscapeDataString(project)}/release", null, ct);
+
+    /// <summary>Starts the release <paramref name="confirmed"/> describes; the host refuses (409) when it changed since.</summary>
+    public Task<ReleaseStartDto> ReleaseNowAsync(string project, ReleasePreviewDto confirmed, CancellationToken ct) =>
+        SendAsync<ReleaseStartDto>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(project)}/release",
+            JsonContent.Create(confirmed, options: Json), ct);
 
     /// <summary>A single-use sign-in link for the dashboard, valid for two minutes.</summary>
     public async Task<Uri> CreateDashboardLinkAsync(CancellationToken ct) =>

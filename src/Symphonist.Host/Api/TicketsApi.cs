@@ -126,6 +126,33 @@ public static class TicketsApi
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));
         api.MapPost("/projects/{id}/resume", (string id, ProjectRegistry projects) => SetPaused(projects, id, false));
 
+        api.MapGet("/projects/{id}/release", async (string id, Orchestrator o, CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await o.PreviewReleaseAsync(id, ct));
+            }
+            catch (KeyNotFoundException)
+            {
+                return ProjectNotFound(id);
+            }
+        });
+
+        // The body is the preview the developer confirmed; a changed release is refused (409) and nothing starts.
+        api.MapPost("/projects/{id}/release", async (string id, ReleasePreview? confirmed, Orchestrator o, CancellationToken ct) =>
+        {
+            if (confirmed is null) return Results.BadRequest(new ApiError("the confirmed preview is required"));
+            try
+            {
+                var result = await o.ReleaseNowAsync(id, confirmed, ct);
+                return result.Started ? Results.Ok(result) : Results.Conflict(new ApiError(result.Message));
+            }
+            catch (KeyNotFoundException)
+            {
+                return ProjectNotFound(id);
+            }
+        });
+
         api.MapGet("/limits", (ProviderLimits limits) =>
             limits.Pauses.Select(p => new ProviderPauseDto(p.Key, UsageLimits.ProviderName(p.Key), p.Since, p.ResetsAt,
                 p.NextProbeAt)));
