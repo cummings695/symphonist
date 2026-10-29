@@ -91,8 +91,8 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         var truncated = diff.Length > MaxDiffChars;
 
         // A random fence per run: text inside cannot guess it, and forged markers inside are neutralised.
-        var nonce = Guid.NewGuid().ToString("N");
-        string Fence(string text) => $"<untrusted-{nonce}>\n{ForgedMarker().Replace(text, "&lt;$1")}\n</untrusted-{nonce}>";
+        var nonce = UntrustedFence.NewNonce();
+        string Fence(string text) => UntrustedFence.Wrap(nonce, text);
 
         var values = PromptValues.For(p, t, source, branch, feedback: "");
         foreach (var key in new[] { "ticket.title", "ticket.description", "ticket.comments", "ticket.url", "branch" })
@@ -152,9 +152,6 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             result.CostUsd, result.Error, logPath, $"{Level(verdict.Risk)} risk: {verdict.Summary}", IsReview: true), ct);
         return new GateReviewOutcome(verdict, head, head is null ? null : headBranch, baseSha);
     }
-
-    [GeneratedRegex("<(/?untrusted-)", RegexOptions.IgnoreCase)]
-    private static partial Regex ForgedMarker();
 
     [GeneratedRegex("^(new file mode|deleted file mode|old mode|new mode|index [0-9a-f]+[.][.][0-9a-f]+) 160000$")]
     private static partial Regex GitlinkHeader();

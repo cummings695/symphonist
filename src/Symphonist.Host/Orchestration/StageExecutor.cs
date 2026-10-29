@@ -77,7 +77,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<ExecutionResult> TriageAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Triage, ct);
+        var run = await RunAgentAsync(p, io, t, source, StageKind.Triage, ct);
         if (run.Failure is not null) return run.Failure;
 
         await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(run.Output!.CommentMarkdown ?? run.Output.Summary), ct);
@@ -87,7 +87,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<ExecutionResult> PlanAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Plan, ct);
+        var run = await RunAgentAsync(p, io, t, source, StageKind.Plan, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         if (string.IsNullOrWhiteSpace(output.SpecPath) || string.IsNullOrWhiteSpace(output.PlanPath))
@@ -108,7 +108,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<ExecutionResult> ImplementAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Implement, ct);
+        var run = await RunAgentAsync(p, io, t, source, StageKind.Implement, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
@@ -233,20 +233,25 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         return Completed;
     }
 
-    private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure);
+    /// <param name="Attachments">The ticket's attachments as synced for this run.</param>
+    private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure,
+        AttachmentSet Attachments);
 
-    private async Task<AgentStep> RunAgentAsync(ProjectConfig p, Ticket t, SourceTicket? source, StageKind kind,
-        CancellationToken ct)
+    private async Task<AgentStep> RunAgentAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
+        StageKind kind, CancellationToken ct)
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
-        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind), PromptValues.For(p, t, source, branch, t.Feedback ?? ""));
+        var attachments = await TicketAttachments.SyncAsync(io.Tracker, p.Id, t.Key, source, ct);
+        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind),
+            PromptValues.For(p, t, source, branch, t.Feedback ?? "", attachments));
 
         var startedAt = time.GetUtcNow();
         AgentRunResult result;
         try
         {
-            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent), ct);
+            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent,
+                AttachmentsDirectory: attachments.HasFiles ? attachments.Directory : null), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -265,7 +270,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             !result.Succeeded ? Failed(result.Error ?? "agent run failed")
             : result.Output is null ? Failed("agent returned no structured output")
             : null;
-        return new AgentStep(workspace, branch, result.Output, failure);
+        return new AgentStep(workspace, branch, result.Output, failure, attachments);
     }
 
     private static ExecutionResult Failed(string error) => new(ExecutionStatus.Failed, error);
