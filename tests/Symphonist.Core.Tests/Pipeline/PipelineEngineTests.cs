@@ -1020,4 +1020,50 @@ public class PipelineEngineTests
         Assert.False(PipelineEngine.SourceStatusChanged(p, t, "Released", null, Now).Changed);
         Assert.Equal(StageStatus.AwaitingApproval, t.Status);
     }
+
+    // Reopened tickets
+
+    private static Ticket Finished()
+    {
+        var t = At("done", StageStatus.Done);
+        t.Branch = "symphonist/ORD-1"; t.PullRequestId = 7; t.MergeCommit = "m1"; t.ReleasePullRequestId = 9;
+        t.ReleaseMergeCommit = "m2"; t.ReleaseTicketId = Guid.NewGuid(); t.TrackerRetryStatus = "Done";
+        t.PrCommentsHandledAt = Now.AddDays(-1); t.ClaudeCommentsHandledAt = Now.AddDays(-1);
+        t.Attempts = 2; t.ReviewDue = true; t.Risk = RiskLevel.High; t.MergeHolds = 2; t.ApprovedHead = "h";
+        t.UpdatedAt = Now.AddDays(-1);
+        return t;
+    }
+
+    [Fact] public void Reopen_enters_the_matching_stage_with_a_fresh_branch()
+    {
+        var t = Finished();
+        var o = PipelineEngine.Reopen(P, t, "planned", Now)!;
+
+        Assert.True(o.Changed);
+        Assert.Equal("reopened at plan: card moved to 'planned'", o.Message);
+        Assert.Equal("Planned", o.SourceStatusToSet);
+        Assert.Null(o.Touch);
+        Assert.Equal(("plan", StageStatus.Pending, 0), (t.StageId, t.Status, t.Attempts));
+        Assert.Equal("symphonist/ORD-1-202610211000", t.Branch);
+        Assert.Null(t.PullRequestId); Assert.Null(t.MergeCommit); Assert.Null(t.ReleasePullRequestId);
+        Assert.Null(t.ReleaseMergeCommit); Assert.Null(t.ReleaseTicketId); Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal((Now, Now), (t.PrCommentsHandledAt, t.ClaudeCommentsHandledAt));
+        Assert.False(t.ReviewDue); Assert.Null(t.Risk); Assert.Equal(0, t.MergeHolds); Assert.Null(t.ApprovedHead);
+        Assert.Equal(Now, t.UpdatedAt);
+    }
+
+    [Fact] public void Reopen_returns_null_without_a_matching_entry_status()
+    {
+        var t = Finished();
+        Assert.Null(PipelineEngine.Reopen(P, t, "In Progress", Now));
+        Assert.Equal(("done", StageStatus.Done, 7L), (t.StageId, t.Status, t.PullRequestId));
+        Assert.Null(PipelineEngine.Reopen(P, At("plan"), "Planned", Now)); // not done
+    }
+
+    [Fact] public void Release_tickets_never_reopen()
+    {
+        var t = PipelineEngine.CreateRelease(P, 1, "Release 1", "symphonist/release-1", "Tickets:", Now);
+        t.StageId = "done"; t.Status = StageStatus.Done;
+        Assert.Null(PipelineEngine.Reopen(P, t, "Planned", Now));
+    }
 }

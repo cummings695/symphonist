@@ -404,6 +404,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (t.Status == StageStatus.Done)
             {
                 t.LastSourceStatus = s.Status;
+                var fromDone = t.StageId;
+                if (PipelineEngine.Reopen(p, t, s.Status, now) is { } reopened)
+                {
+                    await store.SaveAsync(t, ct);
+                    await ApplyAsync(io, t, fromDone, reopened, ct);
+                    continue;
+                }
                 await store.SaveAsync(t, ct);
                 await AddEventAsync(t,
                     $"card moved to '{s.Status}' after the ticket was done; Symphonist does not reopen done tickets", ct);

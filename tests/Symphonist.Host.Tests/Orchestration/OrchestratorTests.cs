@@ -1026,6 +1026,62 @@ public sealed class OrchestratorTests : IDisposable
             store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Done_ticket_moved_back_by_qa_runs_again()
+    {
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"),
+            OrdersYaml.Replace("kind: implement, gate: human,", "kind: implement, gate: human, entryStatuses: [QA Failed],"));
+        registry.Reload();
+        await Seed("ORD-1", "done", StageStatus.Done, "Done", t => { t.PullRequestId = 7; t.MergeCommit = "merge-1"; });
+        tracker.Move("ORD-1", "QA Failed");
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task; // keep the run in flight
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", "In Progress"), (t.StageId, t.LastSourceStatus)); // the card moved on to the stage's status
+        Assert.Null(t.MergeCommit);
+        Assert.Null(t.PullRequestId);
+        Assert.Equal("symphonist/ORD-1-202610211000", t.Branch);
+        Assert.Contains("reopened at implement: card moved to 'QA Failed'", store.EventMessages("ORD-1"));
+        Assert.Equal([("ORD-1", "symphonist/ORD-1-202610211000")], git.Prepared);
+    }
+
+    [Fact] public async Task Done_ticket_moved_elsewhere_stays_done()
+    {
+        await Seed("ORD-1", "done", StageStatus.Done, "Done");
+        tracker.Move("ORD-1", "QA Failed");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("done", StageStatus.Done), (t.StageId, t.Status));
+        Assert.Equal(["card moved to 'QA Failed' after the ticket was done; Symphonist does not reopen done tickets"],
+            store.EventMessages("ORD-1"));
+        Assert.Empty(git.Prepared);
+    }
+
+    [Fact] public async Task Pipeline_without_release_finishes_when_the_pr_merges()
+    {
+        var yaml = Regex.Replace(OrdersYaml, @"\r?\n\s*- \{ id: (triage|plan|build|release|deploy),[^\r\n]*", "");
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), yaml);
+        Assert.Empty(registry.Reload().Errors);
+        Source("ORD-1", "In Progress");
+        var o = Create();
+
+        for (var i = 0; i < 5 && store.Tickets.SingleOrDefault()?.Status != StageStatus.AwaitingApproval; i++) await TickIdle(o);
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        for (var i = 0; i < 5 && store.Single("ORD-1").Status != StageStatus.Done; i++) await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("done", StageStatus.Done), (t.StageId, t.Status));
+        Assert.Single(scm.MergeCalls);
+        Assert.Single(scm.Opened);
+        Assert.Equal("Done", tracker.Tickets.Single().Status);
+    }
+
     [Fact] public async Task Release_with_nothing_to_release_waits_at_gate_then_deploy_watches_production_head()
     {
         await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "merge-1");

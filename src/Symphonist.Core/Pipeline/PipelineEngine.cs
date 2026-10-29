@@ -362,6 +362,30 @@ public static class PipelineEngine
         return NoChange($"source status '{newStatus}' ignored");
     }
 
+    /// <summary>
+    /// A Done work ticket whose card was moved to an entry status of one of the pipeline's stages (QA reopening it)
+    /// starts again at that stage on a fresh branch, with nothing left over from the earlier PRs and releases. Null when
+    /// the ticket isn't a Done work ticket or the status maps to no stage. Not a touch: the card move was the developer's.
+    /// </summary>
+    public static TransitionOutcome? Reopen(ProjectConfig p, Ticket t, string newStatus, DateTimeOffset now)
+    {
+        if (t.Kind != TicketKind.Work || t.Status != StageStatus.Done) return null;
+        var stage = p.Pipeline.FirstOrDefault(s => s.Kind != StageKind.Done && s.EntryStatuses.Any(e => Same(e, newStatus)));
+        if (stage is null) return null;
+
+        EnterStage(t, stage, now);
+        t.Branch = $"symphonist/{t.Key}-{now:yyyyMMddHHmm}";
+        t.PullRequestId = null;
+        t.MergeCommit = null;
+        t.ReleasePullRequestId = null;
+        t.ReleaseMergeCommit = null;
+        t.ReleaseTicketId = null;
+        t.PrCommentsHandledAt = now;
+        t.ClaudeCommentsHandledAt = now;
+        t.TrackerRetryStatus = null;
+        return new(true, stage.OnEnterStatus, $"reopened at {stage.Id}: card moved to '{newStatus}'");
+    }
+
     public static TransitionOutcome Block(Ticket t, string reason, DateTimeOffset now)
     {
         t.Status = StageStatus.Blocked;
