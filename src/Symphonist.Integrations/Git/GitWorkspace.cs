@@ -114,6 +114,15 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         "--no-renames", "--ignore-submodules=none", "--submodule=short",
     ];
 
+    /// <summary>The trailing <c>--</c> keeps the range from being read as a path; a range starting with '-' is refused.</summary>
+    public async Task<IReadOnlyList<string>> FirstParentCommitsAsync(string workspace, string range, CancellationToken ct)
+    {
+        if (range.Length == 0 || range.StartsWith('-'))
+            throw new ArgumentException($"'{range}' is not a revision range", nameof(range));
+        var output = await GitAsync(workspace, ct, "rev-list", "--first-parent", range, "--");
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
     /// <summary>
     /// A full ref name (<c>refs/...</c>) must exist exactly as named: <c>rev-parse</c> alone would fall back to e.g.
     /// <c>refs/tags/refs/remotes/origin/x</c>, a tag anyone who can push tags can plant.

@@ -987,6 +987,17 @@ public class PipelineEngineTests
         Assert.Null(o.SourceStatusToSet);
     }
 
+    [Fact] public void Send_back_of_a_release_with_nothing_to_merge_forgets_its_production_commit()
+    {
+        // "Nothing to release" records production's head before the gate; a cancelled release must not look merged.
+        var t = WaitingRelease(P);
+        t.ReleaseMergeCommit = "prod-head";
+        var o = PipelineEngine.SendBack(P, t, "no", null, Now);
+        Assert.True(o.Changed);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Null(t.ReleaseMergeCommit);
+    }
+
     [Fact] public void Merged_release_ticket_is_done_not_advanced()
     {
         var t = WaitingRelease(P);

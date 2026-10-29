@@ -41,6 +41,9 @@ public interface ISourceControl
     /// <summary>Merged=false + Error when the host refuses (e.g. missing approvals) or the merge is still in progress.</summary>
     Task<MergeResult> MergePullRequestAsync(long id, CancellationToken ct);
 
+    /// <summary>Closes the pull request without merging it (Bitbucket: decline).</summary>
+    Task DeclinePullRequestAsync(long id, CancellationToken ct);
+
     /// <summary>True when <paramref name="branch"/> already contains every commit of <paramref name="other"/>.</summary>
     Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct);
 

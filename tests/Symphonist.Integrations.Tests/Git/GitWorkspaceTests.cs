@@ -395,6 +395,41 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task First_parent_commits_list_merges_and_direct_commits_newest_first()
+    {
+        Run(dev, "push", "origin", "main:production");
+        Run(dev, "checkout", "-b", "feature");
+        File.WriteAllText(Path.Combine(dev, "feature.txt"), "f");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "feature work");
+        var featureWork = Git(dev, "rev-parse HEAD");
+        Run(dev, "checkout", "main");
+        Run(dev, "merge", "--no-ff", "-m", "merge feature", "feature");
+        var merge = Git(dev, "rev-parse HEAD");
+        File.WriteAllText(Path.Combine(dev, "direct.txt"), "d");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "direct");
+        var direct = Git(dev, "rev-parse HEAD");
+        Run(dev, "push", "origin", "main");
+        var ws = await git.PrepareAsync(project, "_release", "main", default);
+
+        var commits = await git.FirstParentCommitsAsync(ws,
+            "refs/remotes/origin/production..refs/remotes/origin/main", default);
+
+        Assert.Equal([direct, merge], commits);
+        Assert.DoesNotContain(featureWork, commits);
+        Assert.Empty(await git.FirstParentCommitsAsync(ws, "refs/remotes/origin/main..refs/remotes/origin/production", default));
+    }
+
+    [Fact]
+    public async Task First_parent_commits_refuse_a_range_that_reads_as_an_option()
+    {
+        var ws = await git.PrepareAsync(project, "_release", "main", default);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => git.FirstParentCommitsAsync(ws, "--all", default));
+    }
+
+    [Fact]
     public async Task Credentials_in_the_developer_origin_never_reach_the_workspace_and_are_warned_about_once()
     {
         var runner = new CredentialOrigin(new ProcessRunner(), bare);

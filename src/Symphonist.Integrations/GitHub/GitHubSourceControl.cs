@@ -66,6 +66,11 @@ public sealed class GitHubSourceControl(HttpClient http, GitHubRepoConfig config
             : new MergeResult(false, null, Message(text) ?? "merge was not performed");
     }
 
+    public async Task DeclinePullRequestAsync(long id, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Patch, $"{RepoPath}/pulls/{id}", new { state = "closed" }, ct);
+    }
+
     /// <summary>Asks how far <paramref name="other"/> is ahead of <paramref name="branch"/>; not at all means contained.</summary>
     public async Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct)
     {

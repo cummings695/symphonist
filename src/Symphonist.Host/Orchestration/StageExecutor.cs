@@ -32,6 +32,9 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
 
     public static bool IsAgentStage(StageKind kind) => kind is StageKind.Triage or StageKind.Plan or StageKind.Implement;
 
+    /// <summary>The workspace the stages run in (the orchestrator's release coordinator uses it too).</summary>
+    public IGitWorkspace Git => git;
+
     public async Task<ExecutionResult> ExecuteAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
@@ -263,48 +266,64 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         };
     }
 
+    /// <summary>
+    /// A release ticket opens (or finds) its batch's PR from its frozen release branch. A work ticket never opens one: it
+    /// ships in a batch, and only a ticket that opened its own release PR before batches finishes it the old way.
+    /// </summary>
     private static async Task<ExecutionResult> ReleaseAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct)
     {
-        var sc = io.SourceControl;
-        if (t.ReleasePullRequestId is { } existing && (await sc.GetPullRequestAsync(existing, ct)).State == PullRequestState.Open)
-            return Completed;
+        if (t.Kind == TicketKind.Release) return await ReleaseBatchAsync(p, io.SourceControl, t, ct);
 
-        // First release, or re-entered (send-back / unblock) after an earlier release finished: start over.
+        // The orchestrator never runs a ready ticket's release stage; a PR from main here would ship unnamed tickets.
+        if (t.ReleasePullRequestId is not { } existing)
+            return new ExecutionResult(ExecutionStatus.InProgress, Event: "ready to release: waits for a release batch");
+        if ((await io.SourceControl.GetPullRequestAsync(existing, ct)).State == PullRequestState.Open) return Completed;
+
+        // Its own release PR was merged or closed before it got here again (send-back, unblock): it now ships in a batch.
         t.ReleasePullRequestId = null;
         t.ReleaseMergeCommit = null;
+        return new ExecutionResult(ExecutionStatus.InProgress,
+            Event: $"release PR {existing} is no longer open; ready to release in the next batch");
+    }
 
-        var (main, production) = (p.Repo.MainBranch, p.Repo.ProductionBranch);
-        var title = $"Release {t.Key}";
+    /// <summary>
+    /// Opens the release PR from <see cref="Ticket.Branch"/> (frozen at Release now) to production, describing every
+    /// ticket it ships. No tracker comment: a release ticket has no card. A PR already recorded is left as it is; the
+    /// orchestrator checks at the gate whether it was merged or closed meanwhile.
+    /// </summary>
+    private static async Task<ExecutionResult> ReleaseBatchAsync(ProjectConfig p, ISourceControl sc, Ticket t, CancellationToken ct)
+    {
+        if (t.ReleasePullRequestId is not null) return Completed;
+        if (t.Branch is not { } branch) return Failed("the release has no branch");
+        var production = p.Repo.ProductionBranch;
         PullRequestInfo pr;
         try
         {
-            pr = await FindOrOpenAsync(sc, main, production, title, $"{title}: {t.Title}", ct);
+            pr = await FindOrOpenAsync(sc, branch, production, t.Title, t.ReleaseSummary ?? t.Title, ct);
         }
         catch (NoChangesToPullException e)
         {
-            // Production already contains main (e.g. released together with another ticket): deploy watches its head.
-            // Fail closed: completing here moves the ticket towards Done, so check the host's claim independently.
+            // Production already contains the release branch (e.g. merged by hand): deploy watches its head.
+            // Fail closed: completing here finishes every member, so check the host's claim independently.
             string? doubt;
             try
             {
-                doubt = await sc.BranchContainsAsync(production, main, ct) ? null : $"{production} does not contain {main}";
+                doubt = await sc.BranchContainsAsync(production, branch, ct) ? null : $"{production} does not contain {branch}";
             }
             catch (Exception verify) when (!ct.IsCancellationRequested)
             {
-                doubt = $"could not verify that {production} contains {main}: {verify.Message}";
+                doubt = $"could not verify that {production} contains {branch}: {verify.Message}";
             }
             if (doubt is not null) return Failed($"{e.Message} (but {doubt})");
 
             var head = await sc.GetBranchHeadAsync(production, ct);
             t.ReleaseMergeCommit = head;
-            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Nothing to release: {production} already contains {main}."), ct);
             return new ExecutionResult(ExecutionStatus.Completed,
-                Event: $"already in production: {production} already contains {main} (at {head})");
+                Event: $"already in production: {production} already contains {branch} (at {head})");
         }
 
         t.ReleasePullRequestId = pr.Id;
-        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Release PR: {pr.WebUrl}"), ct);
-        return Completed;
+        return new ExecutionResult(ExecutionStatus.Completed, Event: $"release PR: {pr.WebUrl}");
     }
 
     private static async Task<PullRequestInfo> FindOrOpenAsync(ISourceControl sc, string sourceBranch, string destination,

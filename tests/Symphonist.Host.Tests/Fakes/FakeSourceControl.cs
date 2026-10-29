@@ -79,6 +79,19 @@ public sealed class FakeSourceControl : ISourceControl
         return Task.FromResult(result);
     }
 
+    public List<long> DeclineCalls { get; } = [];
+
+    /// <summary>Thrown from DeclinePullRequestAsync when set (after recording the call).</summary>
+    public Exception? DeclineError { get; set; }
+
+    public Task DeclinePullRequestAsync(long id, CancellationToken ct)
+    {
+        DeclineCalls.Add(id);
+        if (DeclineError is not null) throw DeclineError;
+        PullRequests[id] = (PullRequests.GetValueOrDefault(id) ?? Pr(id)) with { State = PullRequestState.Declined };
+        return Task.CompletedTask;
+    }
+
     /// <summary>Branch heads for GetBranchHeadAsync; unknown branches throw.</summary>
     public Dictionary<string, string> BranchHeads { get; } = [];
 

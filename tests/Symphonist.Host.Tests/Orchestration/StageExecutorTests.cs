@@ -518,47 +518,69 @@ public sealed class StageExecutorTests : IDisposable
         Assert.Empty(agent.Requests);
     }
 
-    [Fact] public async Task Release_opens_pr_main_to_production_once()
+    private Ticket ReleaseTicket()
     {
-        var t = At("release");
-
-        var first = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
-        var second = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
-
-        Assert.Equal(ExecutionStatus.Completed, first.Status);
-        Assert.Equal(ExecutionStatus.Completed, second.Status);
-        var opened = Assert.Single(scm.Opened);
-        Assert.Equal(("main", "production", "Release ORD-1"), (opened.Source, opened.Destination, opened.Title));
-        Assert.Equal(1, t.ReleasePullRequestId);
-        Assert.Equal(TrackerComments.Sign("Release PR: https://scm.example/pr/1"), Assert.Single(tracker.Comments).Markdown);
+        var t = PipelineEngine.CreateRelease(project, 1, "Release 1: ORD-1", "symphonist/release-1", "Tickets:\n- ORD-1: Add export", Now);
+        t.Status = StageStatus.Running;
+        return t;
     }
 
-    [Fact] public async Task Release_reuses_open_pr_found_on_host()
+    [Fact] public async Task Release_ticket_opens_pr_from_its_branch_to_production_once()
     {
-        scm.OnFindOpen = (s, d) => s == "main" && d == "production" ? FakeSourceControl.Pr(9) : null;
-        var t = At("release");
+        var t = ReleaseTicket();
 
-        await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        var first = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
+        var second = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, first.Status);
+        Assert.Equal("release PR: https://scm.example/pr/1", first.Event);
+        Assert.Equal(ExecutionStatus.Completed, second.Status);
+        var opened = Assert.Single(scm.Opened);
+        Assert.Equal(("symphonist/release-1", "production", "Release 1: ORD-1", "Tickets:\n- ORD-1: Add export"),
+            (opened.Source, opened.Destination, opened.Title, opened.Description));
+        Assert.Equal(1, t.ReleasePullRequestId);
+        Assert.Empty(tracker.Comments); // a release ticket has no tracker card
+    }
+
+    [Fact] public async Task Release_ticket_reuses_open_pr_found_on_host()
+    {
+        scm.OnFindOpen = (s, d) => s == "symphonist/release-1" && d == "production" ? FakeSourceControl.Pr(9) : null;
+        var t = ReleaseTicket();
+
+        await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
 
         Assert.Empty(scm.Opened);
         Assert.Equal(9, t.ReleasePullRequestId);
     }
 
-    [Fact] public async Task Release_when_production_already_contains_main_completes_at_production_head()
+    [Fact] public async Task Release_ticket_whose_pr_closed_keeps_it_for_the_gate_to_see()
+    {
+        var t = ReleaseTicket();
+        t.ReleasePullRequestId = 4;
+        scm.PullRequests[4] = FakeSourceControl.Pr(4, PullRequestState.Declined);
+
+        var r = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Empty(scm.Opened);
+        Assert.Equal(4, t.ReleasePullRequestId);
+    }
+
+    [Fact] public async Task Release_when_production_already_contains_the_release_branch_completes_at_production_head()
     {
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
-        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "main");
-        var t = At("release");
+        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "symphonist/release-1");
+        var t = ReleaseTicket();
 
-        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        var r = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Completed, r.Status);
-        Assert.Equal("already in production: production already contains main (at prod-head)", r.Event);
+        Assert.Equal("already in production: production already contains symphonist/release-1 (at prod-head)", r.Event);
         Assert.Equal(("prod-head", (long?)null), (t.ReleaseMergeCommit, t.ReleasePullRequestId));
-        Assert.Equal(TrackerComments.Sign("Nothing to release: production already contains main."),
-            Assert.Single(tracker.Comments).Markdown);
+        Assert.Empty(tracker.Comments);
 
+        t.Status = StageStatus.Approved;
         var approved = await executor.PostApprovalAsync(project, io, t, CancellationToken.None);
         Assert.Equal(ExecutionStatus.Completed, approved.Status);
         Assert.Equal("prod-head", t.ReleaseMergeCommit);
@@ -569,15 +591,14 @@ public sealed class StageExecutorTests : IDisposable
     {
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
-        scm.OnBranchContains = (_, _) => false; // main has commits production lacks
-        var t = At("release");
+        scm.OnBranchContains = (_, _) => false; // the release branch has commits production lacks
+        var t = ReleaseTicket();
 
-        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        var r = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Failed, r.Status);
-        Assert.Equal("There are no changes to be pulled (but production does not contain main)", r.Error);
+        Assert.Equal("There are no changes to be pulled (but production does not contain symphonist/release-1)", r.Error);
         Assert.Null(t.ReleaseMergeCommit);
-        Assert.Empty(tracker.Comments);
     }
 
     [Fact] public async Task Release_unrelated_open_error_fails()
@@ -585,16 +606,41 @@ public sealed class StageExecutorTests : IDisposable
         scm.OpenError = new HttpRequestException("Bitbucket POST pullrequests failed: 400 BadRequest. branch not found",
             null, System.Net.HttpStatusCode.BadRequest);
         scm.OnBranchContains = (_, _) => true;
-        var t = At("release");
+        var t = ReleaseTicket();
 
-        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+        var r = await executor.ExecuteAsync(project, io, t, null, CancellationToken.None);
 
         Assert.Equal(ExecutionStatus.Failed, r.Status);
         Assert.Null(t.ReleaseMergeCommit);
         Assert.Null(t.ReleasePullRequestId);
     }
 
-    [Fact] public async Task Release_reentered_after_its_pr_merged_opens_a_new_pr()
+    [Fact] public async Task Ready_work_ticket_never_opens_a_release_pr()
+    {
+        var t = At("release");
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.InProgress, r.Status);
+        Assert.Empty(scm.Opened);
+        Assert.Empty(scm.FindCalls);
+        Assert.Empty(tracker.Comments);
+    }
+
+    [Fact] public async Task Legacy_ticket_with_open_release_pr_completes()
+    {
+        var t = At("release");
+        t.ReleasePullRequestId = 4;
+        scm.PullRequests[4] = FakeSourceControl.Pr(4);
+
+        var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
+
+        Assert.Equal(ExecutionStatus.Completed, r.Status);
+        Assert.Equal(4, t.ReleasePullRequestId);
+        Assert.Empty(scm.Opened);
+    }
+
+    [Fact] public async Task Legacy_ticket_reentered_after_its_pr_merged_waits_for_a_batch()
     {
         var t = At("release");
         t.ReleasePullRequestId = 4;
@@ -603,10 +649,10 @@ public sealed class StageExecutorTests : IDisposable
 
         var r = await executor.ExecuteAsync(project, io, t, source, CancellationToken.None);
 
-        Assert.Equal(ExecutionStatus.Completed, r.Status);
-        Assert.Single(scm.Opened);
-        Assert.NotEqual(4, t.ReleasePullRequestId);
-        Assert.Null(t.ReleaseMergeCommit);
+        Assert.Equal(ExecutionStatus.InProgress, r.Status);
+        Assert.Equal("release PR 4 is no longer open; ready to release in the next batch", r.Event);
+        Assert.Empty(scm.Opened);
+        Assert.Equal(((long?)null, (string?)null), (t.ReleasePullRequestId, t.ReleaseMergeCommit));
     }
 
     [Fact] public async Task Merge_sets_merge_commit_and_completes()

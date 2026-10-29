@@ -1031,21 +1031,28 @@ public sealed class OrchestratorTests : IDisposable
         await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "merge-1");
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
-        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "main");
+        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "symphonist/release-1");
         builds.Statuses["prod-head"] = BuildStatus.Succeeded;
         var o = Create();
+        git.FirstParentCommits = []; // e.g. its merge was released by hand already: a release with ready tickets only
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.True((await o.ReleaseNowAsync("orders", preview, CancellationToken.None)).Started);
 
         await TickIdle(o);
-        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
-        Assert.Contains("already in production: production already contains main (at prod-head)", store.EventMessages("ORD-1"));
+        Assert.Equal(("release", StageStatus.AwaitingApproval),
+            (store.Single("_release-1").StageId, store.Single("_release-1").Status));
+        Assert.Contains("already in production: production already contains symphonist/release-1 (at prod-head)",
+            store.EventMessages("_release-1"));
 
-        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await o.ApproveAsync("orders", "_release-1", CancellationToken.None);
         await TickIdle(o); // post-approval: nothing to merge
         await TickIdle(o); // deploy sees the production head's pipeline
 
         Assert.Equal(StageStatus.Done, store.Single("ORD-1").Status);
+        Assert.Equal("prod-head", store.Single("ORD-1").ReleaseMergeCommit);
         Assert.Equal([("prod-head", BuildPurpose.Deploy)], builds.Calls);
         Assert.Empty(scm.MergeCalls);
+        Assert.Empty(tracker.Comments);
     }
 
     [Fact] public async Task Waiting_merge_event_is_recorded_once()
@@ -1270,15 +1277,22 @@ public sealed class OrchestratorTests : IDisposable
         await Approve();
         await Until(StageStatus.AwaitingApproval, "implement");
         await Approve();
-        await Until(StageStatus.AwaitingApproval, "release");
-        await Approve();
+        await Until(StageStatus.Pending, "release"); // ready to release
+        await TickIdle(o);
+        Assert.Single(scm.Opened); // a ready ticket opens no release PR of its own
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Equal(["ORD-1"], preview.Ready);
+        Assert.True((await o.ReleaseNowAsync("orders", preview, CancellationToken.None)).Started);
+        await TickIdle(o); // the release PR is opened and waits
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
         await Until(StageStatus.Done, "done");
 
         var final = store.Single("ORD-1");
         Assert.Equal(StageStatus.Done, final.Status);
         Assert.Equal(2, scm.Opened.Count);
         Assert.Equal(("symphonist/ORD-1", "main"), (scm.Opened[0].Source, scm.Opened[0].Destination));
-        Assert.Equal(("main", "production"), (scm.Opened[1].Source, scm.Opened[1].Destination));
+        Assert.Equal(("symphonist/release-1", "production"), (scm.Opened[1].Source, scm.Opened[1].Destination));
         Assert.Equal([1L, 2L], scm.MergeCalls);
         Assert.Equal(("merge-1", "merge-2"), (final.MergeCommit, final.ReleaseMergeCommit));
         Assert.Equal(["Planned", "In Progress", "In Review", "Done"], tracker.Transitions.Select(t => t.Status));
@@ -1600,19 +1614,31 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Empty(AutoApprovalComments);
     }
 
+    /// <summary>ORD-1 waiting at release with the release PR from main it opened before batches (finishes the old way).</summary>
+    private async Task SeedLegacyRelease()
+    {
+        var pr = await scm.OpenPullRequestAsync("main", "production", "Release ORD-1", "", CancellationToken.None);
+        scm.Opened.Clear();
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "build-1";
+            t.ReleasePullRequestId = pr.Id;
+        });
+    }
+
     [Theory]
     [InlineData("main", "main001", "merge held: main moved since auto-approval (main000 → main001)")]
     [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
-    public async Task Auto_approved_release_waits_again_when_main_or_production_moves_before_the_merge(string branch,
+    public async Task Legacy_auto_approved_release_waits_again_when_main_or_production_moves_before_the_merge(string branch,
         string newHead, string message)
     {
         Configure("active", ("release", "auto"));
         AnswerReviews(Low);
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         var o = Create();
-        await TickIdle(o); // release PR opened
+        await TickIdle(o); // its open release PR: waiting at the gate
         await TickIdle(o); // review: low -> approved
         var approved = store.Single("ORD-1");
         Assert.Equal(StageStatus.Approved, approved.Status);
@@ -1636,11 +1662,11 @@ public sealed class OrchestratorTests : IDisposable
         // A busy main: every auto-approved release is overtaken by another merge before its own.
         Configure("active", ("release", "auto"));
         AnswerReviews(Low);
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         var o = Create();
-        await TickIdle(o); // release PR opened
+        await TickIdle(o); // its open release PR: waiting at the gate
         await TickIdle(o); // review: low -> approved
 
         for (var i = 1; i <= 3; i++)
@@ -1915,13 +1941,13 @@ public sealed class OrchestratorTests : IDisposable
     {
         Configure("active", ("release", "auto"));
         AnswerReviews(() => FakeAgentRunner.Review("low", "one safe change", checkedItems: ["diff", "build passed"]));
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         builds.Statuses["merge-1"] = BuildStatus.Succeeded;
         var o = Create();
 
-        await TickIdle(o); // release PR opened, waiting at the gate
+        await TickIdle(o); // its open release PR: waiting at the gate
         Assert.Equal((StageStatus.AwaitingApproval, true), (store.Single("ORD-1").Status, store.Single("ORD-1").ReviewDue));
         await TickIdle(o); // review: low -> approved
         Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
@@ -3106,6 +3132,497 @@ public sealed class OrchestratorTests : IDisposable
         await limits.ResumeAsync(ClaudeKey, CancellationToken.None);
         var resumed = Assert.Single(await Flushed());
         Assert.Equal(("Claude jobs resumed", "Jobs are running again"), (resumed.Title, resumed.Body));
+    }
+
+    #endregion
+
+    #region Release batches
+
+    /// <summary>Replaces the release stage's settings (in the current project file) with <paramref name="settings"/>.</summary>
+    private void ReleaseSettings(string settings)
+    {
+        var file = Path.Combine(home, "projects", "orders.yaml");
+        var yaml = Regex.Replace(File.ReadAllText(file), @"\{ id: release,[^}]*\}", $"{{ id: release, kind: release, {settings} }}");
+        File.WriteAllText(file, yaml);
+        registry.Reload();
+    }
+
+    private Task SeedReady(string key, string mergeCommit, string sourceStatus = "In Review") =>
+        Seed(key, "release", StageStatus.Pending, sourceStatus, t => t.MergeCommit = mergeCommit);
+
+    /// <summary>Release now for the project, with main..production holding <paramref name="commits"/>; returns the preview.</summary>
+    private async Task<ReleasePreview> ReleaseNow(Orchestrator o, params string[] commits)
+    {
+        git.FirstParentCommits = [.. commits];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(preview.Unavailable);
+        var started = await o.ReleaseNowAsync("orders", preview, CancellationToken.None);
+        Assert.True(started.Started, started.Message);
+        return preview;
+    }
+
+    private long ReleasePr => store.Single("_release-1").ReleasePullRequestId!.Value;
+
+    [Fact] public async Task Release_ticket_opens_pr_from_release_branch_waits_merges_and_finishes_members()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        var o = Create();
+        await ReleaseNow(o, "merge-2", "merge-1");
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((TicketKind.Release, "release", StageStatus.AwaitingApproval), (release.Kind, release.StageId, release.Status));
+        var opened = Assert.Single(scm.Opened);
+        Assert.Equal(("symphonist/release-1", "production", "Release 1: ORD-1, ORD-2"), (opened.Source, opened.Destination, opened.Title));
+        Assert.Equal(release.ReleaseSummary, opened.Description);
+        Assert.Contains("- ORD-1: Title ORD-1", opened.Description);
+        Assert.Equal(("release", StageStatus.Pending, release.Id), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status,
+            store.Single("ORD-1").ReleaseTicketId));
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, $"merge-{ReleasePr}"), (release.Status, release.ReleaseMergeCommit));
+        foreach (var key in new[] { "ORD-1", "ORD-2" })
+        {
+            var m = store.Single(key);
+            Assert.Equal(("deploy", (Guid?)null, $"merge-{ReleasePr}"), (m.StageId, m.ReleaseTicketId, m.ReleaseMergeCommit));
+            Assert.Contains("released; advanced to deploy", store.EventMessages(key));
+        }
+        Assert.Contains("release merged", store.EventMessages("_release-1"));
+
+        builds.Statuses[$"merge-{ReleasePr}"] = BuildStatus.Succeeded;
+        await TickIdle(o);
+        Assert.Equal((StageStatus.Done, "done"), (store.Single("ORD-1").Status, store.Single("ORD-1").StageId));
+        Assert.Equal("Done", tracker.Tickets.Single(t => t.Key == "ORD-1").Status);
+    }
+
+    [Fact] public async Task Ticket_merged_after_release_now_is_not_in_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        // After Release now: ORD-2 merges into main (main moves) and becomes ready.
+        await SeedReady("ORD-2", "merge-2");
+        git.RemoteCommits["refs/remotes/origin/main"] = "main001";
+        scm.BranchHeads["main"] = "main001";
+
+        await TickIdle(o);
+
+        // The PR ships the frozen branch, pushed at the main head the developer confirmed.
+        var opened = Assert.Single(scm.Opened);
+        Assert.Equal("symphonist/release-1", opened.Source);
+        Assert.Equal("main000", git.RemoteCommits["refs/remotes/origin/symphonist/release-1"]);
+        Assert.DoesNotContain("ORD-2", opened.Description);
+        Assert.DoesNotContain("ORD-2", opened.Title);
+        Assert.Null(store.Single("ORD-2").ReleaseTicketId);
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        var two = store.Single("ORD-2");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null, (string?)null),
+            (two.StageId, two.Status, two.ReleaseTicketId, two.ReleaseMergeCommit));
+        Assert.True(PipelineEngine.IsReadyToRelease(registry.Get("orders"), two));
+        git.FirstParentCommits = ["merge-2"];
+        var next = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(next.Unavailable);
+        Assert.Equal(["ORD-2"], next.Ready);
+    }
+
+    [Fact] public async Task Member_card_moved_to_approved_status_does_not_approve()
+    {
+        ReleaseSettings("gate: human, approvedWhenStatus: Released");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // the release PR is open, waiting at the gate
+
+        tracker.Move("ORD-1", "Released");
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+        Assert.Empty(scm.MergeCalls);
+        Assert.Empty(store.GateDecisions);
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, store.Single("_release-1").Id), (m.StageId, m.Status, m.ReleaseTicketId));
+
+        // Only the release ticket's own approval merges, and the moved card is then simply advanced.
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+    }
+
+    [Fact] public async Task Member_card_moved_back_goes_to_that_stage_after_merge()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        var o = Create();
+        await ReleaseNow(o, "merge-2", "merge-1");
+        await TickIdle(o);
+
+        tracker.Move("ORD-2", "In Progress"); // the developer wants it reworked
+        await TickIdle(o);
+        Assert.Equal(("release", "In Progress"), (store.Single("ORD-2").StageId, store.Single("ORD-2").PendingSourceStatus));
+        Assert.Equal(store.Single("_release-1").Id, store.Single("ORD-2").ReleaseTicketId); // its code ships anyway
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        var two = store.Single("ORD-2");
+        Assert.Equal(("implement", (Guid?)null), (two.StageId, two.ReleaseTicketId));
+        Assert.Contains("released; sent back to implement: card moved to 'In Progress'", store.EventMessages("ORD-2"));
+    }
+
+    [Fact] public async Task Members_cards_move_to_gate_status_while_release_waits()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        await SeedReady("ORD-3", "merge-3");
+        var o = Create();
+        await ReleaseNow(o, "merge-3", "merge-2", "merge-1");
+        tracker.Move("ORD-3", "In Progress"); // moved back before the release waits: its card stays there
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+        Assert.Equal([("ORD-1", "Ready For Release"), ("ORD-2", "Ready For Release")], tracker.Transitions);
+        Assert.Equal("Ready For Release", store.Single("ORD-1").LastSourceStatus);
+        Assert.Equal("In Progress", tracker.Tickets.Single(t => t.Key == "ORD-3").Status);
+        Assert.Equal("In Progress", store.Single("ORD-3").PendingSourceStatus);
+
+        await TickIdle(o); // our own moves are not developer moves
+        Assert.Null(store.Single("ORD-1").PendingSourceStatus);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+    }
+
+    [Fact] public async Task Member_card_move_that_fails_is_retried_for_that_member()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        tracker.TransitionError = new HttpRequestException("jira down");
+
+        await TickIdle(o);
+        Assert.Equal("Ready For Release", store.Single("ORD-1").TrackerRetryStatus);
+        Assert.Contains("tracker transition to 'Ready For Release' failed: jira down", store.EventMessages("ORD-1"));
+
+        tracker.TransitionError = null;
+        await TickIdle(o);
+        Assert.Equal(("Ready For Release", (string?)null),
+            (store.Single("ORD-1").LastSourceStatus, store.Single("ORD-1").TrackerRetryStatus));
+        Assert.Null(store.Single("_release-1").TrackerRetryStatus);
+    }
+
+    [Fact] public async Task Release_ticket_never_touches_the_tracker_with_its_own_key()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+
+        await TickIdle(o);
+        await TickIdle(o);
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.DoesNotContain(tracker.Transitions, t => t.Key.StartsWith('_'));
+        Assert.DoesNotContain(tracker.Comments, c => c.Key.StartsWith('_'));
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, (string?)null), (release.Status, release.BlockedReason));
+        Assert.DoesNotContain(store.EventMessages("_release-1"), m => m.Contains("no longer matches tracker query"));
+        Assert.DoesNotContain(store.EventMessages("_release-1"), m => m.Contains("tracker"));
+    }
+
+    [Fact] public async Task Pr_merged_outside_symphonist_completes_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Merged, "merged-by-hand");
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, "merged-by-hand"), (release.Status, release.ReleaseMergeCommit));
+        Assert.Empty(scm.MergeCalls);
+        var decision = Assert.Single(store.GateDecisions);
+        Assert.Equal((release.Id, GateDecision.Approved, false), (decision.TicketId, decision.Decision, decision.Auto));
+        Assert.Contains($"release PR {ReleasePr} merged outside Symphonist; release approved", store.EventMessages("_release-1"));
+        var m = store.Single("ORD-1");
+        Assert.Equal(("deploy", "merged-by-hand", (Guid?)null), (m.StageId, m.ReleaseMergeCommit, m.ReleaseTicketId));
+    }
+
+    [Fact] public async Task Pr_closed_outside_symphonist_cancels_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Declined);
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, (string?)null), (release.Status, release.ReleaseMergeCommit));
+        Assert.Empty(scm.DeclineCalls); // already closed
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(GateDecision.SentBack, Assert.Single(store.GateDecisions).Decision);
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
+        Assert.Contains("_release-1 cancelled; ready to release again", store.EventMessages("ORD-1"));
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(preview.Unavailable);
+        Assert.Equal(["ORD-1"], preview.Ready);
+    }
+
+    [Fact] public async Task Sending_back_the_release_declines_the_pr_and_returns_members()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+
+        var outcome = await o.SendBackAsync("orders", "_release-1", "not before the holidays", null, CancellationToken.None);
+
+        Assert.True(outcome.Changed);
+        Assert.Equal([ReleasePr], scm.DeclineCalls);
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, "not before the holidays"), (release.Status, release.Feedback));
+        Assert.Contains($"release PR {ReleasePr} closed", store.EventMessages("_release-1"));
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
+        Assert.Contains("_release-1 cancelled; ready to release again", store.EventMessages("ORD-1"));
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Send_back_after_the_pr_merged_on_the_host_completes_the_batch_instead()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Merged, "merged-by-hand"); // not seen yet
+
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "wait", null, CancellationToken.None)).Changed);
+
+        Assert.Empty(scm.DeclineCalls);
+        Assert.Equal("merged-by-hand", store.Single("_release-1").ReleaseMergeCommit);
+        Assert.Equal(("deploy", "merged-by-hand"), (store.Single("ORD-1").StageId, store.Single("ORD-1").ReleaseMergeCommit));
+    }
+
+    [Fact] public async Task Failed_decline_is_recorded_and_the_batch_is_still_cancelled()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.DeclineError = new HttpRequestException("bitbucket down");
+
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "no", null, CancellationToken.None)).Changed);
+
+        Assert.Contains($"could not close release PR {ReleasePr}: bitbucket down; close it by hand", store.EventMessages("_release-1"));
+        Assert.Null(store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Theory]
+    [InlineData("gate: human")]
+    [InlineData("gate: none")]
+    public async Task Legacy_ticket_with_open_release_pr_finishes_the_old_way(string gate)
+    {
+        ReleaseSettings(gate);
+        var pr = scm.AddOpen(5, "main");
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "merge-1";
+            t.ReleasePullRequestId = pr.Id;
+        });
+        builds.Statuses["merge-5"] = BuildStatus.Succeeded;
+        var o = Create();
+
+        await TickIdle(o);
+
+        // A release always needs one more approval: with gate none too, the legacy PR now waits for it.
+        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Empty(preview.Ready);
+        Assert.Equal([new AlsoShipped("ORD-1", "release", StageStatus.AwaitingApproval, false)], preview.AlsoShipped);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal([5L], scm.MergeCalls);
+        Assert.Empty(scm.Opened);
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+        Assert.Equal((StageStatus.Done, "merge-5"), (store.Single("ORD-1").Status, store.Single("ORD-1").ReleaseMergeCommit));
+    }
+
+    [Fact] public async Task Legacy_ticket_whose_pr_closed_waits_for_a_batch_instead_of_opening_one()
+    {
+        scm.PullRequests[5] = FakeSourceControl.Pr(5, PullRequestState.Declined);
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "merge-1";
+            t.ReleasePullRequestId = 5;
+        });
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(scm.Opened);
+        var t = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (long?)null), (t.StageId, t.Status, t.ReleasePullRequestId));
+        Assert.True(PipelineEngine.IsReadyToRelease(registry.Get("orders"), t));
+    }
+
+    [Fact] public async Task Ready_ticket_opens_no_pr_of_its_own()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(scm.Opened);
+        Assert.Equal(("release", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Auto_approval_comment_for_a_release_goes_on_the_pr()
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened, waiting at the gate with a review owed
+
+        await TickIdle(o); // review: low -> approved
+
+        var release = store.Single("_release-1");
+        Assert.Equal(StageStatus.Approved, release.Status);
+        Assert.Equal(("symphonist/release-1", "main000", "prod000"), (release.ApprovedBranch, release.ApprovedHead, release.ApprovedBaseHead));
+        var comment = Assert.Single(scm.PostedComments);
+        Assert.Equal(ReleasePr, comment.Pr);
+        Assert.StartsWith("Auto-approved release: low risk.", comment.Body);
+        Assert.Empty(tracker.Comments);
+        Assert.Contains(git.DiffCalls, c => c.Range == "prod000...main000");
+
+        await TickIdle(o); // merge
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        Assert.True(Assert.Single(store.GateDecisions).Auto);
+    }
+
+    [Theory]
+    [InlineData("symphonist/release-1", "rel0001", "merge held: symphonist/release-1 moved since auto-approval (main000 → rel0001)")]
+    [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
+    public async Task Auto_approved_release_waits_again_when_its_branch_or_production_moves(string branch, string newHead,
+        string message)
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened
+        await TickIdle(o); // review: low -> approved
+
+        scm.BranchHeads[branch] = newHead;
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal((StageStatus.AwaitingApproval, true), (release.Status, release.ReviewDue));
+        Assert.Equal(message, store.EventMessages("_release-1")[^1]);
+        Assert.Equal(store.Single("_release-1").Id, store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Fact] public async Task Auto_approved_release_merges_although_main_moved()
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        await TickIdle(o);
+
+        scm.BranchHeads["main"] = "main001"; // another ticket merged: not in this release, so nothing to re-review
+        await TickIdle(o);
+
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal(StageStatus.Done, store.Single("_release-1").Status);
+    }
+
+    [Fact] public async Task Ready_tickets_post_one_release_ready_notification()
+    {
+        var o = Create();
+        await TickIdle(o); // nothing ready: recorded
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("Orders (Acme) has work ready to release", "Orders (Acme) · 2 tickets ready to release"), (n.Title, n.Body));
+    }
+
+    [Fact] public async Task Release_ticket_whose_stage_left_the_pipeline_is_blocked_and_can_be_cancelled()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        var yaml = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(yaml, Regex.Replace(File.ReadAllText(yaml), @"\s+- \{ id: release,[^}]*\}", ""));
+        registry.Reload();
+        Assert.Null(registry.Get("orders").ReleaseStage);
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("_release-1").Status);
+        Assert.False((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "stage removed", null, CancellationToken.None)).Changed);
+        Assert.Equal(StageStatus.Done, store.Single("_release-1").Status);
+        Assert.Null(store.Single("ORD-1").ReleaseTicketId);
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Members_of_a_forgotten_release_are_released_from_it()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+
+        await TickIdle(o);
+
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
     }
 
     #endregion

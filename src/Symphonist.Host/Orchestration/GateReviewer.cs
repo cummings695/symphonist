@@ -74,7 +74,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         string? baseSha = null, head = null, headBranch = null;
         IReadOnlyList<string> changed = [];
         var diff = "";
-        if (DiffRefs(p, stage.Kind, branch) is var (baseRef, headRef))
+        if (DiffRefs(p, t, stage.Kind, branch) is var (baseRef, headRef))
         {
             headBranch = headRef["origin/".Length..];
             baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/{baseRef}", ct);
@@ -174,9 +174,14 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
     [GeneratedRegex("^Binary files (.+) and (.+) differ$")]
     private static partial Regex BinaryLine();
 
-    private static (string Base, string Head)? DiffRefs(ProjectConfig p, StageKind kind, string branch) => kind switch
+    /// <summary>
+    /// A release ticket ships its frozen release branch, not main (which may have moved on); a legacy release (a work
+    /// ticket's own release PR) ships main.
+    /// </summary>
+    private static (string Base, string Head)? DiffRefs(ProjectConfig p, Ticket t, StageKind kind, string branch) => kind switch
     {
         StageKind.Implement => ($"origin/{p.Repo.MainBranch}", $"origin/{branch}"),
+        StageKind.Release when t.Kind == TicketKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{branch}"),
         StageKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{p.Repo.MainBranch}"),
         _ => null, // Triage, Plan: the reviewer reads the ticket and the spec/plan files
     };
@@ -298,7 +303,15 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             .OrderBy(r => r.At)
             .Select(r => $"{r.StageId}: {Level(r.Verdict.Risk)} risk ({Decision(r)})")
             .ToList();
-        if (stage.Kind == StageKind.Release)
+        if (stage.Kind == StageKind.Release && t.Kind == TicketKind.Release)
+        {
+            // The tickets this release ships (each passed its own stages up to the release, or is listed as also shipped).
+            lines.AddRange((await store.ListAsync(p.Id, ct))
+                .Where(m => m.ReleaseTicketId == t.Id)
+                .OrderBy(m => m.Key, StringComparer.Ordinal)
+                .Select(m => $"ships {m.Key}: merged as {m.MergeCommit ?? "(no merge commit recorded)"}"));
+        }
+        else if (stage.Kind == StageKind.Release)
         {
             lines.Add(t.MergeCommit is { } merge ? $"build: succeeded at {merge}" : "build: no merge commit recorded");
             var earlier = p.Pipeline.TakeWhile(s => s.Id != stage.Id);

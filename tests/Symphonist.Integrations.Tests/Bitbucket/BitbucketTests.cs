@@ -441,6 +441,27 @@ public class BitbucketTests
     }
 
     [Fact]
+    public async Task Decline_posts_to_the_decline_endpoint()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline", HttpStatusCode.OK,
+            "{\"id\":7,\"state\":\"DECLINED\"}");
+
+        await Scm(stub).DeclinePullRequestAsync(7, CancellationToken.None);
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Equal((HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline"), (request.Method, request.PathAndQuery));
+    }
+
+    [Fact]
+    public async Task Decline_failure_throws()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline", HttpStatusCode.BadRequest,
+            "{\"error\":{\"message\":\"already merged\"}}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).DeclinePullRequestAsync(7, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Comment_on_pull_request_posts_markdown()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/comments", HttpStatusCode.Created, "{}");

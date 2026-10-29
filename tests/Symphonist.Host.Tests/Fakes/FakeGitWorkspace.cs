@@ -78,6 +78,8 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     {
         if (PushError is not null) throw PushError;
         Pushes.Add((workspace, branch));
+        // A push of a new branch creates its remote-tracking ref at HEAD.
+        if (Head() is { } head) RemoteCommits.TryAdd($"refs/remotes/origin/{branch}", head);
         return Task.CompletedTask;
     }
 
@@ -95,8 +97,31 @@ public sealed class FakeGitWorkspace : IGitWorkspace
         return Task.FromResult(Diff);
     }
 
+    /// <summary>
+    /// Like the real workspace, HEAD is the last prepared branch: its remote head when pushed, else origin's main (a new
+    /// branch starts there). A "HEAD" entry in <see cref="RemoteCommits"/> overrides it.
+    /// </summary>
     public Task<string?> ResolveCommitAsync(string workspace, string rev, CancellationToken ct) =>
-        Task.FromResult(RemoteCommits.GetValueOrDefault(rev));
+        Task.FromResult(rev == "HEAD" ? Head() : RemoteCommits.GetValueOrDefault(rev));
+
+    private string? Head() =>
+        RemoteCommits.GetValueOrDefault("HEAD")
+        ?? (Prepared.Count > 0 ? RemoteCommits.GetValueOrDefault($"refs/remotes/origin/{Prepared[^1].Branch}") : null)
+        ?? RemoteCommits.GetValueOrDefault("refs/remotes/origin/main");
+
+    /// <summary>Returned by FirstParentCommitsAsync for any range (newest first); default none.</summary>
+    public List<string> FirstParentCommits { get; set; } = [];
+    public List<(string Workspace, string Range)> FirstParentCalls { get; } = [];
+
+    /// <summary>Thrown from FirstParentCommitsAsync when set.</summary>
+    public Exception? FirstParentError { get; set; }
+
+    public Task<IReadOnlyList<string>> FirstParentCommitsAsync(string workspace, string range, CancellationToken ct)
+    {
+        FirstParentCalls.Add((workspace, range));
+        if (FirstParentError is not null) throw FirstParentError;
+        return Task.FromResult<IReadOnlyList<string>>(FirstParentCommits.ToList());
+    }
 
     /// <summary>Returned by OriginUrlAsync for any path; default null (not a checkout).</summary>
     public string? OriginUrl { get; set; }

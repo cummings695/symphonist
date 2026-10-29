@@ -72,6 +72,11 @@ public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig 
         return new MergeResult(true, MergeHash(doc.RootElement), null);
     }
 
+    public async Task DeclinePullRequestAsync(long id, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Post, $"{_api.RepoPath}/pullrequests/{id}/decline", null, ct);
+    }
+
     /// <summary>Asks for commits on <paramref name="other"/> that are not on <paramref name="branch"/>; none means contained.</summary>
     public async Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct)
     {

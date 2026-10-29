@@ -136,6 +136,28 @@ public class GitHubSourceControlTests
     }
 
     [Fact]
+    public async Task Decline_closes_the_pull_request()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Patch, RepoPrefix + "/pulls/12", HttpStatusCode.OK,
+            "{\"number\":12,\"state\":\"closed\"}");
+
+        await Scm(stub).DeclinePullRequestAsync(12, CancellationToken.None);
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Equal((HttpMethod.Patch, RepoPrefix + "/pulls/12"), (request.Method, request.PathAndQuery));
+        using var body = JsonDocument.Parse(request.Body!);
+        Assert.Equal("closed", body.RootElement.GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task Decline_failure_throws()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Patch, RepoPrefix + "/pulls/12", HttpStatusCode.NotFound, "{\"message\":\"Not Found\"}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).DeclinePullRequestAsync(12, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Rate_limit_throws_instead_of_refusing()
     {
         var stub = new StubHttpHandler().On(HttpMethod.Put, RepoPrefix + "/pulls/12/merge", HttpStatusCode.Forbidden,

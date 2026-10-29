@@ -238,6 +238,8 @@ public static class PipelineEngine
         {
             t.Status = StageStatus.Done;
             t.Feedback = feedback;
+            // Set before the gate when production already held the branch: a cancelled release must not read as merged.
+            t.ReleaseMergeCommit = null;
             t.PendingSourceStatus = null;
             t.WaitingSince = null;
             t.ReviewDue = false;

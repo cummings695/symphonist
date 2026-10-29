@@ -21,4 +21,10 @@ public class TicketLinksTests
         Assert.Equal(new Uri("https://github.com/acme/orders/pull/34"), TicketLinks.PullRequest(project, 34));
         Assert.Null(TicketLinks.PullRequest(project, null));
     }
+
+    [Fact]
+    public void Release_tickets_have_no_issue_link()
+    {
+        Assert.Null(TicketLinks.Issue(GitHubProject(), "_release-1"));
+    }
 }

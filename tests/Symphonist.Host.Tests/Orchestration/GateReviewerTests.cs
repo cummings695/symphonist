@@ -140,6 +140,32 @@ public sealed class GateReviewerTests : IDisposable
     }
 
     [Fact]
+    public async Task Release_ticket_review_covers_production_to_its_frozen_branch_and_its_tickets()
+    {
+        var t = PipelineEngine.CreateRelease(project, 1, "Release 1: ORD-1", "symphonist/release-1", "", Now);
+        t.Status = StageStatus.AwaitingApproval;
+        t.WaitingSince = Waiting;
+        t.ReviewDue = true;
+        await store.SaveAsync(t, default);
+        await store.SaveAsync(new Ticket
+        {
+            Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-1", Title = "Add export", StageId = "release",
+            Status = StageStatus.Pending, MergeCommit = "abc123", ReleaseTicketId = t.Id,
+        }, default);
+        git.RemoteCommits["refs/remotes/origin/symphonist/release-1"] = "rel000";
+        git.RemoteCommits["refs/remotes/origin/main"] = "main999"; // main moved on: not what this release ships
+        agent.Results.Enqueue(FakeAgentRunner.Review("low"));
+
+        var outcome = await reviewer.ReviewAsync(project, t, null, default);
+
+        Assert.Equal([("_release-1", "symphonist/release-1")], git.Prepared);
+        Assert.Equal([(git.WorkspacePath, "prod000...rel000")], git.DiffCalls);
+        Assert.Equal(("symphonist/release-1", "rel000", "prod000"), (outcome.ReviewedBranch, outcome.ReviewedHead, outcome.ReviewedBase));
+        Assert.Contains("ships ORD-1: merged as abc123", Prompt);
+        Assert.DoesNotContain("build: no merge commit", Prompt);
+    }
+
+    [Fact]
     public async Task Risk_area_path_forces_high_even_when_reviewer_says_low()
     {
         git.ChangedFiles = ["src/Pricing/Calc.cs", "README.md"];
