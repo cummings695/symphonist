@@ -6,6 +6,7 @@ using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
+using Symphonist.Host.Notifications;
 
 namespace Symphonist.Host.Orchestration;
 
@@ -27,7 +28,7 @@ public enum ForgetResult { Forgotten, NotFound, Running }
 /// </summary>
 public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, IIntegrationFactory integrations,
     StageExecutor executor, GateReviewer reviewer, EvidenceRunner evidence, ProviderLimits limits, TimeProvider time,
-    OrchestratorOptions options, ILogger<Orchestrator> log) : IDisposable
+    OrchestratorOptions options, ILogger<Orchestrator> log, NotificationCenter? notifications = null) : IDisposable
 {
     private const string LeftQuery = "no longer matches tracker query";
 
@@ -73,6 +74,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
     /// <summary>Tickets whose pending tracker move already has a failure event (one per retry episode); under gate only.</summary>
     private readonly HashSet<Guid> retryFailureRecorded = [];
+    // Notified rounds and blocks, used under gate only. In memory: a restart may notify once more.
+    private readonly Dictionary<Guid, DateTimeOffset> notifiedRounds = [];
+    private readonly HashSet<Guid> notifiedBlocked = [];
 
     /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
     public string? ProblemOf(string projectId) => problems.GetValueOrDefault(projectId);
@@ -1051,6 +1055,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (!outcome.Changed) return;
         CancelDecidedEvidence(t);
         await AddEventAsync(t, outcome.Message, ct);
+        Notify(t);
         if (outcome.Touch is { } touch)
             await store.AddTouchAsync(new TouchRecord(t.Id, t.ProjectId, fromStageId, touch, time.GetUtcNow()), ct);
         if (outcome.Decision is { } d)
@@ -1097,6 +1102,30 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await AddEventAsync(t, $"tracker transition to '{target}' failed: {e.Message}", ct);
             retryFailureRecorded.Add(t.Id);
             await SaveRetryAsync(t, target, ct);
+        }
+    }
+
+    /// <summary>
+    /// Tells the developer a ticket now waits on them (once per round) or is blocked (once per block); under gate only.
+    /// Auto-approved rounds, and gates still waiting on the reviewer, say nothing.
+    /// </summary>
+    private void Notify(Ticket t)
+    {
+        if (notifications is null) return;
+        if (t.Status != StageStatus.Blocked) notifiedBlocked.Remove(t.Id);
+        if (t.Status != StageStatus.AwaitingApproval) notifiedRounds.Remove(t.Id);
+        var p = projects.Projects.FirstOrDefault(x => x.Id == t.ProjectId);
+        if (p is null) return;
+        if (t.Status == StageStatus.AwaitingApproval && t.WaitingSince is { } since && !PipelineEngine.WaitsOnReviewer(p, t))
+        {
+            if (notifiedRounds.TryGetValue(t.Id, out var last) && last == since) return;
+            notifiedRounds[t.Id] = since;
+            var line = t.Risk is { } risk ? $"{t.StageId} · reviewer says {risk.ToString().ToLowerInvariant()} risk" : t.StageId;
+            notifications.Post(new NotificationEvent(NotificationKind.WaitingOnYou, t.ProjectId, t.Key, line));
+        }
+        else if (t.Status == StageStatus.Blocked && notifiedBlocked.Add(t.Id))
+        {
+            notifications.Post(new NotificationEvent(NotificationKind.Blocked, t.ProjectId, t.Key, t.BlockedReason ?? "blocked"));
         }
     }
 

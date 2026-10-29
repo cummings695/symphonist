@@ -10,13 +10,18 @@ public static class UsageLimitText
     /// "Claude usage limit, resets 11:00" (wall-clock time in <paramref name="zone"/>, with the date when that is not
     /// today there), or "Claude usage limit, trying again every 30 minutes" when the provider named no reset.
     /// </summary>
-    public static string Describe(string key, DateTimeOffset? resetsAt, TimeZoneInfo zone, DateTimeOffset now)
+    public static string Describe(string key, DateTimeOffset? resetsAt, TimeZoneInfo zone, DateTimeOffset now) =>
+        $"{UsageLimits.ProviderName(key)} usage limit, {Outlook(resetsAt, zone, now)}";
+
+    /// <summary>"Claude jobs paused, resets 11:00" (or "..., trying again every 30 minutes"), for notifications.</summary>
+    public static string Paused(string key, DateTimeOffset? resetsAt, TimeZoneInfo zone, DateTimeOffset now) =>
+        $"{UsageLimits.ProviderName(key)} jobs paused, {Outlook(resetsAt, zone, now)}";
+
+    private static string Outlook(DateTimeOffset? resetsAt, TimeZoneInfo zone, DateTimeOffset now)
     {
-        var provider = UsageLimits.ProviderName(key);
-        if (resetsAt is not { } at)
-            return $"{provider} usage limit, trying again every {(int)ProviderLimits.ProbeInterval.TotalMinutes} minutes";
+        if (resetsAt is not { } at) return $"trying again every {(int)ProviderLimits.ProbeInterval.TotalMinutes} minutes";
         var local = TimeZoneInfo.ConvertTime(at, zone);
         var format = local.Date == TimeZoneInfo.ConvertTime(now, zone).Date ? "HH:mm" : "yyyy-MM-dd HH:mm";
-        return $"{provider} usage limit, resets {local.ToString(format, CultureInfo.InvariantCulture)}";
+        return $"resets {local.ToString(format, CultureInfo.InvariantCulture)}";
     }
 }

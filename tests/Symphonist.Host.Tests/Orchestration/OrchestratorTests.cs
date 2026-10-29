@@ -9,6 +9,8 @@ using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
+using Symphonist.Host.Dashboard;
+using Symphonist.Host.Notifications;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 
@@ -66,6 +68,19 @@ public sealed class OrchestratorTests : IDisposable
     private readonly FakeGitWorkspace evidenceGit = new();
     private readonly ProjectRegistry registry;
     private readonly ProviderLimits limits;
+    private readonly CapturingNotifier notifier = new();
+    private readonly NotificationCenter center;
+
+    private sealed class CapturingNotifier : INotifier
+    {
+        public List<DesktopNotification> Sent { get; } = [];
+
+        public Task ShowAsync(DesktopNotification notification, CancellationToken ct)
+        {
+            Sent.Add(notification);
+            return Task.CompletedTask;
+        }
+    }
 
     private static AgentRunResult StageResult => FakeAgentRunner.Ok(FakeAgentRunner.Output(
         summary: "done", specPath: "docs/spec.md", planPath: "docs/plan.md", prTitle: "Export orders"));
@@ -77,12 +92,15 @@ public sealed class OrchestratorTests : IDisposable
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         limits = new ProviderLimits(store, time);
+        center = new NotificationCenter(notifier, new DashboardAddress(5199), id => id == "orders" ? "Orders (Acme)" : id, time,
+            NullLogger<NotificationCenter>.Instance);
         agent.OnRun = r => r.OutputSchema == PrFixOutputSchema.Json ? FakeAgentRunner.PrFix() : StageResult;
         evidenceGit.WorkspacePath = Path.Combine(home, "evidence-ws");
     }
 
     public void Dispose()
     {
+        center.Dispose();
         Environment.SetEnvironmentVariable("SYMPHONIST_HOME", null);
         if (Directory.Exists(home)) Directory.Delete(home, true);
     }
@@ -93,7 +111,7 @@ public sealed class OrchestratorTests : IDisposable
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
             new StageExecutor(git, Runners(), store, time), Reviewer(), Evidence(), limits, time,
-            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
+            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance, center);
 
     private GateReviewer Reviewer() =>
         new(git, Runners(), store, time);
@@ -3000,6 +3018,94 @@ public sealed class OrchestratorTests : IDisposable
 
         Assert.Equal(1, store.Single("ORD-1").Attempts);
         Assert.Empty(limits.Pauses);
+    }
+
+    #endregion
+
+    #region Notifications_*
+
+    private async Task<IReadOnlyList<DesktopNotification>> Flushed()
+    {
+        await center.FlushAsync();
+        var sent = notifier.Sent.ToList();
+        notifier.Sent.Clear();
+        return sent;
+    }
+
+    [Fact] public async Task Human_gate_posts_waiting_on_you_once_per_round()
+    {
+        ConfigureEvidence("off", "always");
+        Answer(Low, EvidenceReport);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        var o = Create();
+
+        await TickIdle(o); // the stage succeeds: waiting on you
+        var first = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is waiting on you", "Orders (Acme) · implement"), (first.Title, first.Body));
+
+        await TickIdle(o); // evidence completes on the same round
+        Assert.Equal(1, EvidenceRequests);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Auto_gate_posts_only_after_the_review_leaves_it_with_you()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Review("high", "touches tax", reasons: ["changes the tax rule"]));
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o); // plan run: the review is still owed
+        Assert.Empty(await Flushed());
+
+        await TickIdle(o); // review: high
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is waiting on you", "Orders (Acme) · plan · reviewer says high risk"), (n.Title, n.Body));
+    }
+
+    [Fact] public async Task Auto_approved_round_posts_nothing()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(Low);
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal("implement", store.Single("ORD-1").StageId);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Blocked_ticket_posts_blocked_with_reason()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.Attempts = 2);
+        agent.Results.Enqueue(FakeAgentRunner.Fail("boom"));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Blocked, t.Status);
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is blocked", $"Orders (Acme) · {t.BlockedReason}"), (n.Title, n.Body));
+
+        await TickIdle(o);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Limit_pause_and_resume_post_once_each()
+    {
+        LimitNotifications.Subscribe(limits, center, time, TimeZoneInfo.Utc);
+        var resetsAt = DateTimeOffset.Parse("2026-10-21T11:00:00Z");
+
+        await limits.PauseAsync(ClaudeKey, new UsageLimit(resetsAt), CancellationToken.None);
+        var paused = Assert.Single(await Flushed());
+        Assert.Equal(("Claude usage limit reached", "Claude jobs paused, resets 11:00"), (paused.Title, paused.Body));
+
+        await limits.ResumeAsync(ClaudeKey, CancellationToken.None);
+        var resumed = Assert.Single(await Flushed());
+        Assert.Equal(("Claude jobs resumed", "Jobs are running again"), (resumed.Title, resumed.Body));
     }
 
     #endregion

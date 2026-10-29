@@ -121,6 +121,8 @@ var app = builder.Build();
 var notifier = app.Services.GetRequiredService<BoardNotifier>();
 app.Services.GetRequiredService<Orchestrator>().ProblemsChanged += notifier.Notify;
 app.Services.GetRequiredService<ProviderLimits>().Changed += notifier.Notify;
+LimitNotifications.Subscribe(app.Services.GetRequiredService<ProviderLimits>(), app.Services.GetRequiredService<NotificationCenter>(),
+    app.Services.GetRequiredService<TimeProvider>(), TimeZoneInfo.Local);
 var registry = app.Services.GetRequiredService<ProjectRegistry>();
 registry.PausedChanged += notifier.Notify;
 registry.ProjectsChanged += notifier.Notify;
