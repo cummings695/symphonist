@@ -930,6 +930,21 @@ public class PipelineEngineTests
         Assert.Equal("build", shipped.StageId);
     }
 
+    [Fact] public void Release_cancelled_moves_a_ready_member_card_back_to_ready()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Kind == StageKind.Release
+                ? s with { OnEnterStatus = "Ready to Release", OnGateStatus = "Releasing" } : s).ToList(),
+        };
+        var ready = Member("release");
+
+        var o = PipelineEngine.ReleaseCancelled(p, ready, "_release-2", Now);
+
+        Assert.Equal("Ready to Release", o.SourceStatusToSet);
+        Assert.Null(PipelineEngine.ReleaseCancelled(p, Member("build"), "_release-2", Now).SourceStatusToSet);
+    }
+
     [Fact] public void Ready_ticket_card_moved_back_is_sent_back_now()
     {
         var t = At("release"); t.LastSourceStatus = "Done";

@@ -594,6 +594,20 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
     }
 
+    [Fact] public async Task Forget_refuses_an_open_release_but_not_a_finished_one()
+    {
+        var release = PipelineEngine.CreateRelease(registry.Get("orders"), 1, "Release 1", "symphonist/release-1", "", Now);
+        await store.SaveAsync(release, CancellationToken.None);
+        var o = Create();
+
+        Assert.Equal(ForgetResult.OpenRelease, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+        Assert.Single(store.Tickets);
+
+        release.Status = StageStatus.Done;
+        await store.SaveAsync(release, CancellationToken.None);
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+    }
+
     [Fact] public async Task Forgotten_ticket_is_picked_up_again_if_still_matching()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
@@ -1340,6 +1354,7 @@ public sealed class OrchestratorTests : IDisposable
         var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
         Assert.Equal(["ORD-1"], preview.Ready);
         Assert.True((await o.ReleaseNowAsync("orders", preview, CancellationToken.None)).Started);
+        scm.BranchHeads["symphonist/release-1"] = preview.MainHead!; // pushed at the previewed main head
         await TickIdle(o); // the release PR is opened and waits
         Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
         await Until(StageStatus.Done, "done");
@@ -3176,6 +3191,24 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Empty(await Flushed());
     }
 
+    [Fact] public async Task Blocked_notification_is_one_short_line_of_the_reason()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.Attempts = 2);
+        var stderr = string.Join("\n", Enumerable.Range(1, 100).Select(i => $"stderr line {i}"));
+        agent.Results.Enqueue(FakeAgentRunner.Fail(stderr));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Contains("\n", t.BlockedReason); // the full reason stays on the ticket
+        var n = Assert.Single(await Flushed());
+        var line = n.Body["Orders (Acme) · ".Length..];
+        Assert.DoesNotContain('\n', line);
+        Assert.True(line.Length <= 200, $"{line.Length} characters");
+        Assert.Contains("stderr line 1 stderr line 2", line);
+    }
+
     [Fact] public async Task Limit_pause_and_resume_post_once_each()
     {
         LimitNotifications.Subscribe(limits, center, time, TimeZoneInfo.Utc);
@@ -3214,6 +3247,8 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Null(preview.Unavailable);
         var started = await o.ReleaseNowAsync("orders", preview, CancellationToken.None);
         Assert.True(started.Started, started.Message);
+        // The push created the release branch at the previewed main head.
+        scm.BranchHeads.TryAdd(store.Single(started.ReleaseKey!).Branch!, preview.MainHead!);
         return preview;
     }
 
@@ -3589,7 +3624,8 @@ public sealed class OrchestratorTests : IDisposable
     }
 
     [Theory]
-    [InlineData("symphonist/release-1", "rel0001", "merge held: symphonist/release-1 moved since auto-approval (main000 → rel0001)")]
+    [InlineData("symphonist/release-1", "rel0001",
+        "merge held: release branch moved since Release now (main000 → rel0001); send the release back and release again")]
     [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
     public async Task Auto_approved_release_waits_again_when_its_branch_or_production_moves(string branch, string newHead,
         string message)
@@ -3612,6 +3648,26 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal((StageStatus.AwaitingApproval, true), (release.Status, release.ReviewDue));
         Assert.Equal(message, store.EventMessages("_release-1")[^1]);
         Assert.Equal(store.Single("_release-1").Id, store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Fact] public async Task Human_approved_release_is_held_when_the_release_branch_moved()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened
+        Assert.Equal("main000", store.Single("_release-1").ReleaseBaseHead);
+
+        scm.BranchHeads["symphonist/release-1"] = "rel0001"; // someone pushed to the release branch
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Empty(scm.MergeCalls);
+        var release = store.Single("_release-1");
+        Assert.Equal(StageStatus.AwaitingApproval, release.Status);
+        Assert.Equal("merge held: release branch moved since Release now (main000 → rel0001); send the release back and release again",
+            store.EventMessages("_release-1")[^1]);
+        Assert.Equal(release.Id, store.Single("ORD-1").ReleaseTicketId);
     }
 
     [Fact] public async Task Auto_approved_release_merges_although_main_moved()
@@ -3673,7 +3729,9 @@ public sealed class OrchestratorTests : IDisposable
         await SeedReady("ORD-1", "merge-1");
         var o = Create();
         await ReleaseNow(o, "merge-1");
-        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+        // Forget refuses an open release (its PR would be orphaned); the store can still lose it (e.g. an older host).
+        Assert.Equal(ForgetResult.OpenRelease, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+        Assert.True(await store.DeleteAsync("orders", "_release-1", CancellationToken.None));
 
         await TickIdle(o);
 

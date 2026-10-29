@@ -92,6 +92,9 @@ namespace Symphonist.Integrations.Storage.Migrations
                     b.Property<long?>("PullRequestId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ReleaseBaseHead")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ReleaseMergeCommit")
                         .HasColumnType("TEXT");
 

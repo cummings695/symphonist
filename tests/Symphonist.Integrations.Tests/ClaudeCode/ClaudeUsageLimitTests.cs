@@ -82,6 +82,12 @@ public class ClaudeUsageLimitTests
     public void Bare_429_in_other_text_is_not_a_limit() =>
         Assert.Null(ClaudeUsageLimit.Detect("fetched 429 rows; added a rate limit to the endpoint", Now, London));
 
+    [Theory]
+    [InlineData("error: token limit reached while summarising the diff")]
+    [InlineData("retry limit reached for the flaky test")]
+    public void Other_limits_reached_are_not_usage_limits(string text) =>
+        Assert.Null(ClaudeUsageLimit.Detect(text, Now, London));
+
     [Fact]
     public void Unrelated_error_is_not_a_limit() =>
         Assert.Null(ClaudeUsageLimit.Detect("agent exited with code 1", Now, London));

@@ -57,22 +57,37 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
         if (!SameRelease(preview, confirmed)) return new(false, Changed, null);
 
         var n = 1 + current.Tickets.Where(t => t.Kind == TicketKind.Release).Select(t => NumberOf(t.Key)).DefaultIfEmpty(0).Max();
-        var key = $"_release-{n}";
-        var branch = $"symphonist/release-{n}";
         var main = p.Repo.MainBranch;
         try
         {
-            // A new branch starts at origin's main as just fetched; it must be exactly the head the developer confirmed.
+            // A release branch already on origin (a forgotten release, or an attempt that failed after pushing) is never
+            // reused: its number is skipped. The preview workspace has just fetched every branch.
+            while (await git.ResolveCommitAsync(current.Workspace!, $"refs/remotes/origin/symphonist/release-{n}", ct) is not null)
+                n++;
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            return new(false, $"could not read the repository: {e.Message}", null);
+        }
+        var key = $"_release-{n}";
+        var branch = $"symphonist/release-{n}";
+        string head;
+        try
+        {
+            // A workspace left by an earlier attempt keeps its local branch where it was; start from a fresh clone so the
+            // branch starts at origin's main as just fetched. It must be exactly the head the developer confirmed.
+            await git.RemoveAsync(p, key, ct);
             var ws = await git.PrepareAsync(p, key, branch, ct);
-            var head = await git.ResolveCommitAsync(ws, "HEAD", ct);
-            if (!SameCommit(head, preview.MainHead))
+            var resolved = await git.ResolveCommitAsync(ws, "HEAD", ct);
+            if (resolved is null || !SameCommit(resolved, preview.MainHead))
             {
-                // Main moved since the preview's fetch, or the branch already existed elsewhere (an earlier attempt).
+                // Main moved since the preview's fetch, or the branch appeared on origin meanwhile.
                 var mainNow = await git.ResolveCommitAsync(ws, $"refs/remotes/origin/{main}", ct);
                 return new(false, !SameCommit(mainNow, preview.MainHead)
                     ? Changed
-                    : $"{branch} is at {head ?? "no commit"}, not at {main}'s {preview.MainHead}; the release was not started", null);
+                    : $"{branch} is at {resolved ?? "no commit"}, not at {main}'s {preview.MainHead}; the release was not started", null);
             }
+            head = resolved;
             await git.PushAsync(ws, branch, ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -86,6 +101,7 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
         var title = keys.Count == 0 ? $"Release {n}" : $"Release {n}: {string.Join(", ", keys)}";
         if (title.Length > MaxTitle) title = title[..(MaxTitle - 1)] + "…";
         var release = PipelineEngine.CreateRelease(p, n, title, branch, Summary(current), now);
+        release.ReleaseBaseHead = head; // the merge waits while the branch is anywhere else
         await store.SaveAsync(release, ct);
         await store.AddEventAsync(release.Id, release.StageId,
             $"release {n} started from {main} at {preview.MainHead}: {(keys.Count == 0 ? "no tickets" : string.Join(", ", keys))}",
@@ -154,8 +170,9 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
     private const int MaxTitle = 120;
 
     /// <param name="Members">Ready tickets, then the also-shipped ones that finish with the release.</param>
+    /// <param name="Workspace">The preview workspace, as just fetched; null when the release is unavailable.</param>
     private sealed record Computed(ReleasePreview Preview, IReadOnlyList<Ticket> Tickets, IReadOnlyList<Ticket> Members,
-        IReadOnlyList<Ticket> ReadyTickets);
+        IReadOnlyList<Ticket> ReadyTickets, string? Workspace = null);
 
     private async Task<Computed> ComputeAsync(ProjectConfig p, CancellationToken ct)
     {
@@ -170,9 +187,10 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
         var (main, production) = (p.Repo.MainBranch, p.Repo.ProductionBranch);
         string? mainHead;
         IReadOnlyList<string> commits;
+        string ws;
         try
         {
-            var ws = await git.PrepareAsync(p, PreviewWorkspace, main, ct);
+            ws = await git.PrepareAsync(p, PreviewWorkspace, main, ct);
             // Full ref names: a tag or local branch called "origin/main" must not shadow the remote-tracking branch.
             mainHead = await git.ResolveCommitAsync(ws, $"refs/remotes/origin/{main}", ct);
             var productionHead = await git.ResolveCommitAsync(ws, $"refs/remotes/origin/{production}", ct);
@@ -205,7 +223,7 @@ public sealed class ReleaseCoordinator(ITicketStore store, IGitWorkspace git, Ti
         var preview = new ReleasePreview(p.Id, ready.Select(t => t.Key).ToList(),
             also.Select(a => new AlsoShipped(a.Ticket.Key, a.Ticket.StageId, a.Ticket.Status, a.Finishes)).ToList(),
             outside, mainHead, null, production);
-        return new Computed(preview, tickets, members, ready);
+        return new Computed(preview, tickets, members, ready, ws);
     }
 
     /// <summary>

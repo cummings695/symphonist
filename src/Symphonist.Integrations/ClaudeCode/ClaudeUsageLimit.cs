@@ -14,7 +14,8 @@ public static class ClaudeUsageLimit
 {
     private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
 
-    private static readonly Regex Usage = new(@"usage limit|hit your limit|limit reached", Options);
+    // Only a usage, spend or credit limit: other "limit reached" text (token, retry, ...) must not pause the provider.
+    private static readonly Regex Usage = new(@"usage limit|hit your limit|\b(?:usage|spend|credit) limit reached", Options);
     private static readonly Regex Epoch = new(@"limit reached\s*\|\s*(\d{9,11})", Options);
     private static readonly Regex ResetsAt = new(
         @"resets?\s+(?:at\s+)?(?<h>\d{1,2})(?::(?<m>\d{2}))?\s*(?<ap>am|pm)(?:\s*\((?<zone>[A-Za-z_/+\-0-9]+)\))?", Options);

@@ -318,9 +318,10 @@ public static class PipelineEngine
             EnterStage(member, back, now);
             return new(true, back.OnEnterStatus, $"{releaseKey} cancelled; sent back to {back.Id}: card moved to '{pending}'");
         }
-        return new(true, null, member.StageId == p.ReleaseStage?.Id
-            ? $"{releaseKey} cancelled; ready to release again"
-            : $"{releaseKey} cancelled; back to its own progress");
+        // Ready again: its card goes back to the release stage's entry status (it was at the gate status meanwhile).
+        return member.StageId == p.ReleaseStage?.Id
+            ? new(true, p.ReleaseStage.OnEnterStatus, $"{releaseKey} cancelled; ready to release again")
+            : new(true, null, $"{releaseKey} cancelled; back to its own progress");
     }
 
     public static TransitionOutcome SourceStatusChanged(ProjectConfig p, Ticket t, string newStatus, string? latestFeedback, DateTimeOffset now)

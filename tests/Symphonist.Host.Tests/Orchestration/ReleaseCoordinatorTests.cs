@@ -210,8 +210,8 @@ public sealed class ReleaseCoordinatorTests : IDisposable
     {
         await Ready("ORD-1", Merge1);
         git.FirstParentCommits = [Merge1];
-        git.RemoteCommits["refs/remotes/origin/symphonist/release-1"] = "stale00"; // left over from an earlier attempt
         var preview = await releases.PreviewAsync(project, CancellationToken.None);
+        git.RemoteCommits["HEAD"] = "stale00"; // e.g. the branch appeared on origin between the check and the prepare
 
         var result = await releases.StartAsync(project, preview, CancellationToken.None);
 
@@ -220,6 +220,35 @@ public sealed class ReleaseCoordinatorTests : IDisposable
         Assert.Empty(git.Pushes);
         Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
         Assert.Null(store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Fact] public async Task Start_skips_release_numbers_whose_branch_already_exists()
+    {
+        await Ready("ORD-1", Merge1);
+        git.FirstParentCommits = [Merge1];
+        // Left over from a forgotten release or an earlier attempt that pushed but failed after.
+        git.RemoteCommits["refs/remotes/origin/symphonist/release-1"] = "stale00";
+        git.RemoteCommits["refs/remotes/origin/symphonist/release-2"] = "stale01";
+        var preview = await releases.PreviewAsync(project, CancellationToken.None);
+
+        var result = await releases.StartAsync(project, preview, CancellationToken.None);
+
+        Assert.Equal((true, "_release-3"), (result.Started, result.ReleaseKey));
+        Assert.Equal("symphonist/release-3", Assert.Single(git.Pushes).Branch);
+        Assert.Equal("symphonist/release-3", store.Single("_release-3").Branch);
+    }
+
+    [Fact] public async Task Start_removes_a_stale_release_workspace_before_preparing_it()
+    {
+        await Ready("ORD-1", Merge1);
+        git.FirstParentCommits = [Merge1];
+        var preview = await releases.PreviewAsync(project, CancellationToken.None);
+
+        await releases.StartAsync(project, preview, CancellationToken.None);
+
+        var remove = git.Events.IndexOf("remove _release-1");
+        Assert.True(remove >= 0, string.Join(", ", git.Events));
+        Assert.True(remove < git.Events.IndexOf("prepare _release-1"), string.Join(", ", git.Events));
     }
 
     [Fact] public async Task Start_creates_release_ticket_branch_and_members()
@@ -234,8 +263,8 @@ public sealed class ReleaseCoordinatorTests : IDisposable
 
         Assert.Equal((true, "_release-1"), (result.Started, result.ReleaseKey));
         var release = store.Single("_release-1");
-        Assert.Equal((TicketKind.Release, "release", StageStatus.Pending, "symphonist/release-1"),
-            (release.Kind, release.StageId, release.Status, release.Branch));
+        Assert.Equal((TicketKind.Release, "release", StageStatus.Pending, "symphonist/release-1", "main000"),
+            (release.Kind, release.StageId, release.Status, release.Branch, release.ReleaseBaseHead));
         Assert.Equal("Release 1: ORD-1, ORD-2", release.Title);
         Assert.Equal("""
             Tickets:

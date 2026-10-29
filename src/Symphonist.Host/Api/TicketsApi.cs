@@ -94,6 +94,8 @@ public static class TicketsApi
                     ForgetResult.Forgotten => Results.NoContent(),
                     ForgetResult.Running => Results.Conflict(new ApiError(
                         $"ticket {key} has an agent run in progress; try again when it finishes")),
+                    ForgetResult.OpenRelease => Results.Conflict(new ApiError(
+                        $"{key} is an open release; send it back to cancel it (closing its pull request) before forgetting it")),
                     _ => TicketNotFound(project, key),
                 };
             }
@@ -141,7 +143,9 @@ public static class TicketsApi
         // The body is the preview the developer confirmed; a changed release is refused (409) and nothing starts.
         api.MapPost("/projects/{id}/release", async (string id, ReleasePreview? confirmed, Orchestrator o, CancellationToken ct) =>
         {
-            if (confirmed is null) return Results.BadRequest(new ApiError("the confirmed preview is required"));
+            // Lists the JSON left out or set to null deserialize as null despite their types.
+            if (confirmed?.Ready is null || confirmed.AlsoShipped is null)
+                return Results.BadRequest(new ApiError("the confirmed preview is required"));
             try
             {
                 var result = await o.ReleaseNowAsync(id, confirmed, ct);

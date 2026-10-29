@@ -17,7 +17,7 @@ public sealed record OrchestratorOptions(TimeSpan PollInterval, int MaxConcurren
     public OrchestratorOptions() : this(TimeSpan.FromMinutes(2), 1) { }
 }
 
-public enum ForgetResult { Forgotten, NotFound, Running }
+public enum ForgetResult { Forgotten, NotFound, Running, OpenRelease }
 
 /// <summary>
 /// Syncs tracker tickets into the store, drives each ticket through the pipeline, and mirrors state back to the tracker.
@@ -222,7 +222,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// <summary>
     /// Removes a ticket (with its events and runs) from Symphonist only; the tracker, repo and workspace are untouched.
     /// Refused while an agent or review run for it is in flight, since the run's completion would write to the deleted
-    /// ticket.
+    /// ticket, and for a release that is not done, whose pull request only sending it back closes.
     /// </summary>
     public async Task<ForgetResult> ForgetAsync(string projectId, string key, CancellationToken ct)
     {
@@ -232,6 +232,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             if (await store.FindAsync(projectId, key, ct) is not { } t) return ForgetResult.NotFound;
             if (inFlight.ContainsKey(t.Id)) return ForgetResult.Running;
+            // Forgetting an open release would orphan its pull request (and leave nothing to close it).
+            if (t is { Kind: TicketKind.Release } && t.Status != StageStatus.Done) return ForgetResult.OpenRelease;
             retryFailureRecorded.Remove(t.Id);
             return await store.DeleteAsync(projectId, key, ct) ? ForgetResult.Forgotten : ForgetResult.NotFound;
         }
@@ -1236,13 +1238,30 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// For an auto-approved round, why the merge must not go ahead: the pull request (as just read) would not merge the
-    /// reviewed commit from this repository, or the reviewed branch (or a release's production base) is no longer at the
-    /// reviewed commit, or cannot be checked. Null for human approvals, which pin no commit.
+    /// Why the merge must not go ahead. For any release: its branch is no longer at the commit Release now froze it at
+    /// (<see cref="Ticket.ReleaseBaseHead"/>), or cannot be checked. For an auto-approved round also: the pull request (as
+    /// just read) would not merge the reviewed commit from this repository, or the reviewed branch (or a release's
+    /// production base) is no longer at the reviewed commit, or cannot be checked. Otherwise null (a human approval of a
+    /// work ticket pins no commit).
     /// </summary>
     private async Task<string?> MergeHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, PullRequestInfo pr,
         CancellationToken ct)
     {
+        if (t is { Kind: TicketKind.Release, ReleaseBaseHead: { } frozen, Branch: { } releaseBranch })
+        {
+            string current;
+            try
+            {
+                current = await io.SourceControl.GetBranchHeadAsync(releaseBranch, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Head of {Branch} for {Key} could not be checked before merging", releaseBranch, t.Key);
+                return $"could not check {releaseBranch}: {e.Message}";
+            }
+            if (!string.Equals(current, frozen, StringComparison.OrdinalIgnoreCase))
+                return $"release branch moved since Release now ({frozen} → {current}); send the release back and release again";
+        }
         if (t.ApprovedHead is null && t.ApprovedBaseHead is null) return null;
         if (t is not { ApprovedBranch: { } branch, ApprovedHead: { } head }) return "the auto-approved commit is not recorded";
         var checks = new List<(string Branch, string Head)> { (branch, head) };
@@ -1383,7 +1402,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         }
         else if (t.Status == StageStatus.Blocked && notifiedBlocked.Add(t.Id))
         {
-            notifications.Post(new NotificationEvent(NotificationKind.Blocked, t.ProjectId, t.Key, t.BlockedReason ?? "blocked"));
+            // One short line only: the full reason (often agent stderr) stays on the ticket and in its events.
+            var reason = ReviewerText.Line(t.BlockedReason, ReviewerText.MaxItemChars);
+            notifications.Post(new NotificationEvent(NotificationKind.Blocked, t.ProjectId, t.Key, reason.Length > 0 ? reason : "blocked"));
         }
     }
 

@@ -1,3 +1,4 @@
+using Symphonist.Core.Risk;
 using Symphonist.Host.Dashboard;
 
 namespace Symphonist.Host.Notifications;
@@ -77,7 +78,7 @@ public sealed class NotificationCenter(INotifier notifier, DashboardAddress addr
                 NotificationKind.LimitPaused => $"{provider} usage limit reached",
                 _ => $"{provider} jobs resumed",
             };
-            var line = e.Line.Length > MaxLine ? e.Line[..MaxLine] : e.Line;
+            var line = OneLine(e.Line);
             var body = e.ProjectId is null ? line : $"{projectName(e.ProjectId)} · {line}";
             Uri link;
             if (e.Kind is NotificationKind.WaitingOnYou or NotificationKind.Blocked && e.ProjectId is not null && e.TicketKey is not null)
@@ -104,6 +105,10 @@ public sealed class NotificationCenter(INotifier notifier, DashboardAddress addr
         Count(NotificationKind.LimitResumed, "resumed");
         return new DesktopNotification(foldedTitle, string.Join(" · ", parts), new Uri(address.Url, "/"));
     }
+
+    /// <summary>A notification never carries more than one line: whitespace runs (line breaks too) become one space.</summary>
+    private static string OneLine(string text) =>
+        ReviewerText.Line(string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)), MaxLine);
 
     public void Dispose()
     {

@@ -141,6 +141,45 @@ public sealed class TicketsApiTests : IDisposable
         Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateClient().GetAsync("/api/projects/orders/release")).StatusCode);
     }
 
+    [Theory]
+    [InlineData("""{"projectId":"orders","ready":null,"alsoShipped":[],"outsideCommits":0,"mainHead":"main000"}""")]
+    [InlineData("""{"projectId":"orders","ready":["ORD-1"],"alsoShipped":null,"outsideCommits":0,"mainHead":"main000"}""")]
+    [InlineData("""{"projectId":"orders","outsideCommits":0,"mainHead":"main000"}""")]
+    public async Task Release_with_missing_lists_is_400(string body)
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var ready = await Seed("ORD-1", "release", StageStatus.Pending); // a release is available, so the body is compared
+        ready.MergeCommit = "merge-1";
+        await store.SaveAsync(ready, default);
+        gitWorkspace.FirstParentCommits = ["merge-1"];
+
+        var response = await Authorized().PostAsync("/api/projects/orders/release",
+            new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("the confirmed preview is required",
+            (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+    }
+
+    [Fact]
+    public async Task Forget_refused_for_an_open_release_is_409()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var o = factory.Services.GetRequiredService<Orchestrator>();
+        var p = factory.Services.GetRequiredService<ProjectRegistry>().Get("orders");
+        await store.SaveAsync(PipelineEngine.CreateRelease(p, 1, "Release 1", "symphonist/release-1", "", DateTimeOffset.UtcNow), default);
+
+        var response = await Authorized().DeleteAsync("/api/tickets/orders/_release-1");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("_release-1 is an open release; send it back to cancel it (closing its pull request) before forgetting it",
+            (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Contains(store.Tickets, t => t.Key == "_release-1");
+    }
+
     [Fact]
     public async Task Rejects_missing_token() =>
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/tickets")).StatusCode);

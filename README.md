@@ -220,7 +220,7 @@ Tickets that reach a `release` stage wait there instead of each opening their ow
 - Symphonist freezes a copy of `mainBranch` as `symphonist/release-{n}` and opens one pull request from it into the
   production branch. Later merges to `mainBranch` do not change what ships.
 - A release always waits for one more approval from you, even when the release stage has `gate: none`. Approve it from
-  the dashboard, the CLI, or the PR.
+  the dashboard, the CLI, or by merging the PR.
 - Sending a release back cancels it: the PR is closed and the tickets go back to waiting at the release stage.
 - Moving a tracker card never approves a release. Use Symphonist or the PR.
 - A PR merged outside Symphonist completes the release; one closed outside Symphonist cancels it.

@@ -128,4 +128,12 @@ public sealed class NotificationCenterTests
         var n = NotificationCenter.Compose([Waiting("ORD-1", new string('x', 500))], Address, Name);
         Assert.Equal("Orders · ".Length + 200, n.Body.Length);
     }
+
+    [Fact]
+    public void Line_is_one_line()
+    {
+        var n = NotificationCenter.Compose(
+            [new NotificationEvent(NotificationKind.Blocked, "orders", "ORD-1", "error: boom\r\n  at Foo()\n\tat Bar()")], Address, Name);
+        Assert.Equal("Orders · error: boom at Foo() at Bar()", n.Body);
+    }
 }

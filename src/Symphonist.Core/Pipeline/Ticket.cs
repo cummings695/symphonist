@@ -40,6 +40,12 @@ public sealed class Ticket
     /// <summary>For a work ticket: the release ticket of the open batch it ships in; null when in none.</summary>
     public Guid? ReleaseTicketId { get; set; }
 
+    /// <summary>
+    /// For a release ticket: the commit Release now froze its branch at. The release merges only while its branch is still
+    /// there (whoever approves), so a later push to it never ships commits the release does not name.
+    /// </summary>
+    public string? ReleaseBaseHead { get; set; }
+
     /// <summary>For a release ticket: the release PR's body, naming every ticket it ships.</summary>
     public string? ReleaseSummary { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
