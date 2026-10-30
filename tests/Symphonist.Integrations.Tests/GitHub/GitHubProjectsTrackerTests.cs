@@ -148,6 +148,23 @@ public class GitHubProjectsTrackerTests
     }
 
     [Fact]
+    public async Task No_pickup_statuses_throws_before_calling_github()
+    {
+        var stub = Board();
+        var project = GitHubProjectsProviderTests.Project(pipeline:
+        [
+            new("triage", StageKind.Triage, GatePolicy.Human, [], null, null, null),
+            new("done", StageKind.Done, GatePolicy.None, [], null, null, null),
+        ]);
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => Tracker(stub, project).QueryAsync(CancellationToken.None));
+
+        Assert.Equal("GitHub project acme/7 has no statuses to pick up: set tracker.statuses, or name board "
+            + "statuses in the pipeline (entryStatuses, onEnterStatus, onGateStatus, approvedWhenStatus)", ex.Message);
+        Assert.Empty(stub.Requests);
+    }
+
+    [Fact]
     public async Task Missing_status_option_throws_naming_it()
     {
         var project = GitHubProjectsProviderTests.Project(pipeline: GitHubProjectsProviderTests.OrdersPipeline("In Progres"));

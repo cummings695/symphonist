@@ -41,6 +41,11 @@ public sealed class GitHubProjectsTracker(HttpClient http, GitHubProjectsTracker
 
     public async Task<IReadOnlyList<SourceTicket>> QueryAsync(CancellationToken ct)
     {
+        // Without a pickup status every item is filtered out, so say why instead of silently finding nothing.
+        if (pickupStatuses.Count == 0)
+            throw new InvalidOperationException($"GitHub project {Name} has no statuses to pick up: set tracker.statuses, "
+                + "or name board statuses in the pipeline (entryStatuses, onEnterStatus, onGateStatus, approvedWhenStatus)");
+
         var viewer = await GetViewerAsync(ct);
         var board = await GetBoardAsync(ct);
 
