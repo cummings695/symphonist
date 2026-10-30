@@ -1,0 +1,58 @@
+/* A line of its own under the project row (filtered board) or above the columns (all projects). */
+.release-banner {
+    flex-basis: 100%;
+    margin: 0.2rem 0 0.6rem;
+    padding: 0.5rem 0.75rem;
+    border-left: 3px solid var(--border);
+    background: var(--surface);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    overflow-wrap: anywhere;
+}
+
+.release-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.75rem;
+    margin: 0;
+}
+
+.release-line .button {
+    min-height: 1.75rem;
+    padding: 0 0.7rem;
+}
+
+.release-note {
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.release-preview {
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+}
+
+.release-preview p,
+.release-preview ul {
+    margin: 0 0 0.4rem;
+}
+
+.release-preview ul {
+    padding-left: 1.25rem;
+}
+
+.release-refusal,
+.release-unavailable {
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid var(--caution-border);
+    background: var(--caution-tint);
+    border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.release-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}

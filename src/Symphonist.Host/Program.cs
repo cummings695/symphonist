@@ -6,13 +6,18 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Http.Resilience;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
+using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 using Symphonist.Core.Storage;
 using Symphonist.Host.Api;
 using Symphonist.Host.Dashboard;
+using Symphonist.Host.Notifications;
+using Symphonist.Host.Onboarding;
 using Symphonist.Host.Orchestration;
 using Symphonist.Integrations;
 using Symphonist.Integrations.ClaudeCode;
+using Symphonist.Integrations.Codex;
 using Symphonist.Integrations.Containers;
 using Symphonist.Integrations.Git;
 using Symphonist.Integrations.Processes;
@@ -52,9 +57,11 @@ foreach (var client in BuiltInProviders.Registry.HttpClientNames)
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = OrchestratorService.RunDrainTimeout + TimeSpan.FromSeconds(15));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(new OrchestratorOptions());
-builder.Services.AddSingleton<ISecretStore, CredentialManagerSecretStore>();
+// SYMPHONIST_SECRET_STORE: os (default), memory or file.
+builder.Services.AddSingleton(SecretStores.FromEnvironment());
 builder.Services.AddSingleton(BuiltInProviders.Registry);
 builder.Services.AddSingleton<IIntegrationFactory, IntegrationFactory>();
+builder.Services.AddSingleton<IProjectDiscovery, ProjectDiscovery>();
 builder.Services.AddSingleton<BoardNotifier>();
 builder.Services.AddSingleton(_ => new SqliteTicketStore(SymphonistPaths.Resolve("symphonist.db")));
 builder.Services.AddSingleton<ITicketStore>(sp =>
@@ -71,22 +78,59 @@ builder.Services.AddSingleton<IAgentRunner>(sp =>
     new ClaudeCodeRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<IsolationLauncher>()));
 builder.Services.AddSingleton<IAgentRunners>(sp => new AgentRunners(new Dictionary<string, IAgentRunner>
 {
-    ["claude-code"] = sp.GetRequiredService<IAgentRunner>(),
+    [AgentTypes.ClaudeCode] = sp.GetRequiredService<IAgentRunner>(),
+    // Run files hold per-run copies of the Codex auth, so they stay under the Symphonist home, not a shared temp dir.
+    [AgentTypes.Codex] = new CodexRunner(sp.GetRequiredService<IProcessRunner>(), sp.GetRequiredService<IsolationLauncher>(),
+        CodexRunner.DefaultCodexHome(), SymphonistPaths.Resolve("run")),
 }));
 builder.Services.AddSingleton<StageExecutor>();
 builder.Services.AddSingleton<GateReviewer>();
+builder.Services.AddSingleton<EvidenceRunner>();
+builder.Services.AddSingleton<ProviderLimits>();
 builder.Services.AddSingleton<ProjectRegistry>();
 builder.Services.AddSingleton<Orchestrator>();
+builder.Services.AddSingleton<ProjectFileStore>();
+builder.Services.AddSingleton<OnboardingProposer>();
+builder.Services.AddSingleton<ContainerCheck>();
+builder.Services.AddSingleton(sp => new SetupChecks(sp.GetRequiredService<IProjectDiscovery>(),
+    sp.GetRequiredService<ProviderRegistry>(), sp.GetRequiredService<ISecretStore>(), sp.GetRequiredService<IGitWorkspace>(),
+    CodexRunner.DefaultCodexHome()));
+builder.Services.AddSingleton<OnboardingService>();
 // Order matters: Docker is prepared (or marked unavailable) before the orchestrator's first tick.
 builder.Services.AddHostedService<DockerStartup>();
 builder.Services.AddHostedService<OrchestratorService>();
 builder.Services.AddDashboard(port);
+// SYMPHONIST_NOTIFICATIONS=off disables desktop notifications; only Windows has a notifier so far.
+builder.Services.AddSingleton<INotifier>(sp =>
+    !string.Equals(Environment.GetEnvironmentVariable("SYMPHONIST_NOTIFICATIONS"), "off", StringComparison.OrdinalIgnoreCase)
+    && OperatingSystem.IsWindows()
+        ? new WindowsToastNotifier(sp.GetRequiredService<IProcessRunner>(),
+            Path.Combine(AppContext.BaseDirectory, "Notifications", "toast.ps1"),
+            sp.GetRequiredService<ILogger<WindowsToastNotifier>>())
+        : new NullNotifier(sp.GetRequiredService<ILogger<NullNotifier>>()));
+builder.Services.AddSingleton(sp =>
+{
+    var projects = sp.GetRequiredService<ProjectRegistry>();
+    return new NotificationCenter(sp.GetRequiredService<INotifier>(), new DashboardAddress(port),
+        id => projects.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id,
+        sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<NotificationCenter>>());
+});
 
 var app = builder.Build();
 
 var notifier = app.Services.GetRequiredService<BoardNotifier>();
 app.Services.GetRequiredService<Orchestrator>().ProblemsChanged += notifier.Notify;
-app.Services.GetRequiredService<ProjectRegistry>().PausedChanged += notifier.Notify;
+app.Services.GetRequiredService<ProviderLimits>().Changed += notifier.Notify;
+LimitNotifications.Subscribe(app.Services.GetRequiredService<ProviderLimits>(), app.Services.GetRequiredService<NotificationCenter>(),
+    app.Services.GetRequiredService<TimeProvider>(), TimeZoneInfo.Local);
+var registry = app.Services.GetRequiredService<ProjectRegistry>();
+registry.PausedChanged += notifier.Notify;
+registry.ProjectsChanged += notifier.Notify;
+
+// Per-run Codex directories left by a crash may hold live auth.json copies; no run has started yet.
+var codexRunFiles = CodexRunner.CleanupRunFiles(SymphonistPaths.Resolve("run"),
+    (dir, e) => app.Logger.LogWarning(e, "Removing leftover Codex run directory {Dir} failed", dir));
+if (codexRunFiles > 0) app.Logger.LogInformation("Removed {Count} leftover Codex run director(ies)", codexRunFiles);
 
 app.UseMiddleware<ApiTokenMiddleware>(apiToken);
 app.MapDefaultEndpoints();

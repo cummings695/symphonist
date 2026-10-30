@@ -1,4 +1,6 @@
 @using Symphonist.Core.Risk
+@using Symphonist.Core.Agents
+@using Symphonist.Core.Storage
 @* The filtered board's project heading, placed after the board's <h1> (which holds the name and stays one element). *@
 <div class="project" data-project="@Project.Id">
     <div class="project-row">
@@ -21,6 +23,7 @@
                 }
             </p>
         }
+        <a class="button button-quiet" href="@($"/projects/{Uri.EscapeDataString(Project.Id)}/setup")" aria-label="@($"Set up {Project.Name}")">Setup</a>
         @if (Project.Paused)
         {
             <button type="button" class="button" aria-label="@($"Resume {Project.Name}")" @onclick="OnTogglePause">Resume</button>
@@ -30,6 +33,22 @@
             <button type="button" class="button button-quiet" aria-label="@($"Pause {Project.Name}")" @onclick="OnTogglePause">Pause</button>
         }
     </div>
+    @if (Project.Touches is { } touches)
+    {
+        <p class="project-touches" data-touches title="@TouchTitle()">
+            Touches this week: @touches.ThisWeek (last week @touches.LastWeek) · send-backs @touches.SendBacks · unblocks @touches.Unblocks · overrules @touches.Overrules · auto-approved @touches.AutoApproved of @touches.Decided gates
+            <a href="@($"/stats?project={Uri.EscapeDataString(Project.Id)}")" aria-label="@($"Touch stats for {Project.Name}")">Stats</a>
+        </p>
+    }
+    @foreach (var pause in Project.UsagePauses ?? [])
+    {
+        <p class="project-usage-pause" data-usage-pause="@pause.Key">
+            <span class="badge badge-paused">Paused: @UsageLimitText.Describe(pause.Key, pause.ResetsAt, Zone, Now)</span>
+            <button type="button" class="button button-quiet" aria-label="@($"Resume {UsageLimits.ProviderName(pause.Key)} jobs now")"
+                    @onclick="() => OnResumeUsage.InvokeAsync(pause.Key)">Resume</button>
+        </p>
+    }
+    <ReleaseBanner Project="Project" OnChanged="OnReleaseChanged" />
     @if (Project.Problem is { Length: > 0 } problem)
     {
         <p class="project-problem"><strong>Problem:</strong> @problem</p>
@@ -40,6 +59,20 @@
     [Parameter, EditorRequired] public BoardProject Project { get; set; } = default!;
 
     [Parameter] public EventCallback OnTogglePause { get; set; }
+
+    /// <summary>Lifts a provider's usage-limit pause by its key.</summary>
+    [Parameter] public EventCallback<string> OnResumeUsage { get; set; }
+
+    /// <summary>Called after Release now started a release, so the board reloads.</summary>
+    [Parameter] public EventCallback OnReleaseChanged { get; set; }
+
+    /// <summary>The time zone the reset time is shown in, and the current time (to leave out today's date).</summary>
+    [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Local;
+
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    private string TouchTitle() => string.Join("\n", (Project.StageTouches ?? []).Select(s =>
+        $"{s.StageId}: {s.SendBacks} send-backs, {s.Unblocks} unblocks, {s.Overrules} overrules over 8 weeks"));
 
     private IEnumerable<StageAgreement> Agreement() =>
         (Project.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);

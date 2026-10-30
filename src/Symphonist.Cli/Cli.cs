@@ -89,7 +89,7 @@ public static class Cli
         });
         root.Add(dashboard);
 
-        var projects = new Command("projects", "List projects, or pause/resume one");
+        var projects = new Command("projects", "List projects, pause/resume one, or reload the project files");
         Run(projects, async (_, ct) => stdout.Write(StatusTable.RenderProjects(await client.ListProjectsAsync(ct))));
         foreach (var (name, paused, done) in new[] { ("pause", true, "Paused"), ("resume", false, "Resumed") })
         {
@@ -104,7 +104,66 @@ public static class Cli
             projects.Add(sub);
         }
 
+        var reload = new Command("reload", "Reload the project files after editing them by hand");
+        RunWithExitCode(reload, async (_, ct) =>
+        {
+            var result = await client.ReloadProjectsAsync(ct);
+            stdout.WriteLine($"Reloaded {result.Projects.Count} project(s)");
+            foreach (var (file, error) in result.Errors.OrderBy(e => e.Key, StringComparer.Ordinal))
+                stderr.WriteLine($"skipped {file}: {error}");
+            return result.Errors.Count > 0 ? ApiError : Ok;
+        });
+        projects.Add(reload);
         root.Add(projects);
+
+        var limits = new Command("limits", "List agent providers paused by a usage limit, or resume one");
+        Run(limits, async (_, ct) =>
+        {
+            var pauses = await client.ListLimitsAsync(ct);
+            if (pauses.Count == 0) stdout.WriteLine("No provider is paused by a usage limit");
+            else stdout.Write(StatusTable.RenderLimits(pauses));
+        });
+        var limitKey = new Argument<string>("key") { Description = "Usage-limit key, as `symphonist limits` lists it" };
+        var limitResume = new Command("resume", "Let jobs on a paused provider start again now") { limitKey };
+        Run(limitResume, async (r, ct) =>
+        {
+            var key = r.GetValue(limitKey)!;
+            await client.ResumeLimitAsync(key, ct);
+            stdout.WriteLine($"Resumed {key}");
+        });
+        limits.Add(limitResume);
+        root.Add(limits);
+
+        var releaseProject = new Argument<string>("project") { Description = "Project id" };
+        var releaseYes = new Option<bool>("--yes", "-y") { Description = "Start without asking" };
+        var release = new Command("release", "Release now: ship the tickets ready to release as one release") { releaseProject, releaseYes };
+        RunWithExitCode(release, async (r, ct) =>
+        {
+            var project = r.GetValue(releaseProject)!;
+            var preview = await client.PreviewReleaseAsync(project, ct);
+            if (preview.Unavailable is { Length: > 0 } unavailable)
+            {
+                stderr.WriteLine(unavailable);
+                return ApiError;
+            }
+            stdout.Write(StatusTable.RenderReleasePreview(preview));
+            if (!r.GetValue(releaseYes))
+            {
+                var count = preview.Ready.Count + preview.AlsoShipped.Count(a => a.Finishes);
+                stdout.Write($"Release {count} ticket(s) to {preview.ProductionBranch ?? "production"}? [y/N] ");
+                var answer = stdin.ReadLine()?.Trim();
+                if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase))
+                {
+                    stdout.WriteLine();
+                    stdout.WriteLine("Not released");
+                    return Ok;
+                }
+            }
+            stdout.WriteLine((await client.ReleaseNowAsync(project, preview, ct)).Message);
+            return Ok;
+        });
+        root.Add(release);
 
         var secret = new Command("secret", "Manage secrets in the OS credential store");
         var secretSet = new Command("set", "Store a secret; the value is read from stdin, never from arguments");
@@ -134,12 +193,19 @@ public static class Cli
 
         // Wraps an action: maps client failures to exit codes and messages.
         void Run(Command command, Func<ParseResult, CancellationToken, Task> action) =>
+            RunWithExitCode(command, async (r, ct) =>
+            {
+                await action(r, ct);
+                return Ok;
+            });
+
+        // The same, for an action that decides its own exit code.
+        void RunWithExitCode(Command command, Func<ParseResult, CancellationToken, Task<int>> action) =>
             command.SetAction(async (r, ct) =>
             {
                 try
                 {
-                    await action(r, ct);
-                    return Ok;
+                    return await action(r, ct);
                 }
                 catch (HostNotRunningException e)
                 {

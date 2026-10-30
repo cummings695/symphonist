@@ -13,7 +13,7 @@ public interface ITicketStore
     Task<IReadOnlyList<TicketEvent>> EventsAsync(Guid ticketId, CancellationToken ct);
     Task AddAgentRunAsync(AgentRunRecord run, CancellationToken ct);
     Task<IReadOnlyList<AgentRunRecord>> AgentRunsAsync(Guid ticketId, CancellationToken ct);
-    /// <summary>Deletes the ticket with its events, agent runs, gate reviews and gate decisions; false when there is no such ticket.</summary>
+    /// <summary>Deletes the ticket with its events, agent runs, gate reviews, gate decisions, evidence and touches; false when there is no such ticket.</summary>
     Task<bool> DeleteAsync(string projectId, string key, CancellationToken ct);
     Task AddGateReviewAsync(GateReview review, CancellationToken ct);
     Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct);
@@ -21,12 +21,38 @@ public interface ITicketStore
     Task<IReadOnlyList<GateReview>> GateReviewsAsync(Guid ticketId, CancellationToken ct);
     /// <summary>How often the developer's decisions matched the reviewer's verdict, per project and stage (see <see cref="ReviewAgreement"/>).</summary>
     Task<IReadOnlyList<StageAgreement>> ReviewAgreementAsync(string? projectId, CancellationToken ct);
+    Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct);
+    /// <summary>The ticket's evidence records, newest first.</summary>
+    Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct);
+    /// <summary>Per ticket with evidence: whether its latest record has issues.</summary>
+    Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct);
     Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct);
+    Task AddTouchAsync(TouchRecord touch, CancellationToken ct);
+    /// <summary>Touches at or after <paramref name="since"/>, oldest first; all projects when <paramref name="projectId"/> is null.</summary>
+    Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
+    /// <summary>Gate decisions made at or after <paramref name="since"/>, oldest first; all projects when <paramref name="projectId"/> is null.</summary>
+    Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
+    /// <summary>Gate reviews whose round began at or after <paramref name="since"/> minus 30 days (enough to join the decisions made since), oldest first.</summary>
+    Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct);
+    Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct);
+    /// <summary>Creates or replaces the pause for <see cref="ProviderPause.Key"/>.</summary>
+    Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct);
+    Task RemoveProviderPauseAsync(string key, CancellationToken ct);
     Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct);
 }
 
 public sealed record AgentRunRecord(Guid TicketId, string StageId, DateTimeOffset StartedAt, TimeSpan Duration,
-    bool Succeeded, decimal? CostUsd, string? Error, string RawLogPath, string? Summary = null, bool IsReview = false);
+    bool Succeeded, decimal? CostUsd, string? Error, string RawLogPath, string? Summary = null, bool IsReview = false,
+    bool IsEvidence = false);
+
+/// <param name="ReportJson">The evidence report as JSON; null when the run produced none (see <paramref name="Error"/>).</param>
+public sealed record EvidenceRecord(Guid TicketId, string ProjectId, string StageId, DateTimeOffset WaitingSince,
+    DateTimeOffset At, string? Head, string? ReportJson, bool HasIssues, string? Error,
+    IReadOnlyList<string> Screenshots, bool Posted)
+{
+    /// <summary>The typed report; null when there is none or it is unusable.</summary>
+    public Evidence.EvidenceReport? Report => Evidence.EvidenceReport.FromJson(ReportJson);
+}
 
 /// <param name="Decision">The latest decision of the same round (joined on read); null while undecided.</param>
 public sealed record GateReview(Guid TicketId, string ProjectId, string StageId, DateTimeOffset WaitingSince, DateTimeOffset At,

@@ -1,8 +1,10 @@
 @page "/"
+@using Symphonist.Core.Agents
 @implements IAsyncDisposable
 @inject BoardQuery Query
 @inject BoardNotifier Notifier
 @inject Orchestrator Orchestrator
+@inject ProviderLimits Limits
 @inject ProjectRegistry Registry
 @inject TimeProvider Time
 @inject DashboardChrome Chrome
@@ -22,9 +24,24 @@
     @* Only the project the heading names: during a switch the last board is still the previous project's. *@
     @if (filtered is not null && filtered.Id == Project)
     {
-        <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" />
+        <ProjectHeading Project="filtered" OnTogglePause="() => TogglePause(filtered)" OnResumeUsage="ResumeUsageAsync"
+                        OnReleaseChanged="ReloadAsync" Zone="Time.LocalTimeZone" Now="now" />
     }
+    <div class="page-head-action">
+        <a class="button button-quiet" href="/projects/new">Add project</a>
+        <button type="button" class="button button-quiet" disabled="@reloading" @onclick="ReloadProjectsAsync">Reload projects</button>
+    </div>
 </div>
+
+@if (Registry.LoadErrors.Count > 0)
+{
+    <div class="board-problems" role="status">
+        @foreach (var (file, message) in Registry.LoadErrors.OrderBy(e => e.Key, StringComparer.Ordinal))
+        {
+            <p class="project-problem" data-load-error="@file">@file skipped: @message</p>
+        }
+    </div>
+}
 
 @if (model is null)
 {
@@ -40,7 +57,7 @@ else
         {
             <section class="setup-hint">
                 <h2>No projects configured</h2>
-                <p>Add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code>; the host picks it up on restart.</p>
+                <p>Use <a href="/projects/new">Add project</a>, or add a project file (<code>*.yaml</code>) to <code>@SymphonistPaths.Resolve("projects")</code> and use Reload projects.</p>
             </section>
         }
         else if (filtered is null && model.Projects.Any(p => p.Problem is { Length: > 0 }))
@@ -51,6 +68,14 @@ else
                     <p class="project-problem" data-problem="@p.Id"><strong>@p.Name:</strong> @p.Problem</p>
                 }
             </div>
+        }
+
+        @if (filtered is null)
+        {
+            @foreach (var p in model.Projects.Where(p => p.Release is not null))
+            {
+                <ReleaseBanner @key="p.Id" Project="p" ShowName="true" OnChanged="ReloadAsync" />
+            }
         }
 
         @if (model.Columns.Count > 0)
@@ -126,9 +151,11 @@ else
     private string? loadedFilter;
     private PeriodicTimer? clock;
     private readonly Dictionary<string, bool> foldChoices = [];
+    private readonly HashSet<string> openedWhileEmpty = [];
     private IJSObjectReference? folds;
     private DotNetObjectReference<Board>? self;
     private bool? phone; // unknown until the browser says; the CSS decides meanwhile
+    private bool reloading;
 
     [SupplyParameterFromQuery(Name = "project")]
     public string? Project { get; set; }
@@ -155,8 +182,19 @@ else
         await LoadFoldsAsync();
     }
 
-    /// <summary>A stage's folded state: the developer's choice in this browser, else folded for Done only.</summary>
-    private bool IsFolded(BoardColumn column) => foldChoices.TryGetValue(column.Id, out var folded) ? folded : column.IsDone;
+    /// <summary>
+    /// A stage's folded state. Done follows the developer's choice in this browser (folded until they choose). Any other
+    /// stage is folded while it has no tickets (opening it then lasts only for this page), and follows the developer's
+    /// choice, else open, once it has some.
+    /// </summary>
+    private bool IsFolded(BoardColumn column)
+    {
+        if (column.IsDone) return foldChoices.TryGetValue(column.Id, out var done) ? done : true;
+        if (IsEmpty(column)) return !openedWhileEmpty.Contains(column.Id);
+        return foldChoices.TryGetValue(column.Id, out var folded) && folded;
+    }
+
+    private static bool IsEmpty(BoardColumn column) => column.Cards.Count + column.HiddenCount == 0;
 
     /// <summary>Applies the folds stored in this browser and learns whether it is at phone width.</summary>
     private async Task LoadFoldsAsync()
@@ -188,6 +226,12 @@ else
 
     private async Task ToggleAsync(BoardColumn column)
     {
+        if (!column.IsDone && IsEmpty(column))
+        {
+            // An empty stage folds again on the next visit; the stored choice is kept for when it has tickets.
+            if (!openedWhileEmpty.Remove(column.Id)) openedWhileEmpty.Add(column.Id);
+            return;
+        }
         foldChoices[column.Id] = !IsFolded(column);
         try
         {
@@ -264,6 +308,56 @@ else
             // E.g. paused.json cannot be written: report it rather than kill the circuit.
             Log.LogError(e, "{Action} {Project} from the dashboard failed", p.Paused ? "Resuming" : "Pausing", p.Id);
             Chrome.ShowMessage($"Could not {(p.Paused ? "resume" : "pause")} {p.Name}: {e.Message}");
+        }
+        await ReloadAsync();
+    }
+
+    /// <summary>Lets jobs on a provider paused by a usage limit start again now (e.g. after switching plans).</summary>
+    private async Task ResumeUsageAsync(string key)
+    {
+        var provider = UsageLimits.ProviderName(key);
+        try
+        {
+            await Limits.ResumeAsync(key, disposed.Token);
+            Chrome.ShowMessage($"{provider} resumed");
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Resuming {Key} from the dashboard failed", key);
+            Chrome.ShowMessage($"Could not resume {provider}: {e.Message}");
+        }
+        await ReloadAsync();
+    }
+
+    /// <summary>Reloads the project files (after a hand edit); the skipped files show as banners above the board.</summary>
+    private async Task ReloadProjectsAsync()
+    {
+        if (reloading) return;
+        reloading = true;
+        try
+        {
+            var reload = await Orchestrator.ReloadProjectsAsync(disposed.Token);
+            if (disposed.IsCancellationRequested) return;
+            Chrome.ShowMessage(reload.Errors.Count == 0
+                ? $"Reloaded {reload.ProjectIds.Count} project(s)"
+                : $"{reload.Errors.Count} project file(s) skipped");
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Reloading the projects from the dashboard failed");
+            Chrome.ShowMessage($"Could not reload the projects: {e.Message}");
+        }
+        finally
+        {
+            reloading = false;
         }
         await ReloadAsync();
     }

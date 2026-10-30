@@ -13,3 +13,29 @@ While a ticket waits at a gate (`AwaitingApproval`), a new tracker comment from 
 - Each comment triggers at most one rerun (remember the last processed comment id/timestamp per ticket).
 - Works for every gate, including triage (which today has no Jira-only way to rerun: it has no `onEnterStatus` and no earlier stage).
 - Approval still follows the gate's policy; deciding "the answers are sufficient, move on" automatically belongs with the risk reviewer (plan 3).
+
+## "Save the lesson" on send-back / risk override (tabled 2026-10-25)
+
+Roadmap plan 5 item, tabled by the developer until Symphonist has been used longer: real send-backs will show what kinds of corrections repeat (new risk area, prompt note, something else), which decides what a saved lesson turns into. Spec reference: `specs/2026-10-21-symphonist-design.md` section 8, "Feedback sticks".
+
+## Codex in host mode (deferred 2026-10-26)
+
+Plan 6 makes Codex container-only "for now". Lifting it needs two answers: whether write runs on the host get network
+(Codex's `workspace-write` sandbox has none by default and there is no per-domain allowlist outside a container), and
+whether to allow it on native Windows, where Codex's sandbox is experimental.
+
+## Codex smoke run (skipped at ship, 2026-10-26)
+
+Plan 6 shipped without its real-CLI smoke run, which needs real OpenAI credentials. Still unverified on codex 0.164.0:
+a read-only Codex review ignores the reviewed repo's `AGENTS.md` (`-c project_doc_max_bytes=0`) and its
+`.codex/config.toml` (fresh `CODEX_HOME`); an API-key run and a ChatGPT run both complete; the developer's
+`~/.codex/auth.json` is intact after a ChatGPT run. If either repo-file guard fails, have `DockerLauncher` mount an
+empty read-only directory over `/workspace/.codex` for read-only Codex runs.
+
+## Deferred from plan 7
+
+- Scheduled release windows.
+- The daily digest.
+- Per-ticket cost and time limits.
+- macOS and Linux notifications.
+- Counting manual fixes as touches.

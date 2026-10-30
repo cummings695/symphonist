@@ -17,8 +17,9 @@ namespace Symphonist.Host.Orchestration;
 /// </param>
 /// <param name="ReviewedBranch">The branch <paramref name="ReviewedHead"/> is the head of; null when there is none.</param>
 /// <param name="ReviewedBase">The commit the change was diffed against (main for implement, production for release).</param>
+/// <param name="Limit">The reviewer provider's usage limit stopped the run: no verdict was reached (the review is still owed).</param>
 public sealed record GateReviewOutcome(GateVerdict Verdict, string? ReviewedHead, string? ReviewedBranch = null,
-    string? ReviewedBase = null);
+    string? ReviewedBase = null, UsageLimit? Limit = null);
 
 /// <summary>
 /// Runs the read-only reviewer at a gate and returns its verdict. Fails closed: every error, and every risk-area path in
@@ -73,7 +74,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         string? baseSha = null, head = null, headBranch = null;
         IReadOnlyList<string> changed = [];
         var diff = "";
-        if (DiffRefs(p, stage.Kind, branch) is var (baseRef, headRef))
+        if (DiffRefs(p, t, stage.Kind, branch) is var (baseRef, headRef))
         {
             headBranch = headRef["origin/".Length..];
             baseSha = await git.ResolveCommitAsync(workspace, $"refs/remotes/{baseRef}", ct);
@@ -137,6 +138,20 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             result = new AgentRunResult(false, null, null, time.GetUtcNow() - startedAt, e.Message, "");
         }
 
+        var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
+        var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-review-{stamp}.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        await File.WriteAllTextAsync(logPath, result.RawLog, ct);
+
+        if (!result.Succeeded && result.Limit is { } limit)
+        {
+            // Not a verdict: the caller keeps the review owed until the provider lets runs through again.
+            var error = result.Error ?? "usage limit reached";
+            await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, false,
+                result.CostUsd, result.Error, logPath, $"stopped by a usage limit: {error}", IsReview: true), ct);
+            return new GateReviewOutcome(GateVerdict.Failed(error), head, head is null ? null : headBranch, baseSha, limit);
+        }
+
         // Structured output may be present on a failed run: only a successful run's output is judged.
         var verdict = result.Succeeded
             ? GateVerdictParser.Parse(result.Structured)
@@ -144,10 +159,6 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         verdict = Guard(p, changed, diff, truncated, verdict);
         foreach (var reason in forced) verdict = verdict.WithForcedHigh(reason);
 
-        var stamp = startedAt.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
-        var logPath = SymphonistPaths.Resolve("logs", p.Id, t.Key, $"{t.StageId}-review-{stamp}.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        await File.WriteAllTextAsync(logPath, result.RawLog, ct);
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, $"{Level(verdict.Risk)} risk: {verdict.Summary}", IsReview: true), ct);
         return new GateReviewOutcome(verdict, head, head is null ? null : headBranch, baseSha);
@@ -163,9 +174,14 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
     [GeneratedRegex("^Binary files (.+) and (.+) differ$")]
     private static partial Regex BinaryLine();
 
-    private static (string Base, string Head)? DiffRefs(ProjectConfig p, StageKind kind, string branch) => kind switch
+    /// <summary>
+    /// A release ticket ships its frozen release branch, not main (which may have moved on); a legacy release (a work
+    /// ticket's own release PR) ships main.
+    /// </summary>
+    private static (string Base, string Head)? DiffRefs(ProjectConfig p, Ticket t, StageKind kind, string branch) => kind switch
     {
         StageKind.Implement => ($"origin/{p.Repo.MainBranch}", $"origin/{branch}"),
+        StageKind.Release when t.Kind == TicketKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{branch}"),
         StageKind.Release => ($"origin/{p.Repo.ProductionBranch}", $"origin/{p.Repo.MainBranch}"),
         _ => null, // Triage, Plan: the reviewer reads the ticket and the spec/plan files
     };
@@ -180,7 +196,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
         && !name.Split('/').Any(part => part.StartsWith('.') || part.EndsWith(".lock", StringComparison.Ordinal));
 
     /// <summary>Single-line, repo-relative, no "..", at most <see cref="MaxPathLength"/> characters.</summary>
-    private static bool IsSafeRepoPath(string path) =>
+    internal static bool IsSafeRepoPath(string path) =>
         path.Length <= MaxPathLength
         && !path.Any(char.IsControl)
         && !path.StartsWith('/') && !path.StartsWith('\\') && !path.Contains(':') && !Path.IsPathRooted(path)
@@ -287,7 +303,15 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
             .OrderBy(r => r.At)
             .Select(r => $"{r.StageId}: {Level(r.Verdict.Risk)} risk ({Decision(r)})")
             .ToList();
-        if (stage.Kind == StageKind.Release)
+        if (stage.Kind == StageKind.Release && t.Kind == TicketKind.Release)
+        {
+            // The tickets this release ships (each passed its own stages up to the release, or is listed as also shipped).
+            lines.AddRange((await store.ListAsync(p.Id, ct))
+                .Where(m => m.ReleaseTicketId == t.Id)
+                .OrderBy(m => m.Key, StringComparer.Ordinal)
+                .Select(m => $"ships {m.Key}: merged as {m.MergeCommit ?? "(no merge commit recorded)"}"));
+        }
+        else if (stage.Kind == StageKind.Release)
         {
             lines.Add(t.MergeCommit is { } merge ? $"build: succeeded at {merge}" : "build: no merge commit recorded");
             var earlier = p.Pipeline.TakeWhile(s => s.Id != stage.Id);
@@ -306,7 +330,7 @@ public sealed partial class GateReviewer(IGitWorkspace git, IAgentRunners agents
 
     private async Task<string?> StageSummaryAsync(Ticket t, CancellationToken ct) =>
         (await store.AgentRunsAsync(t.Id, ct))
-        .Where(r => r.StageId == t.StageId && !r.IsReview)
+        .Where(r => r.StageId == t.StageId && !r.IsReview && !r.IsEvidence)
         .MaxBy(r => r.StartedAt)?.Summary;
 
     private static string Level(RiskLevel risk) => risk == RiskLevel.Low ? "low" : "high";

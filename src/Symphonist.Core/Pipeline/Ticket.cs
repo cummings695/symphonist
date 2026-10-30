@@ -4,10 +4,17 @@ namespace Symphonist.Core.Pipeline;
 
 public enum StageStatus { Pending, Running, AwaitingApproval, Approved, Blocked, Done }
 
+/// <summary>
+/// A tracker ticket's work, or a Symphonist-owned release batch (key <c>_release-{n}</c>) at the project's release stage
+/// whose PR ships its members.
+/// </summary>
+public enum TicketKind { Work, Release }
+
 public sealed class Ticket
 {
     public Guid Id { get; set; }
     public string ProjectId { get; set; } = "";
+    public TicketKind Kind { get; set; } = TicketKind.Work;
     public string Key { get; set; } = "";
     public string Title { get; set; } = "";
     public string StageId { get; set; } = "";
@@ -29,12 +36,24 @@ public sealed class Ticket
     public string? MergeCommit { get; set; }
     public long? ReleasePullRequestId { get; set; }
     public string? ReleaseMergeCommit { get; set; }
+
+    /// <summary>For a work ticket: the release ticket of the open batch it ships in; null when in none.</summary>
+    public Guid? ReleaseTicketId { get; set; }
+
+    /// <summary>
+    /// For a release ticket: the commit Release now froze its branch at. The release merges only while its branch is still
+    /// there (whoever approves), so a later push to it never ships commits the release does not name.
+    /// </summary>
+    public string? ReleaseBaseHead { get; set; }
+
+    /// <summary>For a release ticket: the release PR's body, naming every ticket it ships.</summary>
+    public string? ReleaseSummary { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? StageStartedAt { get; set; }
     public DateTimeOffset? WaitingSince { get; set; }
 
-    /// <summary>The Created time of the newest developer "@claude" comment acted on; older ones are never acted on again.</summary>
+    /// <summary>The Created time of the newest developer comment (starting with the project's comment marker) acted on; older ones are never acted on again.</summary>
     public DateTimeOffset? ClaudeCommentsHandledAt { get; set; }
 
     /// <summary>
@@ -45,6 +64,15 @@ public sealed class Ticket
 
     /// <summary>A reviewer run is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
     public bool ReviewDue { get; set; }
+
+    /// <summary>Evidence is owed for the current gate round (<see cref="StageId"/>, <see cref="WaitingSince"/>).</summary>
+    public bool EvidenceDue { get; set; }
+
+    /// <summary>The Created time of the newest PR comment (starting with the comment marker) acted on; older ones are never acted on again.</summary>
+    public DateTimeOffset? PrCommentsHandledAt { get; set; }
+
+    /// <summary>PR comments (PrFeedback JSON) the next implement run addresses; cleared when that run succeeds or the stage is entered.</summary>
+    public string? PrFeedbackJson { get; set; }
 
     /// <summary>The latest reviewer verdict (the card's badge); null until a review has finished.</summary>
     public RiskLevel? Risk { get; set; }

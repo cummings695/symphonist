@@ -72,6 +72,11 @@ public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig 
         return new MergeResult(true, MergeHash(doc.RootElement), null);
     }
 
+    public async Task DeclinePullRequestAsync(long id, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Post, $"{_api.RepoPath}/pullrequests/{id}/decline", null, ct);
+    }
+
     /// <summary>Asks for commits on <paramref name="other"/> that are not on <paramref name="branch"/>; none means contained.</summary>
     public async Task<bool> BranchContainsAsync(string branch, string other, CancellationToken ct)
     {
@@ -91,6 +96,86 @@ public sealed class BitbucketSourceControl(HttpClient http, BitbucketRepoConfig 
             ? h
             : throw new HttpRequestException($"Bitbucket GET {path} returned no target hash");
     }
+
+    private string? _myAccountId;
+
+    private async Task<string?> MyAccountIdAsync(CancellationToken ct)
+    {
+        if (_myAccountId is not null) return _myAccountId;
+        using var doc = await _api.SendAsync(HttpMethod.Get, "user", null, ct);
+        return _myAccountId = Str(doc.RootElement, "account_id") ?? "";
+    }
+
+    public async Task<IReadOnlyList<PullRequestComment>> ListPullRequestCommentsAsync(long id, CancellationToken ct)
+    {
+        var mine = await MyAccountIdAsync(ct);
+        var comments = new List<PullRequestComment>();
+        string? next = $"{_api.RepoPath}/pullrequests/{id}/comments?pagelen=100";
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (next is not null)
+        {
+            if (!seen.Add(next) || seen.Count > 200)
+                throw new HttpRequestException("Bitbucket comment paging did not end (repeated or too many pages)");
+            using var doc = await _api.SendAsync(HttpMethod.Get, next, null, ct);
+            next = Str(doc.RootElement, "next") is { } link ? SameHostPath(link) : null;
+            if (!doc.RootElement.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array) break;
+            foreach (var c in values.EnumerateArray())
+            {
+                if (c.ValueKind != JsonValueKind.Object
+                    || (c.TryGetProperty("deleted", out var deleted) && deleted.ValueKind == JsonValueKind.True)) continue;
+                var user = c.TryGetProperty("user", out var u) && u.ValueKind == JsonValueKind.Object ? u : default;
+                var account = user.ValueKind == JsonValueKind.Object ? Str(user, "account_id") : null;
+                string? path = null;
+                int? line = null;
+                if (c.TryGetProperty("inline", out var inline) && inline.ValueKind == JsonValueKind.Object)
+                {
+                    path = Str(inline, "path");
+                    line = Int(inline, "to") ?? Int(inline, "from");
+                }
+
+                var parent = c.TryGetProperty("parent", out var p) && p.ValueKind == JsonValueKind.Object
+                             && p.TryGetProperty("id", out var pid) && pid.ValueKind == JsonValueKind.Number
+                    ? pid.GetInt64().ToString() : null;
+                var raw = c.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Object
+                    ? Str(content, "raw") : null;
+                comments.Add(new PullRequestComment(c.GetProperty("id").GetInt64().ToString(),
+                    (user.ValueKind == JsonValueKind.Object ? Str(user, "display_name") : null) ?? "",
+                    !string.IsNullOrEmpty(mine) && account == mine,
+                    DateTimeOffset.TryParse(Str(c, "created_on"), out var created) ? created : DateTimeOffset.MinValue,
+                    raw ?? "", path, line, parent));
+            }
+        }
+
+        return [.. comments.OrderBy(c => c.Created)];
+    }
+
+    /// <summary>
+    /// The path and query of a paging link, which must be https on api.bitbucket.org: the request carries credentials,
+    /// so a link naming any other host is refused (throws) rather than followed.
+    /// </summary>
+    private static string SameHostPath(string link) =>
+        Uri.TryCreate(link, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps
+        && string.Equals(uri.Host, "api.bitbucket.org", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort
+            ? uri.PathAndQuery
+            : throw new HttpRequestException("Bitbucket paging link names a foreign host; refusing to follow it");
+
+    public async Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Post, $"{_api.RepoPath}/pullrequests/{id}/comments",
+            new { content = new { raw = markdown } }, ct);
+    }
+
+    public async Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct)
+    {
+        using var _ = await _api.SendAsync(HttpMethod.Post, $"{_api.RepoPath}/pullrequests/{id}/comments",
+            new { content = new { raw = markdown }, parent = new { id = long.Parse(comment.Id) } }, ct);
+    }
+
+    private static string? Str(JsonElement obj, string property) =>
+        obj.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static int? Int(JsonElement obj, string property) =>
+        obj.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
 
     /// <summary>The web page of pull request <paramref name="id"/> (no API call needed).</summary>
     public static Uri PullRequestUrl(BitbucketRepoConfig repo, long id) =>

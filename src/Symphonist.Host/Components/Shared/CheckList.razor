@@ -1,0 +1,23 @@
+@using Symphonist.Core.Onboarding
+@* One line per check step, "{Name}: {status word} — {Detail}"; the word is always there, the colour only reinforces it. *@
+<ul class="check-list" data-check-list="@Name" aria-label="@Label">
+    @foreach (var step in Steps)
+    {
+        <li class="check check-@step.Status.ToString().ToLowerInvariant()"><span class="check-mark" aria-hidden="true"></span><span class="check-name">@step.Name</span>: <strong class="check-status">@Word(step.Status)</strong><span class="check-detail">@(step.Detail.Length > 0 ? $" — {step.Detail}" : "")</span></li>
+    }
+</ul>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<CheckStep> Steps { get; set; } = [];
+
+    /// <summary>For tests and styling: "connections" or "container".</summary>
+    [Parameter] public string? Name { get; set; }
+
+    [Parameter] public string? Label { get; set; }
+
+    public static string Word(CheckStatus status) => status switch
+    {
+        CheckStatus.NotRun => "Not run",
+        _ => status.ToString(),
+    };
+}

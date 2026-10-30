@@ -58,3 +58,27 @@
     font-size: 0.86rem;
     font-variant-numeric: tabular-nums;
 }
+
+/* The touch strip: a line of its own below the row, with the link to the Stats page. */
+.project-touches {
+    flex-basis: 100%;
+    margin: 0.2rem 0 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* A provider held back by a usage limit: a line of its own below the row, with its Resume button. */
+.project-usage-pause {
+    display: flex;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.65rem;
+    margin: 0.2rem 0 0;
+}
+
+.project-usage-pause .button {
+    min-height: 1.75rem;
+    padding: 0 0.7rem;
+}

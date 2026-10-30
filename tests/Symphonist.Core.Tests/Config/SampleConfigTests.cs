@@ -19,6 +19,14 @@ public class SampleConfigTests
     }
 
     [Fact]
+    public void Sample_config_has_project_key()
+    {
+        var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"), BuiltInProviders.Registry);
+        Assert.Equal("ACME", ((Symphonist.Integrations.Jira.JiraTrackerConfig)p.Tracker).ProjectKey);
+        ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders-github.example.yaml"), BuiltInProviders.Registry);
+    }
+
+    [Fact]
     public void Sample_config_loads_with_review_and_risk_areas()
     {
         var p = ProjectConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "Config", "orders.example.yaml"), BuiltInProviders.Registry);

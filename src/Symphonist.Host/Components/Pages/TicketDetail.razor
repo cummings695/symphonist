@@ -32,6 +32,10 @@
             <span class="badge">@card.Source</span>
             <span class="ticket-status ticket-@StatusClass(card)" data-status><span class="status-dot" aria-hidden="true"></span>@TicketCard.StatusLabel(card)</span>
             <RiskBadge Risk="card.Risk" />
+            @if (card.EvidenceIssues)
+            {
+                <span class="badge evidence-issues" data-evidence-issues>Evidence: issues found</span>
+            }
             <span class="facts-numbers">
                 @if (!model!.Pipeline.Any(s => s.Id == card.StageId))
                 {
@@ -75,6 +79,10 @@
         {
             <p class="ticket-feedback" data-feedback><strong>Last feedback:</strong> @feedbackText</p>
         }
+        @if (model.ReleaseOf is { } releaseKey)
+        {
+            <p class="ticket-release" data-release-of>Part of release <a href="@($"/tickets/{Uri.EscapeDataString(Project)}/{Uri.EscapeDataString(releaseKey)}")">@releaseKey</a></p>
+        }
     }
 </section>
 
@@ -82,6 +90,38 @@
 {
     <div class="detail-grid">
         <div class="detail-history">
+            @if (model.ReleaseMembers is { } members)
+            {
+                <section class="panel" aria-labelledby="release-heading" data-release-panel>
+                    <h2 id="release-heading">Release</h2>
+                    @if (model.ReleaseSummary is { Length: > 0 } summary)
+                    {
+                        <pre class="release-summary" data-release-summary>@summary</pre>
+                    }
+                    @if (members.Count == 0)
+                    {
+                        <p class="empty">No tickets in this release.</p>
+                    }
+                    else
+                    {
+                        <ul class="release-members">
+                            @foreach (var member in members)
+                            {
+                                <li data-release-member="@member.Key">
+                                    <a href="@($"/tickets/{Uri.EscapeDataString(Project)}/{Uri.EscapeDataString(member.Key)}")">@member.Key</a>
+                                    <span class="release-member-title">@member.Title</span>
+                                    <span class="release-member-stage">@member.StageId</span>
+                                    @if (member.PendingSourceStatus is { Length: > 0 } moved)
+                                    {
+                                        <span class="release-moved" data-moved-card role="status">@member.Key was moved back to '@moved'</span>
+                                    }
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+            }
+
             <section class="panel" aria-labelledby="reviews-heading">
                 <h2 id="reviews-heading">Gate reviews</h2>
                 @if (model.Reviews.Count == 0)
@@ -114,6 +154,8 @@
                     </ol>
                 }
             </section>
+
+            <EvidencePanel Records="model.Evidence" Project="@Project" Key="@Key" Known="card.Known" />
 
             <section class="panel" aria-labelledby="runs-heading">
                 <h2 id="runs-heading">Agent runs</h2>
@@ -196,7 +238,7 @@
                     @if (model.CanSendBack)
                     {
                         <div class="send-back">
-                            <label for="send-back-feedback">Send back with feedback</label>
+                            <label for="send-back-feedback">@(IsRelease ? "Why the release is cancelled" : "Send back with feedback")</label>
                             <textarea id="send-back-feedback" rows="3" required @bind="feedback" @bind:event="oninput"></textarea>
                             <div class="action-row">
                                 <label class="target">
@@ -204,12 +246,12 @@
                                     <select @bind="sendBackTarget">
                                         @foreach (var target in model.SendBackTargets)
                                         {
-                                            <option value="@target">@target</option>
+                                            <option value="@target">@(IsRelease ? "Cancel release" : target)</option>
                                         }
                                     </select>
                                 </label>
                                 <button type="button" class="button" disabled="@(busy || string.IsNullOrWhiteSpace(feedback))"
-                                        aria-busy="@(busy ? "true" : null)" @onclick="SendBackAsync">Send back</button>
+                                        aria-busy="@(busy ? "true" : null)" @onclick="SendBackAsync">@(IsRelease ? "Cancel release" : "Send back")</button>
                             </div>
                         </div>
                     }
@@ -270,6 +312,9 @@
 
     /// <summary>Set while prerendering, so a missing ticket answers 404 with the not-found page.</summary>
     [CascadingParameter] private HttpContext? HttpContext { get; set; }
+
+    /// <summary>A release ticket's send-back cancels the release.</summary>
+    private bool IsRelease => model?.ReleaseMembers is not null;
 
     /// <summary>The summary panel's rail: ochre when waiting on you, red when blocked, none otherwise.</summary>
     private string SummaryClass =>

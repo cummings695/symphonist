@@ -1,12 +1,12 @@
 namespace Symphonist.Host.Orchestration;
 
 /// <summary>
-/// Resets interrupted runs once, then ticks every <see cref="OrchestratorOptions.PollInterval"/> until shutdown. On
-/// shutdown it cancels in-flight agent runs and waits (up to <see cref="RunDrainTimeout"/>) for them to clean up, so no
-/// agent container outlives the host.
+/// Loads the usage-limit pauses and resets interrupted runs once, then ticks every
+/// <see cref="OrchestratorOptions.PollInterval"/> until shutdown. On shutdown it cancels in-flight agent runs and waits
+/// (up to <see cref="RunDrainTimeout"/>) for them to clean up, so no agent container outlives the host.
 /// </summary>
-public sealed class OrchestratorService(Orchestrator o, OrchestratorOptions options, ILogger<OrchestratorService> log)
-    : BackgroundService
+public sealed class OrchestratorService(Orchestrator o, OrchestratorOptions options, ILogger<OrchestratorService> log,
+    ProviderLimits? limits = null) : BackgroundService
 {
     public static readonly TimeSpan RunDrainTimeout = TimeSpan.FromSeconds(30);
 
@@ -28,6 +28,16 @@ public sealed class OrchestratorService(Orchestrator o, OrchestratorOptions opti
     {
         try
         {
+            try
+            {
+                // Before the first tick: a restart must not start jobs on a provider still paused.
+                if (limits is not null) await limits.LoadAsync(stoppingToken);
+            }
+            catch (Exception e) when (!stoppingToken.IsCancellationRequested)
+            {
+                log.LogError(e, "Loading the usage-limit pauses failed");
+            }
+
             try
             {
                 await o.RecoverAsync(stoppingToken);

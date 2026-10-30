@@ -32,7 +32,7 @@ The stage's own summary of its work:
 Earlier gate verdicts and decisions for this ticket:
 {{review.history}}
 
-Diff range: `{{review.diff_range}}` (for implement: main to the pushed ticket branch; for release: production to main). When it is non-empty, inspect `git diff {{review.diff_range}}`: its changed files and its full patch are below (you cannot run git; use Read, Grep and Glob to look at files in the workspace, which may differ from the reviewed commits).
+Diff range: `{{review.diff_range}}` (for implement: main to the pushed ticket branch; for release: production to main). When it is non-empty, inspect `git diff {{review.diff_range}}`: its changed files and its full patch are below (you cannot run git; use your file read and search tools to look at files in the workspace, which may differ from the reviewed commits).
 
 Changed files:
 {{review.changed_files}}

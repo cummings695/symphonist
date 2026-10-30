@@ -26,8 +26,60 @@ public class TrackerCommentsTests
         Assert.Equal(expected, TrackerComments.ClaudeRequest(body));
 
     [Theory]
+    [InlineData("@symphonist do it", "do it")]
+    [InlineData("  @SymPhonist\nmore", "more")]
+    [InlineData("@symphonist", "")]
+    public void ClaudeRequest_uses_the_given_marker(string body, string expected) =>
+        Assert.Equal(expected, TrackerComments.ClaudeRequest(body, "@symphonist"));
+
+    [Theory]
+    [InlineData("@claude do it")]
+    [InlineData("@symphonistx do it")]
+    [InlineData("hey @symphonist")]
+    public void ClaudeRequest_ignores_other_markers(string body) =>
+        Assert.Null(TrackerComments.ClaudeRequest(body, "@symphonist"));
+
+    [Fact]
+    public void EscapeMentions_also_breaks_the_given_marker()
+    {
+        var escaped = TrackerComments.EscapeMentions("@Symphonist and @claude and \\@SYMPHONIST", "@symphonist");
+        Assert.Equal("@\u200BSymphonist and @\u200Bclaude and \\@\u200BSYMPHONIST", escaped);
+        Assert.DoesNotContain("@symphonist", escaped, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(escaped, TrackerComments.EscapeMentions(escaped, "@symphonist"));
+        Assert.Equal("@symphonist", TrackerComments.EscapeMentions("@symphonist")); // only when given
+    }
+
+    [Theory]
     [InlineData("hey @claude")]
     [InlineData("@claudette")]
     [InlineData("note to Sam")]
     public void ClaudeRequest_ignores_other_comments(string body) => Assert.Null(TrackerComments.ClaudeRequest(body));
+
+    [Theory]
+    [InlineData("@claude fix it", "@\u200Bclaude fix it")]
+    [InlineData("ask @Claude later\n> @CLAUDE again", "ask @\u200BClaude later\n> @\u200BCLAUDE again")]
+    [InlineData("\\@claude x", "\\@\u200Bclaude x")]
+    [InlineData("\\\\@cLaUdE x", "\\\\@\u200BcLaUdE x")]
+    public void EscapeMentions_breaks_every_claude_mention_keeping_case(string text, string expected)
+    {
+        var escaped = TrackerComments.EscapeMentions(text);
+        Assert.Equal(expected, escaped);
+        Assert.DoesNotContain("@claude", escaped, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("@claude fix it, @Claude and \\@CLAUDE")]
+    [InlineData("no mention")]
+    public void EscapeMentions_is_idempotent(string text)
+    {
+        var once = TrackerComments.EscapeMentions(text);
+        Assert.Equal(once, TrackerComments.EscapeMentions(once));
+    }
+
+    [Theory]
+    [InlineData("no mention")]
+    [InlineData("mail me at a@example.com")]
+    [InlineData("")]
+    public void EscapeMentions_leaves_text_without_a_mention_unchanged(string text) =>
+        Assert.Equal(text, TrackerComments.EscapeMentions(text));
 }

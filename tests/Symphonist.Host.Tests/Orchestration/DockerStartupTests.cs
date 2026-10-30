@@ -61,6 +61,23 @@ public sealed class DockerStartupTests : IDisposable
     }
 
     [Fact]
+    public async Task Docker_unavailable_marks_each_image_not_prepared()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", image: "acme/agent:7"));
+
+        await StartAsync();
+        // A later container check switches containers back on, but not these images.
+        launcher.EnableContainers();
+
+        foreach (var request in new[] { Request(), Request("acme/agent:7") })
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), request));
+            Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        }
+    }
+
+    [Fact]
     public async Task Removes_leftover_containers_then_ensures_each_image()
     {
         home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
@@ -112,6 +129,27 @@ public sealed class DockerStartupTests : IDisposable
         };
         var ex = Assert.Throws<InvalidOperationException>(() => launcher.Wrap(new ProcessSpec("claude", []), packaged));
         Assert.Contains("pip failed", ex.Message);
+    }
+
+    [Fact]
+    public async Task Image_of_a_project_added_after_startup_is_refused_until_a_check_enables_it()
+    {
+        home.WriteProject("orders.yaml", TestHome.ProjectYaml("orders"));
+        var hash = DockerLauncher.ContextHash(context);
+        processes.OnRun = s => Verb(s) switch
+        {
+            "image inspect" => new ProcessResult(0, hash, "", false),
+            _ => new ProcessResult(0, "", "", false),
+        };
+
+        await StartAsync();
+
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request()).FileName);
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => launcher.Wrap(new ProcessSpec("claude", []), Request("acme/agent:9")));
+        Assert.Equal(IsolationLauncher.ImageNotPrepared, ex.Message);
+        launcher.EnableImage("acme/agent:9");
+        Assert.Equal("docker", launcher.Wrap(new ProcessSpec("claude", []), Request("acme/agent:9")).FileName);
     }
 
     [Fact]

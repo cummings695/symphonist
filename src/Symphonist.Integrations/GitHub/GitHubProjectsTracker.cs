@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 
 namespace Symphonist.Integrations.GitHub;
 
@@ -113,25 +114,101 @@ public sealed class GitHubProjectsTracker(HttpClient http, GitHubProjectsTracker
     }
 
     /// <summary>The item's key and status when it passes every filter, else null.</summary>
-    private (string Key, string Status)? Keep(JsonElement item, string viewer)
+    private (string Key, string Status)? Keep(JsonElement item, string viewer) =>
+        Match(item, viewer, config.Label, repositories) is { } m && m.Status.Length > 0
+        && pickupStatuses.Contains(m.Status, StringComparer.OrdinalIgnoreCase)
+            ? m : null;
+
+    /// <summary>
+    /// Every filter but the status: the item's key and status ("" when unset) when its content is an open issue
+    /// assigned to <paramref name="viewer"/>, carrying <paramref name="label"/> and (when a list is given) in one of
+    /// <paramref name="repositories"/>, else null. Shared by <see cref="QueryAsync"/> and discovery's ticket count.
+    /// </summary>
+    internal static (string Key, string Status)? Match(JsonElement item, string viewer, string label,
+        IReadOnlyList<string>? repositories)
     {
         if (!item.TryGetProperty("content", out var issue) || issue.ValueKind != JsonValueKind.Object
             || Text(issue, "__typename") != "Issue" || Text(issue, "state") != "OPEN")
             return null;
 
         if (!Names(issue, "assignees", "login").Contains(viewer, StringComparer.OrdinalIgnoreCase)) return null;
-        if (!Names(issue, "labels", "name").Contains(config.Label, StringComparer.OrdinalIgnoreCase)) return null;
-
-        var status = item.TryGetProperty("fieldValueByName", out var value) && value.ValueKind == JsonValueKind.Object
-            ? Text(value, "name") : "";
-        if (status.Length == 0 || !pickupStatuses.Contains(status, StringComparer.OrdinalIgnoreCase)) return null;
+        if (!Names(issue, "labels", "name").Contains(label, StringComparer.OrdinalIgnoreCase)) return null;
 
         var repository = issue.GetProperty("repository");
         if (repositories is not null
             && !repositories.Contains(Text(repository, "nameWithOwner"), StringComparer.OrdinalIgnoreCase))
             return null;
 
+        var status = item.TryGetProperty("fieldValueByName", out var value) && value.ValueKind == JsonValueKind.Object
+            ? Text(value, "name") : "";
         return ($"{Text(repository, "name")}-{issue.GetProperty("number").GetInt32()}", status);
+    }
+
+    /// <summary>
+    /// Read-only, for the setup screen: the viewer, the status field's options in board order (no category: GitHub
+    /// has none) and the number of items <see cref="QueryAsync"/> would consider with the status filter left out.
+    /// Never calls <see cref="QueryAsync"/>, which fails while the draft names statuses the board lacks.
+    /// </summary>
+    internal async Task<TrackerDiscovery> DiscoverAsync(CancellationToken ct)
+    {
+        var viewer = await GetViewerAsync(ct);
+        var board = $"{config.Owner} #{config.Project}";
+        JsonDocument doc;
+        try
+        {
+            doc = await _api.GraphQlAsync(GitHubProjectsQueries.Discover,
+                Vars(("owner", config.Owner), ("number", config.Project), ("field", config.StatusField)), ct);
+        }
+        catch (GitHubGraphQlException ex) when (ex.ErrorTypes.Count > 0 && ex.ErrorTypes.All(t => t == "NOT_FOUND"))
+        {
+            throw new InvalidOperationException($"GitHub board {board} not found or not accessible", ex);
+        }
+
+        string projectId;
+        var statuses = new List<SourceStatus>();
+        using (doc)
+        {
+            var data = doc.RootElement.GetProperty("data");
+            if (!data.TryGetProperty("repositoryOwner", out var owner) || owner.ValueKind != JsonValueKind.Object
+                || !owner.TryGetProperty("projectV2", out var project) || project.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException($"GitHub board {board} not found or not accessible");
+
+            if (!project.TryGetProperty("field", out var field) || field.ValueKind != JsonValueKind.Object
+                || !field.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException($"board {board} has no single-select field '{config.StatusField}'");
+
+            foreach (var option in options.EnumerateArray())
+                if (Text(option, "name") is { Length: > 0 } name)
+                    statuses.Add(new SourceStatus(name, StatusCategory.Unknown, Text(option, "description")));
+            projectId = Text(project, "id");
+        }
+
+        return new TrackerDiscovery(viewer, $"GitHub board {board} ({config.StatusField})", statuses,
+            await CountAsync(projectId, viewer, ct), ["GitHub columns have no category; the proposal infers it from names"]);
+    }
+
+    /// <summary>Items passing <see cref="Match"/>, or null when paging fails.</summary>
+    private async Task<int?> CountAsync(string projectId, string viewer, CancellationToken ct)
+    {
+        try
+        {
+            var count = 0;
+            string? after = null;
+            do
+            {
+                using var doc = await _api.GraphQlAsync(GitHubProjectsQueries.Items,
+                    Vars(("project", projectId), ("field", config.StatusField), ("after", after)), ct);
+                var items = doc.RootElement.GetProperty("data").GetProperty("node").GetProperty("items");
+                count += items.GetProperty("nodes").EnumerateArray()
+                    .Count(item => Match(item, viewer, config.Label, repositories) is not null);
+                after = NextCursor(items);
+            } while (after is not null);
+            return count;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return null;
+        }
     }
 
     private async Task<Board> GetBoardAsync(CancellationToken ct)

@@ -75,6 +75,8 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             db.AgentRuns.RemoveRange(await db.AgentRuns.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
             db.GateReviews.RemoveRange(await db.GateReviews.Where(r => r.TicketId == ticket.Id).ToListAsync(ct));
             db.GateDecisions.RemoveRange(await db.GateDecisions.Where(d => d.TicketId == ticket.Id).ToListAsync(ct));
+            db.Evidence.RemoveRange(await db.Evidence.Where(x => x.TicketId == ticket.Id).ToListAsync(ct));
+            db.Touches.RemoveRange(await db.Touches.Where(x => x.TicketId == ticket.Id).ToListAsync(ct));
             db.Tickets.Remove(ticket);
             await db.SaveChangesAsync(ct);
             return true;
@@ -99,7 +101,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             {
                 TicketId = run.TicketId, StageId = run.StageId, StartedAt = run.StartedAt, Duration = run.Duration,
                 Succeeded = run.Succeeded, CostUsd = run.CostUsd, Error = run.Error, RawLogPath = run.RawLogPath,
-                Summary = run.Summary, IsReview = run.IsReview,
+                Summary = run.Summary, IsReview = run.IsReview, IsEvidence = run.IsEvidence,
             });
             await db.SaveChangesAsync(ct);
         }
@@ -112,7 +114,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var runs = await db.AgentRuns.AsNoTracking().Where(r => r.TicketId == ticketId)
             .OrderBy(r => r.StartedAt).ThenBy(r => r.Id).ToListAsync(ct);
         return runs.Select(r => new AgentRunRecord(r.TicketId, r.StageId, r.StartedAt, r.Duration, r.Succeeded,
-            r.CostUsd, r.Error, r.RawLogPath, r.Summary, r.IsReview)).ToList();
+            r.CostUsd, r.Error, r.RawLogPath, r.Summary, r.IsReview, r.IsEvidence)).ToList();
     }
 
     public async Task AddGateReviewAsync(GateReview review, CancellationToken ct)
@@ -191,6 +193,44 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
 
     private static List<string> Strings(string json) => JsonSerializer.Deserialize<List<string>>(json) ?? [];
 
+    public async Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.Evidence.Add(new EvidenceEntity
+            {
+                TicketId = record.TicketId, ProjectId = record.ProjectId, StageId = record.StageId,
+                WaitingSince = record.WaitingSince, At = record.At, Head = record.Head, ReportJson = record.ReportJson,
+                HasIssues = record.HasIssues, Error = record.Error,
+                ScreenshotsJson = JsonSerializer.Serialize(record.Screenshots), Posted = record.Posted,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.Evidence.AsNoTracking().Where(x => x.TicketId == ticketId).ToListAsync(ct);
+        // Ordered client-side: At is stored as a binary long.
+        return rows.OrderByDescending(x => x.At).ThenByDescending(x => x.Id).Select(ToRecord).ToList();
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.Evidence.AsNoTracking().Select(x => new { x.TicketId, x.At, x.Id, x.HasIssues }).ToListAsync(ct);
+        return rows.GroupBy(x => x.TicketId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.At).ThenByDescending(x => x.Id).First().HasIssues);
+    }
+
+    private static EvidenceRecord ToRecord(EvidenceEntity x) =>
+        new(x.TicketId, x.ProjectId, x.StageId, x.WaitingSince, x.At, x.Head, x.ReportJson, x.HasIssues, x.Error,
+            Strings(x.ScreenshotsJson), x.Posted);
+
     public async Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
     {
         await using var db = await OpenAsync(ct);
@@ -198,6 +238,85 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         var costs = await db.AgentRuns.AsNoTracking().Where(r => r.CostUsd != null)
             .Select(r => new { r.TicketId, Cost = r.CostUsd!.Value }).ToListAsync(ct);
         return costs.GroupBy(c => c.TicketId).ToDictionary(g => g.Key, g => g.Sum(c => c.Cost));
+    }
+
+    public async Task AddTouchAsync(TouchRecord touch, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.Touches.Add(new TouchEntity
+            {
+                TicketId = touch.TicketId, ProjectId = touch.ProjectId, StageId = touch.StageId, Kind = touch.Kind, At = touch.At,
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.Touches.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        // Filtered and ordered client-side: At is stored as a binary long, which does not compare as a time.
+        return (await query.ToListAsync(ct)).Where(x => x.At >= since).OrderBy(x => x.At).ThenBy(x => x.Id)
+            .Select(x => new TouchRecord(x.TicketId, x.ProjectId, x.StageId, x.Kind, x.At)).ToList();
+    }
+
+    public async Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.GateDecisions.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        // Filtered and ordered client-side: At is stored as a binary long, which does not compare as a time.
+        return (await query.ToListAsync(ct)).Where(x => x.At >= since).OrderBy(x => x.At).ThenBy(x => x.Id).Select(ToRecord).ToList();
+    }
+
+    public async Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var query = db.GateReviews.AsNoTracking();
+        if (projectId is not null) query = query.Where(x => x.ProjectId == projectId);
+        var from = since - TimeSpan.FromDays(30);
+        return (await query.ToListAsync(ct)).Where(x => x.WaitingSince >= from).OrderBy(x => x.At).ThenBy(x => x.Id).Select(ToReview).ToList();
+    }
+
+    public async Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        var rows = await db.ProviderPauses.AsNoTracking().ToListAsync(ct);
+        return rows.OrderBy(x => x.Key, StringComparer.Ordinal)
+            .Select(x => new ProviderPause(x.Key, x.Since, x.ResetsAt, x.NextProbeAt)).ToList();
+    }
+
+    public async Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            var row = await db.ProviderPauses.FirstOrDefaultAsync(x => x.Key == pause.Key, ct);
+            if (row is null) db.ProviderPauses.Add(row = new ProviderPauseEntity { Key = pause.Key });
+            row.Since = pause.Since;
+            row.ResetsAt = pause.ResetsAt;
+            row.NextProbeAt = pause.NextProbeAt;
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
+    }
+
+    public async Task RemoveProviderPauseAsync(string key, CancellationToken ct)
+    {
+        await using var db = await OpenAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            db.ProviderPauses.RemoveRange(await db.ProviderPauses.Where(x => x.Key == key).ToListAsync(ct));
+            await db.SaveChangesAsync(ct);
+        }
+        finally { _writeLock.Release(); }
     }
 
     public async Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)

@@ -1,9 +1,12 @@
 using System.Collections.Concurrent;
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
+using Symphonist.Host.Notifications;
 
 namespace Symphonist.Host.Orchestration;
 
@@ -14,18 +17,35 @@ public sealed record OrchestratorOptions(TimeSpan PollInterval, int MaxConcurren
     public OrchestratorOptions() : this(TimeSpan.FromMinutes(2), 1) { }
 }
 
-public enum ForgetResult { Forgotten, NotFound, Running }
+public enum ForgetResult { Forgotten, NotFound, Running, OpenRelease }
 
 /// <summary>
 /// Syncs tracker tickets into the store, drives each ticket through the pipeline, and mirrors state back to the tracker.
 /// Ticks, commands (approve / send back / unblock) and agent-run and review completions all run under one lock, and
 /// every one of them loads the ticket fresh from the store, so no two writers ever save a ticket from stale copies.
+/// A job (stage run, review or evidence) starts only while its provider is not paused by a usage limit
+/// (<see cref="ProviderLimits"/>); a run the limit stops pauses the provider and costs the ticket nothing.
+/// Releases ship in batches: a release ticket (<see cref="TicketKind.Release"/>) carries the batch's PR, gate and merge;
+/// it never appears on the tracker, and its members' cards follow it instead (<see cref="ReleaseCoordinator"/>).
 /// </summary>
+/// <param name="releases">Null: one is created from the store, the executor's workspace, the clock and notifications.</param>
 public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, IIntegrationFactory integrations,
-    StageExecutor executor, GateReviewer reviewer, TimeProvider time, OrchestratorOptions options,
-    ILogger<Orchestrator> log) : IDisposable
+    StageExecutor executor, GateReviewer reviewer, EvidenceRunner evidence, ProviderLimits limits, TimeProvider time,
+    OrchestratorOptions options, ILogger<Orchestrator> log, NotificationCenter? notifications = null,
+    ReleaseCoordinator? releases = null) : IDisposable
 {
+    private readonly ReleaseCoordinator coordinator = releases ?? new ReleaseCoordinator(store, executor.Git, time, notifications);
+
     private const string LeftQuery = "no longer matches tracker query";
+
+    private static string StageRemoved(string stageId) =>
+        $"stage '{stageId}' is no longer in the pipeline; send it back to an existing stage";
+
+    private const string ReleaseStageGone =
+        "the release stage is no longer in the pipeline; send the release back to cancel it";
+
+    /// <summary>False for a release ticket whose stage is not (or no longer) the pipeline's release stage.</summary>
+    private static bool ReleaseStageFits(ProjectConfig p, Ticket t) => t.Kind != TicketKind.Release || p.ReleaseStage?.Id == t.StageId;
 
     /// <summary>
     /// How long a merge the host accepted (and performs asynchronously) is given to land before it is requested again,
@@ -35,6 +55,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, Task> inFlight = new();
+    /// <summary>
+    /// The evidence run of each ticket, with its gate round, cancelled once that round is decided. Added, cancelled and
+    /// removed under gate only; its CTS is disposed only after removal, so a cancel never meets a disposed CTS.
+    /// </summary>
+    private readonly Dictionary<Guid, (DateTimeOffset WaitingSince, CancellationTokenSource Cts)> evidenceRuns = [];
     private readonly CancellationTokenSource shutdown = new();
     private readonly ConcurrentDictionary<string, string> problems = new(StringComparer.Ordinal);
     private CoalescedTrigger? tickTrigger;
@@ -61,6 +86,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private readonly Dictionary<string, Dictionary<string, SourceTicket>> latestSources = []; // used under gate only
     /// <summary>Tickets whose pending tracker move already has a failure event (one per retry episode); under gate only.</summary>
     private readonly HashSet<Guid> retryFailureRecorded = [];
+    // Notified rounds and blocks, used under gate only. In memory: a restart may notify once more.
+    private readonly Dictionary<Guid, DateTimeOffset> notifiedRounds = [];
+    private readonly HashSet<Guid> notifiedBlocked = [];
 
     /// <summary>The last integration error of a project's tick (missing secret, failed tracker query); null once a tick succeeds.</summary>
     public string? ProblemOf(string projectId) => problems.GetValueOrDefault(projectId);
@@ -83,6 +111,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(ct);
         try
         {
+            ForgetRemovedProjects();
             foreach (var p in projects.Projects)
             {
                 if (projects.IsPaused(p.Id)) continue;
@@ -100,6 +129,44 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Reloads the project files between ticks and commands, never during one, then starts a tick (when commands do) so
+    /// added projects are polled right away. Agent runs in flight finish with the configuration they started with.
+    /// </summary>
+    public async Task<ProjectReload> ReloadProjectsAsync(CancellationToken ct)
+    {
+        var reload = await WithProjectsLockedAsync(() => Task.FromResult(projects.Reload()), ct);
+        if (options.TickAfterCommands) RequestTick();
+        return reload;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> under the lock ticks and commands hold, so the projects and tickets it checks (e.g.
+    /// before saving a project file and reloading) cannot change under it.
+    /// </summary>
+    public async Task<T> WithProjectsLockedAsync<T>(Func<Task<T>> action, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            return await action();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Drops the problems and query results of projects no longer loaded; under gate only.</summary>
+    private void ForgetRemovedProjects()
+    {
+        var loaded = projects.Projects.Select(p => p.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in latestSources.Keys.Where(id => !loaded.Contains(id)).ToList()) latestSources.Remove(id);
+        var removed = false;
+        foreach (var id in problems.Keys.Where(id => !loaded.Contains(id)).ToList()) removed |= problems.TryRemove(id, out _);
+        if (removed) ProblemsChanged?.Invoke();
     }
 
     /// <summary>
@@ -124,6 +191,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         CommandAsync(projectId, key, (p, t, now) =>
             expectedStageId is not null && t.StageId != expectedStageId
                 ? new TransitionOutcome(false, null, $"{expectedStageId} is not awaiting approval")
+            : !ReleaseStageFits(p, t)
+                ? new TransitionOutcome(false, null, ReleaseStageGone)
             : expectedWaitingSince is { } seen && t.Status == StageStatus.AwaitingApproval && t.WaitingSince != seen
                 ? new TransitionOutcome(false, null, $"{t.StageId} is waiting on a newer round; reload to see it")
             : PipelineEngine.Approve(p, t, now), ct);
@@ -135,11 +204,26 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     public Task<TransitionOutcome> UnblockAsync(string projectId, string key, CancellationToken ct) =>
         CommandAsync(projectId, key, (_, t, now) => PipelineEngine.Unblock(t, now), ct);
 
+    /// <summary>What Release now would ship for the project (under the lock, so no tick changes it meanwhile).</summary>
+    public Task<ReleasePreview> PreviewReleaseAsync(string projectId, CancellationToken ct) =>
+        WithProjectsLockedAsync(() => coordinator.PreviewAsync(projects.Get(projectId), ct), ct);
+
+    /// <summary>
+    /// Starts the release the developer confirmed (<paramref name="confirmed"/>), unless what it would ship changed
+    /// since; then starts a tick so its PR opens right away.
+    /// </summary>
+    public async Task<ReleaseStartResult> ReleaseNowAsync(string projectId, ReleasePreview confirmed, CancellationToken ct)
+    {
+        var result = await WithProjectsLockedAsync(() => coordinator.StartAsync(projects.Get(projectId), confirmed, ct), ct);
+        if (result.Started && options.TickAfterCommands) RequestTick();
+        return result;
+    }
+
     /// <summary>
     /// Removes a ticket (with its events, runs and downloaded attachments) from Symphonist only; the tracker, repo and
     /// workspace are untouched.
     /// Refused while an agent or review run for it is in flight, since the run's completion would write to the deleted
-    /// ticket.
+    /// ticket, and for a release that is not done, whose pull request only sending it back closes.
     /// </summary>
     public async Task<ForgetResult> ForgetAsync(string projectId, string key, CancellationToken ct)
     {
@@ -149,6 +233,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         {
             if (await store.FindAsync(projectId, key, ct) is not { } t) return ForgetResult.NotFound;
             if (inFlight.ContainsKey(t.Id)) return ForgetResult.Running;
+            // Forgetting an open release would orphan its pull request (and leave nothing to close it).
+            if (t is { Kind: TicketKind.Release } && t.Status != StageStatus.Done) return ForgetResult.OpenRelease;
             retryFailureRecorded.Remove(t.Id);
             if (!await store.DeleteAsync(projectId, key, ct)) return ForgetResult.NotFound;
             TicketAttachments.Delete(projectId, key);
@@ -172,11 +258,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     private async Task<TransitionOutcome> CommandAsync(string projectId, string key,
         Func<ProjectConfig, Ticket, DateTimeOffset, TransitionOutcome> apply, CancellationToken ct)
     {
-        var p = projects.Get(projectId);
         TransitionOutcome outcome;
         await gate.WaitAsync(ct);
         try
         {
+            var p = projects.Get(projectId); // under the lock: a reload never changes the project during a command
             var t = await store.FindAsync(projectId, key, ct)
                     ?? throw new KeyNotFoundException($"Ticket '{key}' not found in project '{projectId}'");
             var fromStageId = t.StageId;
@@ -233,11 +319,37 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await SyncAsync(p, io, sources, ct);
         }
 
-        foreach (var t in await store.ListAsync(p.Id, ct))
+        try
         {
+            await SettleReleasesAsync(p, io, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogError(e, "Settling the releases of {Project} failed", p.Id);
+        }
+
+        foreach (var listed in await store.ListAsync(p.Id, ct))
+        {
+            var t = listed;
             if (!IsActive(t) || inFlight.ContainsKey(t.Id)) continue;
             try
             {
+                // A release earlier in this loop may have moved or finished its members: never act on a stale copy.
+                if (t.ReleaseTicketId is not null)
+                {
+                    if (await store.FindAsync(p.Id, t.Key, ct) is not { } fresh || fresh.Id != t.Id || !IsActive(fresh)) continue;
+                    t = fresh;
+                }
+                if (!HasStage(p, t) || !ReleaseStageFits(p, t))
+                {
+                    // A config edit removed its stage: nothing can run it; the developer sends it back to a stage (or
+                    // cancels the release).
+                    var reason = HasStage(p, t) ? ReleaseStageGone : StageRemoved(t.StageId);
+                    var outcome = PipelineEngine.Block(t, reason, time.GetUtcNow());
+                    await store.SaveAsync(t, ct);
+                    await ApplyAsync(io, t, t.StageId, outcome, ct);
+                    continue;
+                }
                 await AdvanceAsync(p, io, t, sources.GetValueOrDefault(t.Key), ct);
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
@@ -245,6 +357,15 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 log.LogError(e, "Advancing {Project}/{Key} failed", p.Id, t.Key);
                 await TryAddEventOnceAsync(t, $"{t.StageId} error: {e.Message}");
             }
+        }
+
+        try
+        {
+            await coordinator.CheckReadyAsync(p, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Checking the tickets ready to release of {Project} failed", p.Id);
         }
     }
 
@@ -256,12 +377,25 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
 
         foreach (var s in sources.Values)
         {
+            if (s.Key.StartsWith('_')) continue; // keys starting with '_' belong to release tickets
             var t = known.GetValueOrDefault(s.Key) ?? await store.FindAsync(p.Id, s.Key, ct);
             if (t is null)
             {
                 t = PipelineEngine.Create(p, s.Key, s.Title, s.Status, now);
                 await store.SaveAsync(t, ct);
                 await AddEventAsync(t, $"picked up at {t.StageId}", ct);
+                continue;
+            }
+            if (t.Status != StageStatus.Done && !HasStage(p, t))
+            {
+                // Its stage was removed by a config edit (the ticket is blocked for it): a card move or @claude comment
+                // cannot be mapped from a stage that no longer exists, so it is noted as seen and ignored.
+                if (!Same(t.LastSourceStatus, s.Status))
+                {
+                    t.LastSourceStatus = s.Status;
+                    t.TrackerRetryStatus = null;
+                    await store.SaveAsync(t, ct);
+                }
                 continue;
             }
             if (Same(t.LastSourceStatus, s.Status))
@@ -275,6 +409,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             if (t.Status == StageStatus.Done)
             {
                 t.LastSourceStatus = s.Status;
+                var fromDone = t.StageId;
+                if (PipelineEngine.Reopen(p, t, s.Status, now) is { } reopened)
+                {
+                    await store.SaveAsync(t, ct);
+                    await ApplyAsync(io, t, fromDone, reopened, ct);
+                    continue;
+                }
                 await store.SaveAsync(t, ct);
                 await AddEventAsync(t,
                     $"card moved to '{s.Status}' after the ticket was done; Symphonist does not reopen done tickets", ct);
@@ -287,7 +428,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await ApplyAsync(io, t, fromStageId, outcome, ct);
         }
 
-        foreach (var t in known.Values.Where(t => IsActive(t) && !sources.ContainsKey(t.Key)))
+        // A release ticket is Symphonist's own: it never matches the tracker query.
+        foreach (var t in known.Values.Where(t => IsActive(t) && t.Kind == TicketKind.Work && !sources.ContainsKey(t.Key)))
         {
             var outcome = PipelineEngine.Block(t, LeftQuery, now);
             await store.SaveAsync(t, ct);
@@ -323,42 +465,133 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// Developer "@claude" comments made since the stage started rerun it, with the comments as feedback, once it waits
-    /// at its gate or is blocked; comments made while it is pending or running wait for that. Returns whether it reran.
+    /// Developer comments starting with the project's comment marker made since the stage started rerun it, with the comments as feedback, once it waits
+    /// at its gate or is blocked; comments made while it is pending or running wait for that. At implement, "@claude"
+    /// comments on its pull request do too (from teammates as well when the project allows it), combined with the
+    /// tracker's into one run. Returns whether it reran.
     /// </summary>
     private async Task<bool> HandleClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket s,
         DateTimeOffset now, CancellationToken ct)
     {
         if (t.Status is not (StageStatus.AwaitingApproval or StageStatus.Blocked)) return false;
-        var since = t.ClaudeCommentsHandledAt is { } handled && (t.StageStartedAt is not { } started || handled > started)
-            ? handled
-            : t.StageStartedAt; // the later of the two: entering a stage leaves earlier comments behind
+        var since = Later(t.ClaudeCommentsHandledAt, t.StageStartedAt);
         var comments = s.Comments
             .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
-            .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body)))
+            .Select(c => (c.Created, Request: TrackerComments.ClaudeRequest(c.Body, p.CommentMarker)))
             .Where(c => c.Request is not null)
             .OrderBy(c => c.Created)
             .ToList();
-        if (comments.Count == 0) return false;
+        var prComments = await PrClaudeCommentsAsync(p, io, t, ct);
+        if (comments.Count == 0 && prComments.Count == 0) return false;
 
         var requests = comments.Select(c => c.Request!).Where(r => r.Length > 0).ToList();
-        var feedback = requests.Count > 0 ? string.Join("\n\n", requests) : "(no details given)";
-        await AddEventAsync(t, $"@claude comment: rerunning {t.StageId}", ct); // the cause before its effects
+        var feedback = requests.Count > 0 ? string.Join("\n\n", requests)
+            : comments.Count > 0 ? "(no details given)"
+            : "";
+        await AddEventAsync(t, prComments.Count == 0 // the cause before its effects
+            ? $"{p.CommentMarker} comment: rerunning {t.StageId}"
+            : $"{p.CommentMarker} PR comment from {string.Join(", ", prComments.Select(c => c.Author).Distinct(StringComparer.Ordinal))}: rerunning {t.StageId}",
+            ct);
         var stageId = t.StageId;
         var outcome = PipelineEngine.SendBack(p, t, feedback, stageId, now);
-        t.ClaudeCommentsHandledAt = comments[^1].Created;
+        // Only the developer's own comments decide the gate round; a teammate's request reruns without deciding it.
+        if (comments.Count == 0 && !prComments.Any(c => c.IsMine)) outcome = outcome with { Decision = null, Touch = null };
+        if (prComments.Count > 0)
+        {
+            t.PrFeedbackJson = PrFeedback.ToJson(prComments.Select(c => PrFeedback.From(c, p.CommentMarker)).ToList()); // after the send-back clears it
+            t.PrCommentsHandledAt = prComments[^1].Created;
+        }
+        if (comments.Count > 0) t.ClaudeCommentsHandledAt = comments[^1].Created;
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, stageId, outcome, ct);
         return true;
     }
 
+    /// <summary>
+    /// The marker comments on the implement stage's pull request not yet acted on, oldest first; none at other stages.
+    /// A listing error is recorded once and counts as none.
+    /// </summary>
+    private async Task<IReadOnlyList<PullRequestComment>> PrClaudeCommentsAsync(ProjectConfig p, ProjectIntegrations io,
+        Ticket t, CancellationToken ct)
+    {
+        if (p.Stage(t.StageId).Kind != StageKind.Implement || t.PullRequestId is not { } prId) return [];
+        try
+        {
+            return PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct),
+                Later(t.PrCommentsHandledAt, t.StageStartedAt), p.PrComments.FromOthers, p.CommentMarker);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Comments of pull request {Id} for {Key} could not be read", prId, t.Key);
+            await AddEventOnceAsync(t, $"could not read PR comments: {e.Message}", ct);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// After implement's pull request merged, tells each marker comment that arrived too late (while the stage was
+    /// approved) that it was not addressed. Best effort: failures are only logged.
+    /// </summary>
+    private async Task ReplyMergedFirstAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, DateTimeOffset? since,
+        CancellationToken ct)
+    {
+        if (t.PullRequestId is not { } prId) return;
+        IReadOnlyList<PullRequestComment> late;
+        try
+        {
+            late = PrFeedback.Select(await io.SourceControl.ListPullRequestCommentsAsync(prId, ct), since,
+                p.PrComments.FromOthers, p.CommentMarker);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Comments of merged pull request {Id} for {Key} could not be read", prId, t.Key);
+            return;
+        }
+        foreach (var c in late)
+        {
+            try
+            {
+                await io.SourceControl.ReplyToPullRequestCommentAsync(prId, c, TrackerComments.Sign(MergedFirst), ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Reply to comment {Comment} on pull request {Id} for {Key} failed", c.Id, prId, t.Key);
+            }
+        }
+        if (late.Count > 0) t.PrCommentsHandledAt = late[^1].Created;
+    }
+
+    private const string MergedFirst =
+        "Merged before this could be addressed; open a follow-up ticket if it still needs a change.";
+
+    /// <summary>The later of the two: entering a stage leaves earlier comments behind.</summary>
+    private static DateTimeOffset? Later(DateTimeOffset? handled, DateTimeOffset? stageStarted) =>
+        handled is { } h && (stageStarted is not { } started || h > started) ? h : stageStarted;
+
     private async Task AdvanceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source, CancellationToken ct)
     {
         var agentStage = StageExecutor.IsAgentStage(p.Stage(t.StageId).Kind);
+        if (AwaitsReleaseBatch(p, t) && t.Status is StageStatus.Pending or StageStatus.Running)
+        {
+            // Ready to release, or in a batch: only a release ticket ships it, never a release PR of its own.
+            if (t.Status == StageStatus.Running)
+            {
+                t.Status = StageStatus.Pending;
+                t.UpdatedAt = time.GetUtcNow();
+                await store.SaveAsync(t, ct);
+            }
+            return;
+        }
+        if (t is { Kind: TicketKind.Release, ReleasePullRequestId: { } releasePr, Status: StageStatus.AwaitingApproval or StageStatus.Approved }
+            && !await FollowReleasePullRequestAsync(p, io, t, releasePr, ct))
+            return;
+
         switch (t.Status)
         {
             case StageStatus.Pending when agentStage:
                 if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                // A paused provider leaves the ticket exactly as it is until the reset (or the next probe).
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.AgentFor(t.StageId)), ct)) return;
                 t.Status = StageStatus.Running;
                 t.UpdatedAt = time.GetUtcNow();
                 await store.SaveAsync(t, ct);
@@ -369,9 +602,23 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 when t is { ReviewDue: true, WaitingSince: not null } && p.Reviews(p.Stage(t.StageId)):
                 // The round's review (also one interrupted by a restart): runs like an agent stage; nothing is saved.
                 if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.Review.Agent), ct)) return;
                 inFlight[t.Id] = RunReviewAsync(p, io, t.Clone(), source);
                 await AddEventOnceAsync(t, $"reviewing {t.StageId}", ct);
                 return;
+
+            case StageStatus.AwaitingApproval when PipelineEngine.WaitsOnEvidence(p, t):
+            {
+                // The round's evidence (also one interrupted by a restart), after its review; cancelled when the round
+                // is decided (see ApplyAsync). Nothing is saved until it completes.
+                if (inFlight.Count >= options.MaxConcurrentAgentRuns) return;
+                if (!await limits.TryStartAsync(UsageLimits.KeyFor(p.Evidence.Agent), ct)) return;
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
+                evidenceRuns[t.Id] = (t.WaitingSince!.Value, cts);
+                inFlight[t.Id] = RunEvidenceAsync(p, io, t.Clone(), source, cts);
+                await AddEventOnceAsync(t, $"gathering evidence for {t.StageId}", ct);
+                return;
+            }
 
             case StageStatus.Running when agentStage:
                 // Not in flight (in-flight tickets are skipped), so its run's result was lost: retry like a restart.
@@ -393,7 +640,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                     ExecutionStatus.Failed => PipelineEngine.StageFailed(p, t, result.Error ?? "stage failed", now),
                     _ => null,
                 };
-                if (outcome is null && t.Status != StageStatus.Running)
+                if (outcome is null && t.Status != StageStatus.Running && !AwaitsReleaseBatch(p, t))
                 {
                     t.Status = StageStatus.Running;
                     t.UpdatedAt = now;
@@ -434,6 +681,12 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 switch (result.Status)
                 {
                     case ExecutionStatus.Completed:
+                        if (p.Stage(fromStageId).Kind == StageKind.Implement)
+                        {
+                            // Before advancing: entering the next stage moves StageStartedAt, which the window starts at.
+                            var since = Later(t.PrCommentsHandledAt, t.StageStartedAt);
+                            await ReplyMergedFirstAsync(p, io, t, since, ct);
+                        }
                         outcome = PipelineEngine.PostApprovalCompleted(p, t, now);
                         break;
                     case ExecutionStatus.Failed:
@@ -446,6 +699,161 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
                 if (outcome is not null) await ApplyAsync(io, t, fromStageId, outcome, ct);
                 else await AddEventOnceAsync(t, result.Event ?? $"{t.StageId} waiting", ct);
                 return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A work ticket at the release stage without a release PR of its own: ready to release or in a batch. Only a ticket
+    /// that opened its own release PR before batches (legacy) runs the release stage itself.
+    /// </summary>
+    private static bool AwaitsReleaseBatch(ProjectConfig p, Ticket t) =>
+        t is { Kind: TicketKind.Work, ReleasePullRequestId: null } && p.Stage(t.StageId).Kind == StageKind.Release;
+
+    /// <summary>
+    /// Follows a release PR merged or closed in the repo host, outside Symphonist. Merged approves a waiting release (a
+    /// human decision; the post-approval path then records the merge and completes the batch); closed cancels the
+    /// release, which returns its members. Returns whether the release goes on advancing this tick.
+    /// </summary>
+    private async Task<bool> FollowReleasePullRequestAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, long prId,
+        CancellationToken ct)
+    {
+        PullRequestState state;
+        try
+        {
+            state = (await io.SourceControl.GetPullRequestAsync(prId, ct)).State;
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // The gate stays as it is; a merge reads the pull request again before anything is merged.
+            log.LogWarning(e, "Release pull request {Id} of {Key} could not be checked", prId, t.Key);
+            return true;
+        }
+
+        var fromStageId = t.StageId;
+        var now = time.GetUtcNow();
+        if (state == PullRequestState.Declined)
+        {
+            var cancelled = PipelineEngine.SendBack(p, t, $"release PR {prId} was closed without merging", null, now);
+            await store.SaveAsync(t, ct);
+            await ApplyAsync(io, t, fromStageId,
+                cancelled with { Message = $"release PR {prId} was closed without merging; {cancelled.Message}" }, ct);
+            return false;
+        }
+        if (state == PullRequestState.Merged && t.Status == StageStatus.AwaitingApproval)
+        {
+            var approved = PipelineEngine.Approve(p, t, now);
+            if (!approved.Changed) return false;
+            await store.SaveAsync(t, ct);
+            await ApplyAsync(io, t, fromStageId,
+                approved with { Message = $"release PR {prId} merged outside Symphonist; {approved.Message}" }, ct);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Finishes a release that is done: when it merged (<see cref="Ticket.ReleaseMergeCommit"/>) its members move past
+    /// the release stage; otherwise it was cancelled, and they return to ready to release. With
+    /// <paramref name="closePr"/> (the release just ended) an open release PR is declined first, and one that turns out
+    /// to have merged completes the release instead. Only members still linked are touched, so it can run again.
+    /// </summary>
+    private async Task FinishReleaseAsync(Func<ProjectIntegrations> io, Ticket release, bool closePr, CancellationToken ct)
+    {
+        if (projects.Projects.FirstOrDefault(x => x.Id == release.ProjectId) is not { } p) return;
+        if (closePr && release.ReleaseMergeCommit is null && await CloseReleasePullRequestAsync(io, release, ct) is { } merged)
+        {
+            release.ReleaseMergeCommit = merged;
+            await store.SaveAsync(release, ct);
+            await AddEventAsync(release, $"release PR {release.ReleasePullRequestId} had already merged as {merged}; " +
+                "its tickets are released", ct);
+        }
+
+        var members = (await store.ListAsync(p.Id, ct)).Where(m => m.ReleaseTicketId == release.Id).ToList();
+        if (members.Count == 0) return;
+        var completed = release.ReleaseMergeCommit is not null;
+        if (completed && p.ReleaseStage is null)
+        {
+            // Not finished, not lost: they stay linked until the release stage is back (or are forgotten by hand).
+            await AddEventOnceAsync(release,
+                "the pipeline has no release stage: its tickets stay in this release until one is added back", ct);
+            return;
+        }
+        var fromStages = members.ToDictionary(m => m.Id, m => m.StageId);
+        var outcomes = completed
+            ? await coordinator.CompleteAsync(p, release, ct)
+            : await coordinator.CancelAsync(p, release, ct);
+        foreach (var (member, outcome) in outcomes)
+        {
+            await store.SaveAsync(member, ct);
+            await ApplyAsync(io, member, fromStages.GetValueOrDefault(member.Id, member.StageId), outcome, ct);
+        }
+    }
+
+    /// <summary>
+    /// Declines the release's PR while it is open (best effort; a failure is an event). Returns the merge commit when the
+    /// PR turns out to have merged already, else null.
+    /// </summary>
+    private async Task<string?> CloseReleasePullRequestAsync(Func<ProjectIntegrations> io, Ticket release, CancellationToken ct)
+    {
+        if (release.ReleasePullRequestId is not { } prId) return null;
+        try
+        {
+            var sc = io().SourceControl;
+            var pr = await sc.GetPullRequestAsync(prId, ct);
+            if (pr.State == PullRequestState.Merged) return pr.MergeCommitHash;
+            if (pr.State != PullRequestState.Open) return null;
+            await sc.DeclinePullRequestAsync(prId, ct);
+            await AddEventAsync(release, $"release PR {prId} closed", ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Closing release pull request {Id} of {Key} failed", prId, release.Key);
+            await AddEventAsync(release, $"could not close release PR {prId}: {e.Message}; close it by hand", ct);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Moves the cards of the release's members to <paramref name="status"/> (the release ticket's own status target),
+    /// with the usual retry rules per member. A member whose card the developer moved (back) while the release was open
+    /// keeps it: that move is applied when the release ends.
+    /// </summary>
+    private async Task MoveMemberCardsAsync(Func<ProjectIntegrations> io, Ticket release, string status, CancellationToken ct)
+    {
+        var members = (await store.ListAsync(release.ProjectId, ct))
+            .Where(m => m.ReleaseTicketId == release.Id && m.Status != StageStatus.Done && m.PendingSourceStatus is null);
+        foreach (var m in members)
+        {
+            if (m.TrackerRetryStatus is not null)
+            {
+                m.TrackerRetryStatus = null; // replaced by this move
+                await store.SaveAsync(m, ct);
+            }
+            await MoveCardAsync(io, m, status, ct);
+        }
+    }
+
+    /// <summary>
+    /// Each tick: finishes the members of done releases still linked to them (e.g. a crash between the two), and lets
+    /// members of a release that no longer exists (forgotten) go.
+    /// </summary>
+    private async Task SettleReleasesAsync(ProjectConfig p, ProjectIntegrations io, CancellationToken ct)
+    {
+        var tickets = await store.ListAsync(p.Id, ct);
+        var releasesById = tickets.Where(t => t.Kind == TicketKind.Release).ToDictionary(t => t.Id);
+        foreach (var group in tickets.Where(t => t.ReleaseTicketId is not null).GroupBy(t => t.ReleaseTicketId!.Value))
+        {
+            if (releasesById.TryGetValue(group.Key, out var release))
+            {
+                if (release.Status == StageStatus.Done) await FinishReleaseAsync(() => io, release, closePr: false, ct);
+                continue;
+            }
+            foreach (var member in group)
+            {
+                var fromStageId = member.StageId;
+                var outcome = PipelineEngine.ReleaseCancelled(p, member, "the forgotten release", time.GetUtcNow());
+                await store.SaveAsync(member, ct);
+                await ApplyAsync(io, member, fromStageId, outcome, ct);
             }
         }
     }
@@ -471,7 +879,11 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(CancellationToken.None);
         try
         {
-            if (result is not null) await CompleteAgentStageAsync(p, io, run, result, CancellationToken.None);
+            if (result is not null)
+            {
+                await NoteProviderAsync(UsageLimits.KeyFor(p.AgentFor(run.StageId)), result.Limit);
+                await CompleteAgentStageAsync(p, io, run, result, CancellationToken.None);
+            }
         }
         catch (Exception e)
         {
@@ -511,9 +923,13 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         var fromStageId = t.StageId;
         // The newest query result, not the run's start snapshot: a deferred send-back's comment came during the run.
         var source = latestSources.GetValueOrDefault(p.Id)?.GetValueOrDefault(t.Key);
-        var outcome = result.Status == ExecutionStatus.Completed
-            ? PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t))
-            : PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now);
+        var outcome = result.Status switch
+        {
+            ExecutionStatus.Completed => PipelineEngine.StageSucceeded(p, t, now, source is null ? null : LatestFeedback(source, t)),
+            ExecutionStatus.UsageLimited =>
+                PipelineEngine.StageLimited(t, $"{t.StageId} paused: {Describe(result.LimitKey!, result.Limit!)}", now),
+            _ => PipelineEngine.StageFailed(p, t, result.Error ?? "agent stage did not complete", now),
+        };
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, fromStageId, outcome, ct);
     }
@@ -540,7 +956,18 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         await gate.WaitAsync(CancellationToken.None);
         try
         {
-            if (result is not null) await CompleteReviewAsync(p, io, run, result, CancellationToken.None);
+            var key = UsageLimits.KeyFor(p.Review.Agent);
+            if (result?.Limit is { } limit)
+            {
+                // Not a verdict: the review stays owed and runs again once the provider lets it.
+                if (await NoteProviderAsync(key, limit))
+                    await AddEventAsync(run, $"review of {run.StageId} paused: {Describe(key, limit)}", CancellationToken.None);
+            }
+            else if (result is not null)
+            {
+                await NoteProviderAsync(key, null);
+                await CompleteReviewAsync(p, io, run, result, CancellationToken.None);
+            }
         }
         catch (Exception e)
         {
@@ -579,7 +1006,7 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             verdict = verdict.WithForcedHighFirst(unconfirmed);
         }
         await store.AddGateReviewAsync(new GateReview(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
-            p.Review.Mode, stage.Gate, verdict), ct);
+            p.Review.Mode, p.GateOf(stage), verdict), ct);
 
         var allowAutoApprove = true;
         if (PipelineEngine.WouldAutoApprove(p, t, verdict, waitingSince)
@@ -608,6 +1035,135 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
         if (verdict.Error is { } error) outcome = outcome with { Message = $"reviewer failed: {error}; waiting on you" };
         await store.SaveAsync(t, ct);
         await ApplyAsync(io, t, fromStageId, outcome, ct);
+    }
+
+    /// <summary>
+    /// Gathers the gate round's evidence on a private copy, then records and posts it for the ticket re-loaded under the
+    /// lock. <paramref name="cts"/> (linked to shutdown) is cancelled when the round is decided meanwhile.
+    /// </summary>
+    private async Task RunEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, SourceTicket? source,
+        CancellationTokenSource cts)
+    {
+        await Task.Yield();
+        EvidenceOutcome? outcome = null;
+        var decided = false;
+        try
+        {
+            outcome = await evidence.GatherAsync(p, run, source, cts.Token);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Not gathered: EvidenceDue stays set, so the next start gathers the round's evidence again.
+            log.LogInformation("Evidence for {Project}/{Key} cancelled by shutdown", p.Id, run.Key);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            decided = true;
+        }
+        catch (Exception e)
+        {
+            outcome = new EvidenceOutcome(EvidenceStatus.Failed, null, null, [], e.Message, $"evidence failed: {e.Message}");
+        }
+
+        await gate.WaitAsync(CancellationToken.None);
+        try
+        {
+            var key = UsageLimits.KeyFor(p.Evidence.Agent);
+            if (decided)
+                await AddEventAsync(run, $"evidence for {run.StageId} cancelled: the gate was decided", CancellationToken.None);
+            else if (outcome is { Status: EvidenceStatus.UsageLimited, Limit: { } limit })
+            {
+                // Nothing recorded or posted: the evidence stays owed and is gathered once the provider lets it.
+                if (await NoteProviderAsync(key, limit))
+                    await AddEventAsync(run, $"evidence for {run.StageId} paused: {Describe(key, limit)}", CancellationToken.None);
+            }
+            else if (outcome is not null)
+            {
+                await NoteProviderAsync(key, null);
+                await CompleteEvidenceAsync(p, io, run, outcome, CancellationToken.None);
+            }
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Applying evidence for {Project}/{Key} failed", p.Id, run.Key);
+            await TryAddEventOnceAsync(run, $"{run.StageId} evidence could not be applied: {e.Message}");
+        }
+        finally
+        {
+            // Removed under the lock before it is disposed: ApplyAsync (also under the lock) cancels only entries present.
+            evidenceRuns.Remove(run.Id);
+            inFlight.TryRemove(run.Id, out _);
+            gate.Release();
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Records gathered (or failed) evidence and, while its round is still waiting, posts it to the pull request and a
+    /// line to the tracker; posting is never retried. Evidence never decides the gate: it only stops being owed.
+    /// </summary>
+    private async Task CompleteEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket run, EvidenceOutcome outcome,
+        CancellationToken ct)
+    {
+        var t = await store.FindAsync(p.Id, run.Key, ct);
+        if (t is null || t.Id != run.Id)
+        {
+            log.LogWarning("Ticket {Project}/{Key} disappeared while its evidence was gathered", p.Id, run.Key);
+            return;
+        }
+
+        var waitingSince = run.WaitingSince!.Value; // the round key as loaded from the store
+        var current = t.Status == StageStatus.AwaitingApproval && t.WaitingSince == waitingSince;
+        if (outcome.Status is EvidenceStatus.Gathered or EvidenceStatus.Failed)
+        {
+            var posted = false;
+            if (!current)
+                await AddEventAsync(t, $"evidence for {run.StageId} finished after the gate was decided; not posted", ct);
+            else if (t.PullRequestId is { } prId)
+                posted = await PostEvidenceAsync(p, io, t, prId, outcome, ct);
+            await store.AddEvidenceAsync(new EvidenceRecord(t.Id, t.ProjectId, run.StageId, waitingSince, time.GetUtcNow(),
+                outcome.Head, outcome.Report?.ToJson(), outcome.Report?.HasIssues ?? false, outcome.Error,
+                outcome.Screenshots, posted), ct);
+        }
+
+        var fromStageId = t.StageId;
+        var completed = PipelineEngine.EvidenceCompleted(p, t, waitingSince, outcome.Message, time.GetUtcNow());
+        if (!completed.Changed) return; // another round: its own evidence is owed (or it was decided)
+        await store.SaveAsync(t, ct);
+        await ApplyAsync(io, t, fromStageId, completed, ct);
+    }
+
+    /// <summary>
+    /// Posts the signed report (or failure) to the pull request, then a signed line to the tracker. Returns whether the
+    /// pull request comment was posted; a failure is recorded as an event.
+    /// </summary>
+    private async Task<bool> PostEvidenceAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, long prId,
+        EvidenceOutcome outcome, CancellationToken ct)
+    {
+        var report = outcome.Report;
+        var failed = EvidenceComment.Failed(outcome.Error ?? "no evidence report", p.CommentMarker);
+        try
+        {
+            var body = report is null ? failed : EvidenceComment.Format(report, outcome.Screenshots.Count > 0, p.CommentMarker);
+            await io.SourceControl.CommentOnPullRequestAsync(prId, TrackerComments.Sign(body), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Evidence comment on pull request {Id} for {Key} failed", prId, t.Key);
+            await AddEventAsync(t, $"evidence comment failed: {e.Message}", ct);
+            return false;
+        }
+        try
+        {
+            var line = report is null ? failed : EvidenceComment.TrackerLine(report, p.CommentMarker);
+            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(line), ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            log.LogWarning(e, "Evidence comment on {Key} failed", t.Key);
+            await AddEventAsync(t, $"evidence comment failed: {e.Message}", ct);
+        }
+        return true;
     }
 
     /// <summary>
@@ -662,13 +1218,19 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             : $"reviewed {expected} but {branch} is now {current}";
     }
 
-    /// <summary>Posts the signed auto-approval comment; returns the event holding the approval when it cannot be posted.</summary>
+    /// <summary>
+    /// Posts the signed auto-approval comment (a release ticket's goes on its release PR, as it has no tracker card);
+    /// returns the event holding the approval when it cannot be posted.
+    /// </summary>
     private async Task<string?> AutoApprovalCommentFailedAsync(ProjectIntegrations io, Ticket t, StageDefinition stage,
         GateVerdict verdict, CancellationToken ct)
     {
         try
         {
-            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(AutoApprovalComment.Format(stage.Id, verdict)), ct);
+            var comment = TrackerComments.Sign(AutoApprovalComment.Format(stage.Id, verdict));
+            if (t.Kind != TicketKind.Release) await io.Tracker.CommentAsync(t.Key, comment, ct);
+            else if (t.ReleasePullRequestId is { } prId) await io.SourceControl.CommentOnPullRequestAsync(prId, comment, ct);
+            else return "auto-approval held: the release has no pull request to comment on; waiting on you";
             return null;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -679,13 +1241,30 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// For an auto-approved round, why the merge must not go ahead: the pull request (as just read) would not merge the
-    /// reviewed commit from this repository, or the reviewed branch (or a release's production base) is no longer at the
-    /// reviewed commit, or cannot be checked. Null for human approvals, which pin no commit.
+    /// Why the merge must not go ahead. For any release: its branch is no longer at the commit Release now froze it at
+    /// (<see cref="Ticket.ReleaseBaseHead"/>), or cannot be checked. For an auto-approved round also: the pull request (as
+    /// just read) would not merge the reviewed commit from this repository, or the reviewed branch (or a release's
+    /// production base) is no longer at the reviewed commit, or cannot be checked. Otherwise null (a human approval of a
+    /// work ticket pins no commit).
     /// </summary>
     private async Task<string?> MergeHeldAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, PullRequestInfo pr,
         CancellationToken ct)
     {
+        if (t is { Kind: TicketKind.Release, ReleaseBaseHead: { } frozen, Branch: { } releaseBranch })
+        {
+            string current;
+            try
+            {
+                current = await io.SourceControl.GetBranchHeadAsync(releaseBranch, ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                log.LogWarning(e, "Head of {Branch} for {Key} could not be checked before merging", releaseBranch, t.Key);
+                return $"could not check {releaseBranch}: {e.Message}";
+            }
+            if (!string.Equals(current, frozen, StringComparison.OrdinalIgnoreCase))
+                return $"release branch moved since Release now ({frozen} → {current}); send the release back and release again";
+        }
         if (t.ApprovedHead is null && t.ApprovedBaseHead is null) return null;
         if (t is not { ApprovedBranch: { } branch, ApprovedHead: { } head }) return "the auto-approved commit is not recorded";
         var checks = new List<(string Branch, string Head)> { (branch, head) };
@@ -732,23 +1311,44 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     /// missing or failing transition never throw; they are recorded as events, and a skipped or failed move is kept in
     /// <see cref="Ticket.TrackerRetryStatus"/> for the next ticks to retry. A new move, or leaving
     /// <paramref name="fromStageId"/> (the stage before the outcome), cancels the move still waiting to be retried.
+    /// A release ticket never touches the tracker: its status target moves its members' cards, and when it is done its
+    /// members are released (merged) or returned (cancelled).
     /// </summary>
     private async Task ApplyAsync(Func<ProjectIntegrations> io, Ticket t, string fromStageId, TransitionOutcome outcome,
         CancellationToken ct)
     {
         if (!outcome.Changed) return;
+        CancelDecidedEvidence(t);
         await AddEventAsync(t, outcome.Message, ct);
+        Notify(t);
+        if (outcome.Touch is { } touch)
+            await store.AddTouchAsync(new TouchRecord(t.Id, t.ProjectId, fromStageId, touch, time.GetUtcNow()), ct);
         if (outcome.Decision is { } d)
             await store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, t.ProjectId, d.StageId, d.WaitingSince, d.Decision,
                 d.Auto, time.GetUtcNow()), ct);
 
         var target = outcome.SourceStatusToSet;
+        if (t.Kind == TicketKind.Release)
+        {
+            if (target is not null) await MoveMemberCardsAsync(io, t, target, ct);
+            if (t.Status == StageStatus.Done) await FinishReleaseAsync(io, t, closePr: true, ct);
+            return;
+        }
         if (t.TrackerRetryStatus is not null && (target is not null || t.StageId != fromStageId))
         {
             t.TrackerRetryStatus = null; // the old target belongs to a stage the ticket has left, or is replaced
             await store.SaveAsync(t, ct);
         }
         if (target is null) return;
+        await MoveCardAsync(io, t, target, ct);
+    }
+
+    /// <summary>
+    /// Moves <paramref name="t"/>'s card to <paramref name="target"/>; a skipped or failed move is kept for retry and
+    /// recorded as an event, never thrown.
+    /// </summary>
+    private async Task MoveCardAsync(Func<ProjectIntegrations> io, Ticket t, string target, CancellationToken ct)
+    {
         retryFailureRecorded.Remove(t.Id); // a new move: its own failure is recorded
         // Skip when the card is already there (e.g. the developer's move is what approved the stage).
         if (Same(target, t.LastSourceStatus)) return;
@@ -784,6 +1384,79 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             await SaveRetryAsync(t, target, ct);
         }
     }
+
+    /// <summary>
+    /// Tells the developer a ticket now waits on them (once per round) or is blocked (once per block); under gate only.
+    /// Auto-approved rounds, and gates still waiting on the reviewer, say nothing.
+    /// </summary>
+    private void Notify(Ticket t)
+    {
+        if (notifications is null) return;
+        if (t.Status != StageStatus.Blocked) notifiedBlocked.Remove(t.Id);
+        if (t.Status != StageStatus.AwaitingApproval) notifiedRounds.Remove(t.Id);
+        var p = projects.Projects.FirstOrDefault(x => x.Id == t.ProjectId);
+        if (p is null) return;
+        if (t.Status == StageStatus.AwaitingApproval && t.WaitingSince is { } since && !PipelineEngine.WaitsOnReviewer(p, t))
+        {
+            if (notifiedRounds.TryGetValue(t.Id, out var last) && last == since) return;
+            notifiedRounds[t.Id] = since;
+            var line = t.Risk is { } risk ? $"{t.StageId} · reviewer says {risk.ToString().ToLowerInvariant()} risk" : t.StageId;
+            notifications.Post(new NotificationEvent(NotificationKind.WaitingOnYou, t.ProjectId, t.Key, line));
+        }
+        else if (t.Status == StageStatus.Blocked && notifiedBlocked.Add(t.Id))
+        {
+            // One short line only: the full reason (often agent stderr) stays on the ticket and in its events.
+            var reason = ReviewerText.Line(t.BlockedReason, ReviewerText.MaxItemChars);
+            notifications.Post(new NotificationEvent(NotificationKind.Blocked, t.ProjectId, t.Key, reason.Length > 0 ? reason : "blocked"));
+        }
+    }
+
+    /// <summary>
+    /// Cancels the ticket's evidence run once its round is no longer the one waiting (approved, sent back, moved, rerun
+    /// by @claude, auto-approved or blocked); under gate only, like every outcome applied.
+    /// </summary>
+    private void CancelDecidedEvidence(Ticket t)
+    {
+        if (!evidenceRuns.TryGetValue(t.Id, out var run)) return;
+        if (t.Status == StageStatus.AwaitingApproval && t.WaitingSince == run.WaitingSince) return;
+        try
+        {
+            run.Cts.Cancel();
+        }
+        catch (AggregateException e)
+        {
+            // A token callback (e.g. the runner's cleanup) threw; the decision itself must still be applied.
+            log.LogWarning(e, "Cancelling the evidence run of {Project}/{Key} raised", t.ProjectId, t.Key);
+        }
+    }
+
+    /// <summary>
+    /// What a finished job says about its provider: a usage limit pauses <paramref name="key"/>, any other result lifts
+    /// its pause. Returns whether this started a pause (so its event is posted once per pause, not per probe). Best
+    /// effort: a failure is logged, and the job's own result is still applied.
+    /// </summary>
+    private async Task<bool> NoteProviderAsync(string key, UsageLimit? limit)
+    {
+        try
+        {
+            if (limit is null)
+            {
+                await limits.SucceededAsync(key, CancellationToken.None);
+                return false;
+            }
+            var started = limits.Pauses.All(p => p.Key != key);
+            await limits.PauseAsync(key, limit, CancellationToken.None);
+            return started;
+        }
+        catch (Exception e)
+        {
+            log.LogError(e, "Recording the usage limit state of {Key} failed", key);
+            return false;
+        }
+    }
+
+    private string Describe(string key, UsageLimit limit) =>
+        UsageLimitText.Describe(key, limit.ResetsAt, time.LocalTimeZone, time.GetUtcNow());
 
     private Task SaveRetryAsync(Ticket t, string target, CancellationToken ct)
     {
@@ -837,6 +1510,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             .Where(c => c.IsMine && !TrackerComments.IsSymphonist(c.Body) && (since is null || c.Created > since))
             .MaxBy(c => c.Created)?.Body;
     }
+
+    private static bool HasStage(ProjectConfig p, Ticket t) => p.Pipeline.Any(s => s.Id == t.StageId);
 
     private static bool IsActive(Ticket t) => t.Status is not (StageStatus.Done or StageStatus.Blocked);
 

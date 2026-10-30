@@ -24,9 +24,26 @@ public sealed record StageAgreementDto(string StageId, int Decided, int Agreed, 
 public sealed record ProjectDto(string Id, string Name, bool Paused, string Isolation, string? Problem = null,
     string Review = "Off", IReadOnlyList<StageAgreementDto>? Agreement = null);
 
+/// <param name="Errors">Each skipped project file (by file name) and why.</param>
+public sealed record ProjectReloadDto(IReadOnlyList<string> Projects, IReadOnlyDictionary<string, string> Errors);
+
 public sealed record OutcomeDto(bool Changed, string Message);
 
 public sealed record DashboardLinkDto(Uri Url);
+
+/// <summary>An agent provider paused by a usage limit.</summary>
+/// <param name="NextProbeAt">With no known reset, when one job may next try the provider.</param>
+public sealed record ProviderPauseDto(string Key, string Provider, DateTimeOffset Since, DateTimeOffset? ResetsAt,
+    DateTimeOffset? NextProbeAt);
+
+/// <summary>A ticket that ships with a release without joining it, or joins it (<paramref name="Finishes"/>).</summary>
+public sealed record AlsoShippedDto(string Key, string StageId, string Status, bool Finishes);
+
+/// <summary>What Release now would ship. It is posted back unchanged to confirm it.</summary>
+public sealed record ReleasePreviewDto(string ProjectId, IReadOnlyList<string> Ready, IReadOnlyList<AlsoShippedDto> AlsoShipped,
+    int OutsideCommits, string? MainHead, string? Unavailable, string? ProductionBranch = null);
+
+public sealed record ReleaseStartDto(bool Started, string Message, string? ReleaseKey);
 
 /// <summary>The host is unreachable (not running, or no API token exists yet).</summary>
 public sealed class HostNotRunningException(int port)
@@ -82,6 +99,26 @@ public sealed class SymphonistClient : IDisposable
 
     public Task SetPausedAsync(string id, bool paused, CancellationToken ct) =>
         SendAsync<object>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(id)}/{(paused ? "pause" : "resume")}", null, ct);
+
+    /// <summary>Asks the host to reload the project files (after a hand edit).</summary>
+    public Task<ProjectReloadDto> ReloadProjectsAsync(CancellationToken ct) =>
+        SendAsync<ProjectReloadDto>(HttpMethod.Post, "/api/projects/reload", null, ct);
+
+    public Task<List<ProviderPauseDto>> ListLimitsAsync(CancellationToken ct) =>
+        SendAsync<List<ProviderPauseDto>>(HttpMethod.Get, "/api/limits", null, ct);
+
+    /// <summary>Lets jobs on the provider paused under <paramref name="key"/> start again now.</summary>
+    public Task ResumeLimitAsync(string key, CancellationToken ct) =>
+        SendAsync<object>(HttpMethod.Post, "/api/limits/resume", JsonContent.Create(new { key }, options: Json), ct);
+
+    /// <summary>What Release now would ship for the project.</summary>
+    public Task<ReleasePreviewDto> PreviewReleaseAsync(string project, CancellationToken ct) =>
+        SendAsync<ReleasePreviewDto>(HttpMethod.Get, $"/api/projects/{Uri.EscapeDataString(project)}/release", null, ct);
+
+    /// <summary>Starts the release <paramref name="confirmed"/> describes; the host refuses (409) when it changed since.</summary>
+    public Task<ReleaseStartDto> ReleaseNowAsync(string project, ReleasePreviewDto confirmed, CancellationToken ct) =>
+        SendAsync<ReleaseStartDto>(HttpMethod.Post, $"/api/projects/{Uri.EscapeDataString(project)}/release",
+            JsonContent.Create(confirmed, options: Json), ct);
 
     /// <summary>A single-use sign-in link for the dashboard, valid for two minutes.</summary>
     public async Task<Uri> CreateDashboardLinkAsync(CancellationToken ct) =>

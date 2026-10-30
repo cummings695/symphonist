@@ -242,6 +242,40 @@ public class ClaudeCodeRunnerTests
     }
 
     [Fact]
+    public void Read_rejects_missing_status()
+    {
+        Assert.Null(StageOutputSchema.Read(System.Text.Json.JsonDocument.Parse("""{"summary":"x"}""").RootElement));
+        Assert.Null(StageOutputSchema.Read(System.Text.Json.JsonDocument.Parse("""{"status":"completed"}""").RootElement));
+        Assert.Null(StageOutputSchema.Read(System.Text.Json.JsonDocument.Parse("""{"status":3,"summary":"x"}""").RootElement));
+        Assert.Null(StageOutputSchema.Read(null));
+        Assert.Equal("x", StageOutputSchema.Read(System.Text.Json.JsonDocument.Parse("""{"status":"completed","summary":"x","pr_title":"t"}""").RootElement)!.Summary);
+    }
+
+    [Fact]
+    public async Task Pr_fix_schema_returns_structured_replies_without_stage_output()
+    {
+        fake.Returns(0, """{"is_error":false,"structured_output":{"status":"completed","summary":"s","replies":[{"comment_id":"issue:1","reply":"ok"},{"comment_id":3},{"reply":"x"}]}}""");
+        var r = await runner.RunAsync(Request() with { OutputSchema = PrFixOutputSchema.Json }, default);
+        Assert.True(r.Succeeded);
+        Assert.Null(r.Output);
+        Assert.Equal(new PrReply("issue:1", "ok"), Assert.Single(PrFixOutputSchema.ReadReplies(r.Structured)));
+        Assert.Equal("s", StageOutputSchema.Read(r.Structured)!.Summary);
+    }
+
+    [Fact]
+    public void Replies_are_bounded()
+    {
+        var long_ = new string('a', 5000);
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(new
+        {
+            replies = Enumerable.Range(0, 80).Select(i => new { comment_id = $"issue:{i}", reply = long_ }).ToArray(),
+        });
+        var replies = PrFixOutputSchema.ReadReplies(json);
+        Assert.Equal(50, replies.Count);
+        Assert.All(replies, r => Assert.True(r.Reply.Length <= ReviewerText.MaxSummaryChars * 4));
+    }
+
+    [Fact]
     public async Task Custom_schema_without_structured_output_fails()
     {
         fake.Returns(0, """{"is_error":false,"result":"{\"risk\":\"low\"}"}""");
@@ -270,6 +304,50 @@ public class ClaudeCodeRunnerTests
         Assert.False(r.Succeeded);
         Assert.Null(r.Output);
         Assert.False(string.IsNullOrWhiteSpace(r.Error));
+    }
+
+    private sealed class FixedTime(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private static readonly DateTimeOffset Now = new(2026, 10, 28, 10, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Failed_run_with_limit_text_sets_Limit()
+    {
+        fake.Returns(1, "", "Claude AI usage limit reached|1793210400");
+        var r = await runner.RunAsync(Request(), default);
+        Assert.False(r.Succeeded);
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1793210400), r.Limit!.ResetsAt);
+        Assert.Equal("Claude AI usage limit reached|1793210400", r.Error);
+    }
+
+    [Fact]
+    public async Task Error_result_text_with_rate_limit_sets_Limit()
+    {
+        fake.Returns(1, """{"is_error":true,"result":"API Error: 429 rate_limit_error"}""");
+        var timed = new ClaudeCodeRunner(fake, launcher, new FixedTime(Now));
+        var r = await timed.RunAsync(Request(), default);
+        Assert.Equal(Now.AddMinutes(5), r.Limit!.ResetsAt);
+    }
+
+    [Fact]
+    public async Task Failed_run_with_overloaded_error_has_no_Limit()
+    {
+        fake.Returns(1, Fixture("claude-error.json"));
+        var r = await runner.RunAsync(Request(), default);
+        Assert.False(r.Succeeded);
+        Assert.Null(r.Limit);
+    }
+
+    [Fact]
+    public async Task Successful_run_mentioning_limit_has_no_Limit()
+    {
+        fake.Returns(0, """{"is_error":false,"result":"usage limit reached","structured_output":{"status":"completed","summary":"documented the usage limit reached handling"}}""");
+        var r = await runner.RunAsync(Request(), default);
+        Assert.True(r.Succeeded);
+        Assert.Null(r.Limit);
     }
 
     [Fact]

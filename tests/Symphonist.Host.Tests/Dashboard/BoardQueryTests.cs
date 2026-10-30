@@ -30,11 +30,13 @@ public sealed class BoardQueryTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         var time = new FakeTimeProvider(Now);
+        var limits = new ProviderLimits(store, time);
         orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
-            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new StageExecutor(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
-        query = new BoardQuery(registry, store, orchestrator);
+        query = new BoardQuery(registry, store, orchestrator, limits);
     }
 
     public void Dispose() => home.Dispose();
@@ -263,14 +265,18 @@ public sealed class BoardQueryTests : IDisposable
     }
 
     [Fact]
-    public async Task Unknown_stage_in_known_project_detail_is_read_only()
+    public async Task Unknown_stage_in_known_project_detail_offers_only_send_back_to_any_stage()
     {
-        await Seed("ORD-1", "renamed", StageStatus.AwaitingApproval);
+        await Seed("ORD-1", "renamed", StageStatus.Blocked);
+        await Seed("ORD-2", "renamed", StageStatus.Running);
 
         var detail = (await query.LoadTicketAsync("orders", "ORD-1", default))!;
+        var running = (await query.LoadTicketAsync("orders", "ORD-2", default))!;
 
-        Assert.False(detail.CanApprove || detail.CanSendBack || detail.CanUnblock);
-        Assert.Empty(detail.SendBackTargets);
+        Assert.False(detail.CanApprove || detail.CanUnblock);
+        Assert.True(detail.CanSendBack);
+        Assert.Equal(["triage", "plan", "implement"], detail.SendBackTargets);
+        Assert.False(running.CanSendBack);
     }
 
     private static GateVerdict Verdict(RiskLevel risk) => new(risk, "summary", ["why"], ["c"], []);
@@ -422,6 +428,69 @@ public sealed class BoardQueryTests : IDisposable
         Assert.Equal("Project orders", detail.ProjectName);
         Assert.Empty(gone.Pipeline);
         Assert.Equal("gone", gone.ProjectName);
+    }
+
+    private static EvidenceRecord EvidenceAt(Ticket t, DateTimeOffset at, bool hasIssues) =>
+        new(t.Id, t.ProjectId, t.StageId, at, at, "abc", null, hasIssues, null, [], false);
+
+    [Fact]
+    public async Task Card_flags_gathering_evidence_and_latest_issues()
+    {
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, with: t =>
+        {
+            t.WaitingSince = Now;
+            t.EvidenceDue = true;
+            t.PullRequestId = 7;
+        });
+        var fixedNow = await Seed("ORD-2", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
+        var broken = await Seed("ORD-3", "implement", StageStatus.AwaitingApproval, with: t => t.WaitingSince = Now);
+        await store.AddEvidenceAsync(EvidenceAt(fixedNow, Now.AddHours(-1), true), default);
+        await store.AddEvidenceAsync(EvidenceAt(fixedNow, Now, false), default); // the latest has none
+        await store.AddEvidenceAsync(EvidenceAt(broken, Now, true), default);
+
+        var board = await query.LoadBoardAsync(null, default);
+        var cards = board.Columns.SelectMany(c => c.Cards).ToDictionary(c => c.Key);
+
+        Assert.True(cards["ORD-1"].GatheringEvidence);
+        Assert.True(cards["ORD-1"].WaitingOnYou);
+        Assert.False(cards["ORD-2"].GatheringEvidence);
+        Assert.False(cards["ORD-2"].EvidenceIssues);
+        Assert.True(cards["ORD-3"].EvidenceIssues);
+        Assert.Equal(3, board.Counts.WaitingOnYou);
+
+        var detail = await query.LoadTicketAsync("orders", "ORD-2", default);
+        Assert.False(detail!.Card.EvidenceIssues);
+        Assert.Equal([Now, Now.AddHours(-1)], detail.Evidence.Select(e => e.At));
+        Assert.True((await query.LoadTicketAsync("orders", "ORD-1", default))!.Card.GatheringEvidence);
+        Assert.True((await query.LoadTicketAsync("orders", "ORD-3", default))!.Card.EvidenceIssues);
+    }
+
+    [Fact]
+    public async Task Release_banner_lists_ready_tickets_and_the_open_release()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        registry.Reload();
+        await Seed("ORD-2", "release", StageStatus.Pending);
+        await Seed("ORD-1", "release", StageStatus.Pending);
+        await Seed("ORD-3", "release", StageStatus.Running); // not ready
+        await Seed("BIL-1", "plan", StageStatus.Pending, "billing");
+
+        var banner = (await query.LoadBoardAsync(null, default)).Projects.Single(p => p.Id == "orders").Release;
+
+        Assert.Equal(["ORD-1", "ORD-2"], banner!.ReadyKeys);
+        Assert.Null(banner.OpenReleaseKey);
+        Assert.Null(banner.OpenReleasePrUrl);
+        Assert.Null((await query.LoadBoardAsync(null, default)).Projects.Single(p => p.Id == "billing").Release);
+
+        await Seed("_release-1", "release", StageStatus.AwaitingApproval, with: t =>
+        {
+            t.Kind = TicketKind.Release;
+            t.ReleasePullRequestId = 7;
+        });
+        banner = (await query.LoadBoardAsync("orders", default)).Projects.Single(p => p.Id == "orders").Release;
+
+        Assert.Equal("_release-1", banner!.OpenReleaseKey);
+        Assert.Equal("https://bitbucket.org/acme/orders/pull-requests/7", banner.OpenReleasePrUrl!.ToString());
     }
 
     [Fact]

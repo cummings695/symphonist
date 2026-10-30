@@ -7,16 +7,17 @@ using Symphonist.Integrations.Processes;
 namespace Symphonist.Integrations.ClaudeCode;
 
 /// <summary>Runs Claude Code headlessly (<c>claude -p</c>) and parses its JSON result.</summary>
-public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launcher) : IAgentRunner
+public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launcher, TimeProvider? time = null)
+    : IAgentRunner
 {
+    private readonly TimeProvider time = time ?? TimeProvider.System;
+
     /// <summary>
     /// Denied on every read-only run, whatever the isolation (defense in depth): no writes, no shell, and no web access
     /// that untrusted content could use to send what the reviewer read elsewhere.
     /// </summary>
     public static readonly IReadOnlyList<string> ReadOnlyDeniedTools =
         ["Write", "Edit", "NotebookEdit", "Bash", "WebFetch", "WebSearch"];
-
-    private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     public async Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken ct)
     {
@@ -87,14 +88,16 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
             : posix;
     }
 
-    private static AgentRunResult Parse(ProcessResult result, AgentRunRequest request, TimeSpan duration, string rawLog)
+    private AgentRunResult Parse(ProcessResult result, AgentRunRequest request, TimeSpan duration, string rawLog)
     {
         var settings = request.Settings;
         JsonElement? structured = null;
-        AgentRunResult Fail(string error, StageOutput? output = null, decimal? cost = null) =>
-            new(false, output, cost, duration, error, rawLog, structured);
+        // Only a failed run's error channels are searched: a successful run may talk about limits all it likes.
+        AgentRunResult Fail(string error, StageOutput? output = null, decimal? cost = null, string? errorText = null) =>
+            new(false, output, cost, duration, error, rawLog, structured,
+                ClaudeUsageLimit.Detect(errorText ?? result.StandardError, time.GetUtcNow(), TimeZoneInfo.Local));
 
-        if (result.TimedOut) return Fail($"timed out after {settings.TimeoutMinutes} minutes");
+        if (result.TimedOut) return new AgentRunResult(false, null, null, duration, $"timed out after {settings.TimeoutMinutes} minutes", rawLog);
 
         JsonElement root;
         try
@@ -118,34 +121,14 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
         if (root.TryGetProperty("structured_output", out var so) && so.ValueKind == JsonValueKind.Object)
             structured = so.Clone();
         var isStage = request.OutputSchema == StageOutputSchema.Json;
-        var output = isStage ? ReadOutput(structured) : null;
+        var output = isStage ? StageOutputSchema.Read(structured) : null;
 
         if (result.ExitCode != 0 || isError)
             return Fail(FirstNonEmpty(Tail(result.StandardError), resultText,
                 result.ExitCode != 0 ? $"agent exited with code {result.ExitCode}" : "agent reported an error")!,
-                output, cost);
-        if (!isStage)
-            return structured is null
-                ? Fail("missing structured output", null, cost)
-                : new AgentRunResult(true, null, cost, duration, null, rawLog, structured);
-        if (output is null) return Fail("missing structured output", null, cost);
-        if (output.Status != "completed")
-            return Fail(FirstNonEmpty(output.Summary, $"stage status '{output.Status}'")!, output, cost);
-        return new AgentRunResult(true, output, cost, duration, null, rawLog, structured);
+                output, cost, errorText: isError ? result.StandardError + "\n" + resultText : result.StandardError);
+        return AgentResults.FromStructured(request, structured, cost, duration, rawLog);
     }
-
-    /// <summary>Stage output comes only from schema-validated <c>structured_output</c>, never from free text.</summary>
-    private static StageOutput? ReadOutput(JsonElement? structured)
-    {
-        try
-        {
-            if (structured is { } so) return Validate(so.Deserialize<StageOutput>(Options));
-        }
-        catch (JsonException) { }
-        return null;
-    }
-
-    private static StageOutput? Validate(StageOutput? o) => o is { Status: not null, Summary: not null } ? o : null;
 
     private static string? Tail(string s)
     {

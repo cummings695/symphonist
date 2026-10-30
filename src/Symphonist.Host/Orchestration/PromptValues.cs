@@ -2,6 +2,7 @@ using System.Globalization;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
+using Symphonist.Core.Prompts;
 using Symphonist.Integrations.Containers;
 
 namespace Symphonist.Host.Orchestration;

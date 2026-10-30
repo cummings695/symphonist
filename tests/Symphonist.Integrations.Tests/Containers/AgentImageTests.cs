@@ -40,6 +40,71 @@ public sealed class DockerFactAttribute : FactAttribute
     }
 }
 
+/// <summary>Text checks on the firewall script; they need no Docker.</summary>
+public class FirewallScriptTests
+{
+    private static readonly string Script =
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Containers", "agent", "init-firewall.sh"));
+
+    private static AgentSettings Settings(string type) => new(type, Isolation.Container, [], [], 30, null, null);
+
+    [Fact]
+    public void Firewall_script_takes_base_domains_from_env()
+    {
+        var chatGpt = Settings(AgentTypes.Codex) with { Codex = new(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret) };
+        foreach (var domain in AgentProviderInfo.BaseDomains(Settings(AgentTypes.ClaudeCode))
+                     .Concat(AgentProviderInfo.BaseDomains(chatGpt)))
+            Assert.DoesNotContain(domain, Script);
+        Assert.Contains("${SYMPHONIST_BASE_DOMAINS:-}", Script);
+        Assert.Contains("add_domain \"$domain\" 1", Script);
+        // An empty list is refused before any firewall rule is touched.
+        var refuse = Script.IndexOf("no base domains", StringComparison.Ordinal);
+        Assert.True(refuse > 0, "the script must refuse an empty SYMPHONIST_BASE_DOMAINS");
+        Assert.Contains("exit 1", Script[refuse..(refuse + 200)]);
+        Assert.True(refuse < Script.IndexOf("iptables -F", StringComparison.Ordinal));
+    }
+}
+
+public class AgentProviderInfoTests
+{
+    private static AgentSettings Settings(string type, CodexAuth auth = CodexAuth.ApiKey) =>
+        new(type, Isolation.Container, [], [], 30, null, null)
+        {
+            Codex = new CodexSettings(auth, CodexSettings.DefaultApiKeySecret),
+        };
+
+    [Fact]
+    public void Base_domains_follow_the_provider_and_its_sign_in()
+    {
+        Assert.Equal(["api.anthropic.com", "statsig.anthropic.com", "sentry.io"],
+            AgentProviderInfo.BaseDomains(Settings(AgentTypes.ClaudeCode, CodexAuth.ChatGpt)));
+        Assert.Equal(["api.openai.com"], AgentProviderInfo.BaseDomains(Settings(AgentTypes.Codex)));
+        Assert.Equal(["api.openai.com", "auth.openai.com", "chatgpt.com"],
+            AgentProviderInfo.BaseDomains(Settings(AgentTypes.Codex, CodexAuth.ChatGpt)));
+        Assert.Throws<ArgumentException>(() => AgentProviderInfo.BaseDomains(Settings("aider")));
+    }
+}
+
+/// <summary>Text checks on the image definition; they need no Docker.</summary>
+public class AgentDockerfileTests
+{
+    private static readonly string Dockerfile =
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Containers", "agent", "Dockerfile"));
+
+    [Fact]
+    public void Dockerfile_installs_both_clis()
+    {
+        // Codex is pinned: CodexRunner's read-only guards were verified against this version.
+        Assert.Contains("npm install -g @anthropic-ai/claude-code @openai/codex@0.164.0", Dockerfile);
+        Assert.Contains("claude --version", Dockerfile);
+        Assert.Contains("codex --version", Dockerfile);
+    }
+
+    [Fact]
+    public void Default_image_tag_is_agent_2() =>
+        Assert.Equal("symphonist/agent:2", DockerLauncher.DefaultImage);
+}
+
 /// <summary>Builds the agent image once for all Docker tests.</summary>
 public sealed class AgentImageFixture : IAsyncLifetime
 {
@@ -92,6 +157,7 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
     public async Task Image_builds_and_has_tools()
     {
         AssertExit(0, await RunInContainer("claude", "--version"));
+        AssertExit(0, await RunInContainer("codex", "--version"));
         AssertExit(0, await RunInContainer("dotnet", "--version"));
         AssertExit(0, await RunInContainer("git", "--version"));
         AssertExit(0, await RunInContainer("chromium", "--version"));
@@ -159,6 +225,31 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         await fixture.Launcher.CleanupAsync(spec, new AgentRunRequest(workspace, "",
             new AgentSettings("claude-code", Isolation.Container, [], [], 5, null, null)), CancellationToken.None);
         Assert.Empty(await ContainersNamed(name));
+    }
+
+    [DockerFact]
+    public async Task Codex_runs_get_openai_base_domains_not_anthropic()
+    {
+        var request = new AgentRunRequest(workspace, "",
+            new AgentSettings("codex", Isolation.Container, [], [], 5, null, null)
+            {
+                Codex = new CodexSettings(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret),
+            });
+        var spec = fixture.Launcher.Wrap(new ProcessSpec("bash", ["-c",
+            "curl -sS -m 10 -o /dev/null https://api.openai.com/ && ! curl -sS -m 5 -o /dev/null https://api.anthropic.com/"]),
+            request);
+        AssertExit(0, await fixture.Runner.RunAsync(spec with { Timeout = TimeSpan.FromMinutes(3) }, CancellationToken.None));
+    }
+
+    [DockerFact]
+    public async Task Fails_closed_without_base_domains()
+    {
+        var spec = Wrap("touch", ["/workspace/should-not-exist"], TimeSpan.FromMinutes(2));
+        var env = new Dictionary<string, string?>(spec.Environment!) { [DockerLauncher.BaseDomainsVar] = "" };
+        var r = await fixture.Runner.RunAsync(spec with { Environment = env }, CancellationToken.None);
+        AssertExit(70, r);
+        Assert.Contains("no base domains", r.StandardError);
+        Assert.False(File.Exists(Path.Combine(workspace, "should-not-exist")));
     }
 
     [DockerFact]

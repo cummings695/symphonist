@@ -1,5 +1,6 @@
 # Example Symphonist project. Copy to ~/.symphonist/projects/<anything>.yaml (or $SYMPHONIST_HOME/projects/) and
-# replace the placeholder values. Field names are camelCase. Invalid files are logged and skipped by the host.
+# replace the placeholder values, or use the dashboard's Add project. Field names are camelCase. Invalid files are
+# logged and skipped by the host.
 
 id: orders                      # unique project id; used in CLI commands (symphonist show orders ORD-1)
 name: Orders (Acme)             # display name (defaults to id)
@@ -7,6 +8,7 @@ name: Orders (Acme)             # display name (defaults to id)
 tracker:
   type: jira                    # "jira" or "github-projects" (see orders-github.example.yaml)
   site: https://acme.atlassian.net
+  projectKey: ACME                # Jira project key; the setup screen reads its statuses from it (optional)
   email: dev@example.com        # Atlassian account email (basic auth with the API token)
   tokenSecret: jira-acme        # name of the secret holding the Atlassian API token: symphonist secret set jira-acme
   # Tickets Symphonist works on. A ticket that stops matching is Blocked ("no longer matches tracker query").
@@ -31,7 +33,11 @@ build:
   # timeoutMinutes: 45          # default: 45
 
 agent:
-  type: claude-code             # only "claude-code" is supported
+  type: claude-code             # "claude-code" or "codex" (Codex runs only with isolation: container)
+  # Codex sign-in, used by any job that runs Codex:
+  # codex:
+  #   auth: api-key               # "api-key" (secret below) or "chatgpt" (run "codex login" once on this machine)
+  #   apiKeySecret: openai-api-key  # default; api-key only: symphonist secret set openai-api-key
   # isolation: container        # default: container (Docker sandbox). "host" runs claude directly on this machine;
   #                             # host isolation REQUIRES allowedTools, e.g. allowedTools: [Read, Edit, "Bash(git:*)"]
   # allowedTools: []            # passed to claude --allowedTools (host mode only)
@@ -52,6 +58,11 @@ agent:
 # Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
 # maxAttemptsPerStage: 3
 
+# Comments starting with this ask Symphonist to rerun a stage, on the ticket or the pull request. An "@" and a name of
+# letters, digits, "-" and "_" (at most 39 characters), matched without regard to case. Keep the quotes: a bare "@"
+# is not valid YAML. Default: "@claude".
+# commentMarker: "@claude"
+
 # Stages run in order; the last one must be kind "done".
 #   kind:                triage | plan | implement | build | uat | release | deploy | done
 #   gate:                human = wait for approval (symphonist approve, or move the card to approvedWhenStatus);
@@ -67,8 +78,11 @@ agent:
 pipeline:
   - { id: triage,    kind: triage,    gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }
   - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }
+  # A stage can run another provider: add  agent: { type: codex, model: "", timeoutMinutes: 30 }  to its line.
+  # A stage that switches provider without a model uses that provider's default model.
   - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }
   - { id: build,     kind: build }
+  # release: tickets wait here; Release now (dashboard or `symphonist release orders`) opens one PR for all of them from a frozen copy of mainBranch; it always waits for your approval
   - { id: release,   kind: release,   gate: human }
   - { id: deploy,    kind: deploy }
   - { id: done,      kind: done,      onEnterStatus: Done }
@@ -88,8 +102,31 @@ riskAreas:
 review:
   mode: off
   # prompt: prompts/review.md   # optional prompt override, relative to this file
-  # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # inherits the rest from agent
+  # agent: { type: claude-code, model: "", timeoutMinutes: 20, allowedTools: [] }  # type may be codex; inherits the rest from agent
   #   host mode: allowedTools defaults to [Read, Grep, Glob], and a review refuses to run with any other tool
+
+# Optional: after a gated implement round is pushed, an agent runs the app and reports what it saw (tests, screenshots)
+# on the PR and the dashboard. Evidence is advice for you; it never approves or blocks anything and never pushes.
+#   mode: off       = never
+#         high-risk = when the reviewer says high or a risk-area path is touched (the default)
+#         always    = every gated implement round
+# evidence:
+#   mode: high-risk
+#   # prompt: prompts/evidence.md   # optional prompt override, relative to this file
+#   run:                            # how to start the app; every field is optional and single-line except notes
+#     setup: [npm ci]               # at most 10 commands, run in order
+#     start: npm start
+#     url: http://localhost:3000
+#     ready: /health                # what to wait for before using the app
+#     notes: Sign in as demo@example.com   # free text for the agent
+#   features:                       # at most 20; things to exercise, in your own words
+#     - { name: Checkout, steps: Add an item to the basket and pay with the test card }
+#   agent: { type: codex, timeoutMinutes: 30, model: "" }   # the only keys allowed here; the rest comes from agent
+
+# Optional: comments on the pull request that tag @claude (from you) are applied as a fix run.
+# prComments:
+#   fromOthers: false   # default. true also acts on teammates' comments. Trust note: they then direct an agent
+#                       # that pushes under your account, so enable it only for a team you trust
 
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
 # A custom prompt must include {{ticket.attachments}} for the agent to see the ticket's downloaded attachments.

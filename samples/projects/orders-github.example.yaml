@@ -1,8 +1,9 @@
 # Example Symphonist project that uses GitHub for everything: a GitHub Projects board, a GitHub repository and GitHub
 # Actions. Copy to ~/.symphonist/projects/<anything>.yaml (or $SYMPHONIST_HOME/projects/) and replace the placeholder
-# values. Field names are camelCase. Invalid files are logged and skipped by the host. See orders.example.yaml for the
-# Jira + Bitbucket version and for the fields not repeated here (review, prompts, ...). The three slots can be mixed
-# (for example Jira with a GitHub repo); build.type: github-actions needs repo.type: github.
+# values, or use the dashboard's Add project. Field names are camelCase. Invalid files are logged and skipped by the
+# host. See orders.example.yaml for the Jira + Bitbucket version and for the fields not repeated here (review,
+# prompts, ...). The three slots can be mixed (for example Jira with a GitHub repo); build.type: github-actions needs
+# repo.type: github.
 
 id: orders-github               # unique project id; used in CLI commands (symphonist show orders-github orders-123)
 name: Orders (Acme, GitHub)     # display name (defaults to id)
@@ -58,6 +59,11 @@ agent:
 
 # Failed attempts per stage before the ticket is Blocked (see: symphonist unblock). Default: 3.
 # maxAttemptsPerStage: 3
+
+# Comments starting with this ask Symphonist to rerun a stage, on the ticket or the pull request. An "@" and a name of
+# letters, digits, "-" and "_" (at most 39 characters), matched without regard to case. Keep the quotes: a bare "@"
+# is not valid YAML. Default: "@claude".
+# commentMarker: "@claude"
 
 # Stages run in order; the last one must be kind "done". The status names below must exist as options of the board's
 # status field (tracker.statusField). The fields are explained in orders.example.yaml.

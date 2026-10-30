@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Symphonist.Core.Risk;
 
@@ -38,6 +39,35 @@ public static class StatusTable
 
         return sb.ToString();
     }
+
+    /// <summary>Providers paused by a usage limit, with when each resets or (no reset known) is next tried; local times.</summary>
+    public static string RenderLimits(IEnumerable<ProviderPauseDto> pauses) =>
+        Table(["PROVIDER", "KEY", "SINCE", "RESETS / NEXT TRY"], pauses.Select(p => new[]
+        {
+            p.Provider, p.Key, Local(p.Since),
+            p.ResetsAt is { } resets ? $"resets {Local(resets)}"
+            : p.NextProbeAt is { } next ? $"next try {Local(next)}"
+            : "",
+        }));
+
+    /// <summary>What Release now would ship: the ready tickets, the tickets shipping along, and commits from outside Symphonist.</summary>
+    public static string RenderReleasePreview(ReleasePreviewDto preview)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(preview.Ready.Count == 0 ? "Ready to release: none" : $"Ready to release: {string.Join(", ", preview.Ready.Select(Clean))}");
+        if (preview.AlsoShipped.Count > 0)
+        {
+            sb.AppendLine("Also ships:");
+            foreach (var a in preview.AlsoShipped)
+                sb.AppendLine($"  {Clean(a.Key)}  at {Clean(a.StageId)} ({Clean(a.Status).ToLowerInvariant()}), "
+                    + (a.Finishes ? "finishes with this release" : "stays where it is"));
+        }
+        if (preview.OutsideCommits > 0)
+            sb.AppendLine($"Also ships: {preview.OutsideCommits} commit(s) from outside Symphonist");
+        return sb.ToString();
+    }
+
+    private static string Local(DateTimeOffset at) => at.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
     private static IEnumerable<StageAgreementDto> Agreement(ProjectDto p) =>
         (p.Agreement ?? []).Where(a => a.Decided > 0 || a.AutoApproved > 0);

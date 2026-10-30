@@ -21,6 +21,20 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
 
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct) => inner.AgentCostsAsync(ct);
 
+    public Task AddTouchAsync(TouchRecord touch, CancellationToken ct) => inner.AddTouchAsync(touch, ct);
+
+    public Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct) => inner.TouchesAsync(projectId, since, ct);
+
+    public Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct) => inner.GateDecisionsAsync(projectId, since, ct);
+
+    public Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct) => inner.GateReviewsSinceAsync(projectId, since, ct);
+
+    public Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct) => inner.ProviderPausesAsync(ct);
+
+    public Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct) => inner.SaveProviderPauseAsync(pause, ct);
+
+    public Task RemoveProviderPauseAsync(string key, CancellationToken ct) => inner.RemoveProviderPauseAsync(key, ct);
+
     public async Task SaveAsync(Ticket ticket, CancellationToken ct)
     {
         await inner.SaveAsync(ticket, ct);
@@ -44,6 +58,16 @@ public sealed class NotifyingTicketStore(ITicketStore inner, BoardNotifier notif
         await inner.AddGateReviewAsync(review, ct);
         notifier.Notify();
     }
+
+    public async Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        await inner.AddEvidenceAsync(record, ct);
+        notifier.Notify();
+    }
+
+    public Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct) => inner.EvidenceAsync(ticketId, ct);
+
+    public Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct) => inner.EvidenceIssuesAsync(ct);
 
     public async Task AddGateDecisionAsync(GateDecisionRecord decision, CancellationToken ct)
     {

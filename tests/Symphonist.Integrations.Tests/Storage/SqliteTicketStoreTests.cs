@@ -233,6 +233,47 @@ public sealed class SqliteTicketStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Existing_tickets_load_as_work_kind()
+    {
+        var path = Path.Combine(_dir, "old.db");
+        await using (var db = new SymphonistDbContext(new DbContextOptionsBuilder<SymphonistDbContext>().UseSqlite($"Data Source={path}").Options))
+        {
+            await db.GetService<IMigrator>().MigrateAsync("20261029053802_Touches");
+            // The entity now has release columns the old schema lacks, so insert with raw SQL.
+            await db.Database.OpenConnectionAsync();
+            await using var cmd = (SqliteCommand)db.Database.GetDbConnection().CreateCommand();
+            cmd.CommandText = "INSERT INTO Tickets (Id, ProjectId, Key, Title, StageId, Status, Attempts, CreatedAt, UpdatedAt, " +
+                "ReviewDue, EvidenceDue, MergeHolds) VALUES ($id, 'orders', 'ORD-1', 'old', 'release', 'Pending', 0, $n, $n, 0, 0, 0)";
+            cmd.Parameters.AddWithValue("$id", Guid.NewGuid().ToString().ToUpperInvariant());
+            cmd.Parameters.AddWithValue("$n", new DateTimeOffsetToBinaryConverter().ConvertToProvider(Now));
+            await cmd.ExecuteNonQueryAsync();
+        }
+        SqliteConnection.ClearAllPools();
+
+        var found = await new SqliteTicketStore(path).FindAsync("orders", "ORD-1", default);
+
+        Assert.NotNull(found);
+        Assert.Equal(TicketKind.Work, found.Kind);
+        Assert.Null(found.ReleaseTicketId);
+        Assert.Null(found.ReleaseSummary);
+    }
+
+    [Fact]
+    public async Task Release_fields_round_trip()
+    {
+        var release = NewTicket("_release-1", "release", StageStatus.Pending);
+        release.Kind = TicketKind.Release;
+        release.ReleaseSummary = "Tickets:\n- ORD-1: t";
+        var member = NewTicket("ORD-1", "release", StageStatus.Pending);
+        member.ReleaseTicketId = release.Id;
+        await _store.SaveAsync(release, default);
+        await _store.SaveAsync(member, default);
+
+        Assert.Equivalent(release, await _store.FindAsync("orders", "_release-1", default), strict: true);
+        Assert.Equivalent(member, await _store.FindAsync("orders", "ORD-1", default), strict: true);
+    }
+
+    [Fact]
     public async Task Concurrent_saves_do_not_fail()
     {
         var tickets = Enumerable.Range(0, 20).Select(i => NewTicket("K" + i, "plan", StageStatus.Pending)).ToList();
@@ -469,5 +510,144 @@ public sealed class SqliteTicketStoreTests : IDisposable
         await _store.AddGateReviewAsync(Review(gone, "plan", Now, RiskLevel.Low), default);
         Assert.Null(Assert.Single(await _store.GateReviewsAsync(gone.Id, default)).Decision);
         Assert.Equal(1, (await _store.ReviewAgreementAsync(null, default)).Sum(a => a.Decided));
+    }
+
+    private static EvidenceRecord Ev(Ticket t, DateTimeOffset at, bool issues = false, string? report = "{\"a\":1}") =>
+        new(t.Id, t.ProjectId, "implement", Now, at, "abc123", report, issues, null, ["a.png", "b/c.png"], Posted: true);
+
+    [Fact]
+    public async Task Evidence_records_round_trip_newest_first()
+    {
+        var t = NewTicket("E1", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(t, default);
+        await _store.AddEvidenceAsync(Ev(t, Now.AddMinutes(1)) with { Head = "old" }, default);
+        await _store.AddEvidenceAsync(Ev(t, Now.AddMinutes(2)) with { Head = "new", Error = "boom" }, default);
+
+        var all = await _store.EvidenceAsync(t.Id, default);
+
+        Assert.Equal(["new", "old"], all.Select(x => x.Head));
+        Assert.Equal(["a.png", "b/c.png"], all[0].Screenshots);
+        Assert.Equal("{\"a\":1}", all[0].ReportJson);
+        Assert.Equal((Now, Now.AddMinutes(2), "boom", true), (all[0].WaitingSince, all[0].At, all[0].Error, all[0].Posted));
+    }
+
+    [Fact]
+    public async Task Evidence_issues_reports_latest_record_per_ticket()
+    {
+        var a = NewTicket("E2", "implement", StageStatus.AwaitingApproval);
+        var b = NewTicket("E3", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(a, default);
+        await _store.SaveAsync(b, default);
+        await _store.AddEvidenceAsync(Ev(a, Now.AddMinutes(1), issues: true), default);
+        await _store.AddEvidenceAsync(Ev(a, Now.AddMinutes(2), issues: false), default);
+        await _store.AddEvidenceAsync(Ev(b, Now.AddMinutes(1), issues: true), default);
+
+        var issues = await _store.EvidenceIssuesAsync(default);
+
+        Assert.False(issues[a.Id]);
+        Assert.True(issues[b.Id]);
+        Assert.Equal(2, issues.Count);
+    }
+
+    [Fact]
+    public async Task Delete_removes_evidence()
+    {
+        var gone = NewTicket("E4", "implement", StageStatus.Pending);
+        var kept = NewTicket("E5", "implement", StageStatus.Pending);
+        await _store.SaveAsync(gone, default);
+        await _store.SaveAsync(kept, default);
+        await _store.AddEvidenceAsync(Ev(gone, Now), default);
+        await _store.AddEvidenceAsync(Ev(kept, Now), default);
+
+        Assert.True(await _store.DeleteAsync("orders", "E4", default));
+
+        Assert.Empty(await _store.EvidenceAsync(gone.Id, default));
+        Assert.Single(await _store.EvidenceAsync(kept.Id, default));
+    }
+
+    [Fact]
+    public async Task New_ticket_fields_persist()
+    {
+        var t = NewTicket("E6", "implement", StageStatus.AwaitingApproval);
+        t.EvidenceDue = true;
+        t.PrCommentsHandledAt = new DateTimeOffset(2026, 10, 21, 12, 0, 0, 123, TimeSpan.Zero);
+        t.PrFeedbackJson = "[{\"id\":\"issue:1\"}]";
+        await _store.SaveAsync(t, default);
+
+        var found = await _store.FindAsync("orders", "E6", default);
+
+        Assert.True(found!.EvidenceDue);
+        Assert.Equal(t.PrCommentsHandledAt.Value.Ticks, found.PrCommentsHandledAt!.Value.Ticks);
+        Assert.Equal(t.PrFeedbackJson, found.PrFeedbackJson);
+    }
+
+    [Fact]
+    public async Task Agent_run_is_evidence_persists()
+    {
+        var t = NewTicket("E7", "implement", StageStatus.AwaitingApproval);
+        await _store.SaveAsync(t, default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "implement", Now, TimeSpan.FromSeconds(3), true, 0.2m, null, "r.json", "s", IsEvidence: true), default);
+        await _store.AddAgentRunAsync(new AgentRunRecord(t.Id, "implement", Now.AddSeconds(5), TimeSpan.FromSeconds(3), true, null, null, "r2.json"), default);
+
+        var runs = await _store.AgentRunsAsync(t.Id, default);
+
+        Assert.Equal([true, false], runs.Select(r => r.IsEvidence));
+        Assert.False(runs[0].IsReview);
+    }
+
+    [Fact]
+    public async Task Provider_pauses_round_trip_and_upsert_by_key()
+    {
+        await _store.SaveProviderPauseAsync(new ProviderPause("claude-code", Now, Now.AddHours(2), null), default);
+        await _store.SaveProviderPauseAsync(new ProviderPause("codex:chatgpt", Now, null, Now.AddMinutes(30)), default);
+        await _store.SaveProviderPauseAsync(new ProviderPause("claude-code", Now, null, Now.AddMinutes(45)), default);
+
+        var pauses = (await _store.ProviderPausesAsync(default)).OrderBy(p => p.Key).ToList();
+        Assert.Equal(
+            [new ProviderPause("claude-code", Now, null, Now.AddMinutes(45)),
+             new ProviderPause("codex:chatgpt", Now, null, Now.AddMinutes(30))], pauses);
+
+        await _store.RemoveProviderPauseAsync("claude-code", default);
+        await _store.RemoveProviderPauseAsync("missing", default);
+        Assert.Equal(["codex:chatgpt"], (await _store.ProviderPausesAsync(default)).Select(p => p.Key));
+    }
+
+    [Fact]
+    public async Task Touches_filter_by_project_and_time_and_go_with_the_ticket()
+    {
+        var t = new Ticket { Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-9", StageId = "plan", Title = "x" };
+        await _store.SaveAsync(t, default);
+        await _store.AddTouchAsync(new TouchRecord(t.Id, "orders", "implement", TouchKind.SendBack, Now), default);
+        await _store.AddTouchAsync(new TouchRecord(t.Id, "orders", "implement", TouchKind.Unblock, Now.AddDays(-3)), default);
+        await _store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "billing", "plan", TouchKind.SendBack, Now), default);
+
+        Assert.Equal(2, (await _store.TouchesAsync(null, Now.AddDays(-1), default)).Count);
+        Assert.Equal(3, (await _store.TouchesAsync(null, Now.AddDays(-4), default)).Count);
+        var orders = await _store.TouchesAsync("orders", Now.AddDays(-1), default);
+        Assert.Equal([new TouchRecord(t.Id, "orders", "implement", TouchKind.SendBack, Now)], orders);
+
+        Assert.True(await _store.DeleteAsync("orders", "ORD-9", default));
+        Assert.Empty(await _store.TouchesAsync("orders", Now.AddDays(-4), default));
+        Assert.Single(await _store.TouchesAsync(null, Now.AddDays(-4), default));
+    }
+
+    [Fact]
+    public async Task Gate_decisions_and_recent_reviews_filter_by_project_and_time()
+    {
+        var t = new Ticket { Id = Guid.NewGuid(), ProjectId = "orders", Key = "ORD-8", StageId = "plan", Title = "x" };
+        await _store.SaveAsync(t, default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now.AddDays(-9), GateDecision.Approved, false, Now.AddDays(-8)), default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "orders", "plan", Now.AddDays(-1), GateDecision.SentBack, false, Now), default);
+        await _store.AddGateDecisionAsync(new GateDecisionRecord(t.Id, "billing", "plan", Now.AddDays(-1), GateDecision.Approved, true, Now), default);
+        await _store.AddGateReviewAsync(Review(t, "plan", Now.AddDays(-40), RiskLevel.Low), default);
+        await _store.AddGateReviewAsync(Review(t, "plan", Now.AddDays(-9), RiskLevel.High), default);
+
+        Assert.Equal(2, (await _store.GateDecisionsAsync(null, Now.AddDays(-1), default)).Count);
+        var orders = Assert.Single(await _store.GateDecisionsAsync("orders", Now.AddDays(-1), default));
+        Assert.Equal(GateDecision.SentBack, orders.Decision);
+        Assert.Equal(3, (await _store.GateDecisionsAsync(null, Now.AddDays(-10), default)).Count);
+
+        var reviews = await _store.GateReviewsSinceAsync(null, Now.AddDays(-1), default);
+        Assert.Equal([Now.AddDays(-9)], reviews.Select(r => r.WaitingSince)); // the 40-day-old round is more than 30 days before
     }
 }

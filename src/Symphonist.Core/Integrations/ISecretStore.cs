@@ -9,4 +9,7 @@ public interface ISecretStore
     void Set(string name, string value);
 
     void Remove(string name);
+
+    /// <summary>True when the value comes from outside the store (e.g. an environment variable) and overrides it.</summary>
+    bool IsOverridden(string name) => false;
 }

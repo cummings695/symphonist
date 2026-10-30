@@ -19,6 +19,22 @@ public class SecretStoreTests
     }
 
     [Fact]
+    public void Env_override_is_reported()
+    {
+        var store = new CredentialManagerSecretStore();
+        Environment.SetEnvironmentVariable("SYMPHONIST_SECRET_JIRA_OVERRIDE", "abc");
+        try
+        {
+            Assert.True(store.IsOverridden("jira-override"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SYMPHONIST_SECRET_JIRA_OVERRIDE", null);
+        }
+        Assert.False(store.IsOverridden("jira-override"));
+    }
+
+    [Fact]
     public void Env_var_name_is_upper_case_with_underscores()
     {
         Assert.Equal("SYMPHONIST_SECRET_CLAUDE_CODE_TOKEN", CredentialManagerSecretStore.EnvironmentVariable("claude-code-token"));

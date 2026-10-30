@@ -1,0 +1,191 @@
+@implements IDisposable
+@inject Orchestrator Orchestrator
+@inject DashboardChrome Chrome
+@inject ILogger<ReleaseBanner> Log
+
+@* A project's release state: the tickets ready to release with Release now, or the open release with its PR link.
+   Release now first shows what would ship (including what else rides along) and only a Confirm starts it; the
+   release ticket then waits at its own gate, which is the approval that merges it. *@
+@if (Project.Release is { } release && (release.OpenReleaseKey is not null || release.ReadyKeys.Count > 0 || preview is not null))
+{
+    <div class="release-banner" data-release-banner="@Project.Id">
+        <p class="release-line">
+            @if (ShowName)
+            {
+                <strong>@Project.Name</strong>
+            }
+            @if (release.OpenReleaseKey is { } openKey)
+            {
+                <span>Release <a href="@TicketHref(openKey)" data-release-ticket>@openKey</a> is open</span>
+                @if (release.OpenReleasePrUrl is { } prUrl)
+                {
+                    <a href="@prUrl" target="_blank" rel="noopener noreferrer" data-release-pr>Pull request<span aria-hidden="true"> ↗</span></a>
+                }
+                @if (release.ReadyKeys.Count > 0)
+                {
+                    <span class="release-note">@Tickets(release.ReadyKeys.Count) ready for the next release</span>
+                }
+            }
+            else
+            {
+                <span>@Tickets(release.ReadyKeys.Count) ready to release</span>
+                <button type="button" class="button button-primary" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                        aria-label="@($"Release now: {Project.Name}")" @onclick="ShowPreviewAsync">Release now</button>
+            }
+        </p>
+        @if (preview is not null)
+        {
+            <div class="release-preview" data-release-preview role="group" aria-label="@($"What {Project.Name} would release")">
+                @if (preview.Unavailable is { Length: > 0 } unavailable)
+                {
+                    <p class="release-unavailable" data-release-unavailable>@unavailable</p>
+                }
+                else
+                {
+                    <p data-release-ready><strong>Ships:</strong> @(preview.Ready.Count == 0 ? "no ready tickets" : string.Join(", ", preview.Ready))</p>
+                    @if (preview.AlsoShipped.Count > 0)
+                    {
+                        <div data-release-also>
+                            <p><strong>Also ships</strong> (on the main branch, not yet in @(preview.ProductionBranch ?? "production")):</p>
+                            <ul>
+                                @foreach (var also in preview.AlsoShipped)
+                                {
+                                    <li data-also-shipped="@also.Key"><strong>@also.Key</strong>, at @also.StageId (@also.Status.ToString().ToLowerInvariant()):
+                                        @(also.Finishes ? "finishes with this release" : "stays where it is")</li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                    @if (preview.OutsideCommits > 0)
+                    {
+                        <p data-release-outside>@preview.OutsideCommits commit(s) from outside Symphonist also ship.</p>
+                    }
+                    <p class="release-note">Confirming creates the release; it then waits for your approval before it merges.</p>
+                }
+                @if (refusal is not null)
+                {
+                    <p class="release-refusal" data-release-refusal role="alert">@refusal</p>
+                }
+                <div class="release-actions">
+                    @if (preview.Unavailable is null)
+                    {
+                        <button type="button" class="button button-primary" disabled="@busy" aria-busy="@(busy ? "true" : null)"
+                                @onclick="ConfirmAsync">Confirm</button>
+                    }
+                    <button type="button" class="button button-quiet" disabled="@busy" @onclick="Close">@(preview.Unavailable is null ? "Cancel" : "Close")</button>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private readonly CancellationTokenSource disposed = new();
+    private ReleasePreview? preview;
+    private string? refusal;
+    private bool busy;
+
+    [Parameter, EditorRequired] public BoardProject Project { get; set; } = default!;
+
+    /// <summary>Names the project in the line (the all-projects board shows one banner per project).</summary>
+    [Parameter] public bool ShowName { get; set; }
+
+    /// <summary>Called after a release started, so the board reloads.</summary>
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string TicketHref(string key) => $"/tickets/{Uri.EscapeDataString(Project.Id)}/{Uri.EscapeDataString(key)}";
+
+    private static string Tickets(int count) => count == 1 ? "1 ticket" : $"{count} tickets";
+
+    private async Task ShowPreviewAsync()
+    {
+        refusal = null;
+        await LoadPreviewAsync();
+    }
+
+    /// <summary>Loads what Release now would ship; a failure is shown in place of the preview.</summary>
+    private async Task LoadPreviewAsync()
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            preview = await Orchestrator.PreviewReleaseAsync(Project.Id, disposed.Token);
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Previewing the release of {Project} from the dashboard failed", Project.Id);
+            Chrome.ShowMessage($"Could not preview the release of {Project.Name}: {e.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    /// <summary>Starts exactly the release that was shown; when it changed meanwhile the host refuses and the preview is reloaded.</summary>
+    private async Task ConfirmAsync()
+    {
+        if (busy || preview is not { Unavailable: null } shown) return;
+        busy = true;
+        var started = false;
+        try
+        {
+            var result = await Orchestrator.ReleaseNowAsync(Project.Id, shown, disposed.Token);
+            if (disposed.IsCancellationRequested) return;
+            if (result.Started)
+            {
+                started = true;
+                Chrome.ShowMessage($"{result.Message}; it waits for your approval");
+                preview = null;
+                refusal = null;
+            }
+            else
+            {
+                refusal = result.Message;
+                Chrome.ShowMessage($"Release not started: {result.Message}");
+            }
+        }
+        catch (OperationCanceledException) when (disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (KeyNotFoundException e)
+        {
+            refusal = e.Message; // the project was removed meanwhile
+            Chrome.ShowMessage(e.Message);
+        }
+        catch (Exception e)
+        {
+            Log.LogError(e, "Releasing {Project} from the dashboard failed", Project.Id);
+            refusal = $"Release failed: {e.Message}";
+            Chrome.ShowMessage(refusal);
+        }
+        finally
+        {
+            busy = false;
+        }
+
+        if (started) await OnChanged.InvokeAsync();
+        else if (!disposed.IsCancellationRequested) await ReloadAfterRefusalAsync();
+    }
+
+    private async Task ReloadAfterRefusalAsync()
+    {
+        var message = refusal;
+        await LoadPreviewAsync();
+        refusal = message;
+    }
+
+    private void Close()
+    {
+        preview = null;
+        refusal = null;
+    }
+
+    public void Dispose() => disposed.Cancel();
+}

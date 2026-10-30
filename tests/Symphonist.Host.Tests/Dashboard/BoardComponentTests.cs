@@ -30,6 +30,8 @@ public sealed class BoardComponentTests : IDisposable
     private readonly FakeTimeProvider time = new(Now);
     private readonly BoardNotifier notifier;
     private readonly ProjectRegistry registry;
+    private readonly ProviderLimits limits;
+    private readonly FakeGitWorkspace git = new();
     private readonly FakeIntegrationFactory integrations = new(
         new ProjectIntegrations(new FakeTracker(), new FakeSourceControl(), new FakeBuildWatcher()));
 
@@ -39,9 +41,11 @@ public sealed class BoardComponentTests : IDisposable
         home.WriteProject("billing.yaml", TestHome.ProjectYaml("billing", TestHome.HostAgent));
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
         notifier = new BoardNotifier(time);
+        limits = new ProviderLimits(store, time);
         var orchestrator = new Orchestrator(registry, store, integrations,
-            new StageExecutor(new FakeGitWorkspace(), new FakeAgentRunner(), store, time),
-            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), time,
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = new FakeAgentRunner() }), store, time),
+            new GateReviewer(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time),
+            new EvidenceRunner(new FakeGitWorkspace(), new AgentRunners(new Dictionary<string, IAgentRunner>()), store, time), limits, time,
             new OrchestratorOptions(TimeSpan.FromMinutes(2), 1, TickAfterCommands: false), NullLogger<Orchestrator>.Instance);
 
         ctx.Services.AddSingleton<TimeProvider>(time);
@@ -49,6 +53,7 @@ public sealed class BoardComponentTests : IDisposable
         ctx.Services.AddSingleton(registry);
         ctx.Services.AddSingleton<ITicketStore>(store);
         ctx.Services.AddSingleton(orchestrator);
+        ctx.Services.AddSingleton(limits);
         ctx.Services.AddSingleton<BoardQuery>();
         ctx.Services.AddScoped<DashboardChrome>();
     }
@@ -81,6 +86,16 @@ public sealed class BoardComponentTests : IDisposable
         await Seed("BIL-1", "plan", StageStatus.AwaitingApproval, "billing");
     }
 
+    /// <summary>Gives "orders" a release stage and <paramref name="ready"/> tickets ready to release (merged as merge-{key}).</summary>
+    private async Task ReleaseProject(params string[] ready)
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        registry.Reload();
+        git.FirstParentCommits = ready.Select(k => $"merge-{k}").ToList();
+        foreach (var key in ready)
+            await Seed(key, "release", StageStatus.Pending, with: t => t.MergeCommit = $"merge-{key}");
+    }
+
     private IRenderedComponent<Board> RenderBoard(string uri = "/")
     {
         ctx.Services.GetRequiredService<NavigationManager>().NavigateTo(uri);
@@ -93,6 +108,113 @@ public sealed class BoardComponentTests : IDisposable
 
     /// <summary>The status line now belongs to the layout: what the board reported to it.</summary>
     private string StatusLine() => ctx.Services.GetRequiredService<DashboardChrome>().Message ?? "";
+
+    [Fact]
+    public async Task Banner_shows_ready_count_and_release_now()
+    {
+        await ReleaseProject("ORD-1", "ORD-2", "ORD-3");
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-release-banner='orders']");
+        Assert.Contains("3 tickets ready to release", banner.TextContent);
+        Assert.Contains(banner.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Release now");
+        Assert.DoesNotContain(cut.FindAll("[data-release-banner]"), e => e.GetAttribute("data-release-banner") != "orders");
+    }
+
+    [Fact]
+    public async Task Banner_shows_open_release_with_pr_link_instead()
+    {
+        await ReleaseProject("ORD-2");
+        await Seed("_release-1", "release", StageStatus.AwaitingApproval, title: "Release 1: ORD-1", with: t =>
+        {
+            t.Kind = TicketKind.Release;
+            t.ReleasePullRequestId = 7;
+        });
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-release-banner='orders']");
+        Assert.Contains("_release-1", banner.TextContent);
+        Assert.DoesNotContain("Release now", banner.TextContent);
+        Assert.Equal("https://bitbucket.org/acme/orders/pull-requests/7",
+            banner.QuerySelector("a[data-release-pr]")?.GetAttribute("href"));
+        Assert.Equal("/tickets/orders/_release-1", banner.QuerySelector("a[data-release-ticket]")?.GetAttribute("href"));
+    }
+
+    [Fact]
+    public async Task Filtered_board_shows_the_banner_in_the_project_heading()
+    {
+        await ReleaseProject("ORD-1");
+
+        var cut = RenderBoard("/?project=orders");
+
+        Assert.Contains("1 ticket ready to release", cut.Find(".project [data-release-banner='orders']").TextContent);
+    }
+
+    [Fact]
+    public async Task Release_now_shows_preview_then_confirm_starts()
+    {
+        await ReleaseProject("ORD-1");
+        await Seed("ORD-9", "build", StageStatus.Pending, with: t => t.MergeCommit = "merge-ORD-9");
+        git.FirstParentCommits = ["merge-ORD-1", "merge-ORD-9", "stranger"];
+        var cut = RenderBoard();
+
+        cut.Find("[data-release-banner='orders'] button").Click();
+
+        var preview = cut.Find("[data-release-preview]");
+        Assert.Contains("ORD-1", preview.QuerySelector("[data-release-ready]")!.TextContent);
+        Assert.Contains("ORD-9", preview.QuerySelector("[data-release-also]")!.TextContent);
+        Assert.Contains("1 commit(s) from outside Symphonist", preview.TextContent);
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+
+        preview.QuerySelectorAll("button").Single(b => b.TextContent.Trim() == "Confirm").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            var release = Assert.Single(store.Tickets, t => t.Kind == TicketKind.Release);
+            Assert.Equal("_release-1", release.Key);
+            Assert.Contains("_release-1", StatusLine());
+            Assert.Empty(cut.FindAll("[data-release-preview]"));
+        });
+    }
+
+    [Fact]
+    public async Task Release_now_with_nothing_to_release_shows_why_instead_of_a_button()
+    {
+        await ReleaseProject("ORD-1");
+        var cut = RenderBoard();
+        git.FirstParentCommits = [];
+        var only = store.Single("ORD-1");
+        only.Status = StageStatus.Running; // no longer ready, and nothing new on main
+        await store.SaveAsync(only, default);
+
+        cut.Find("[data-release-banner='orders'] button").Click();
+
+        var preview = cut.Find("[data-release-preview]");
+        Assert.Contains("nothing to release", preview.TextContent);
+        Assert.DoesNotContain(preview.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Confirm");
+    }
+
+    [Fact]
+    public async Task Changed_preview_shows_the_refusal_and_reloads()
+    {
+        await ReleaseProject("ORD-1");
+        var cut = RenderBoard();
+        cut.Find("[data-release-banner='orders'] button").Click();
+        Assert.DoesNotContain("ORD-2", cut.Find("[data-release-ready]").TextContent);
+        await Seed("ORD-2", "release", StageStatus.Pending, with: t => t.MergeCommit = "merge-ORD-2");
+        git.FirstParentCommits = ["merge-ORD-1", "merge-ORD-2"];
+
+        cut.Find("[data-release-preview] button.button-primary").Click();
+
+        cut.WaitForAssertion(() =>
+        {
+            Assert.Contains("the release changed; review it again", cut.Find("[data-release-refusal]").TextContent);
+            Assert.Contains("ORD-2", cut.Find("[data-release-ready]").TextContent);
+        });
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+    }
 
     [Fact]
     public async Task Renders_columns_and_cards()
@@ -414,6 +536,65 @@ public sealed class BoardComponentTests : IDisposable
     }
 
     [Fact]
+    public async Task Heading_shows_touch_strip_with_link_to_stats()
+    {
+        // Now is Wednesday 2026-10-21 12:00 UTC; this week began Monday the 19th.
+        for (var i = 0; i < 2; i++)
+            await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "implement", TouchKind.SendBack, Now.AddHours(-i - 1)), default);
+        await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "plan", TouchKind.Unblock, Now.AddHours(-3)), default);
+        for (var i = 0; i < 9; i++)
+            await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "orders", "implement", TouchKind.SendBack, Now.AddDays(-7)), default);
+        await store.AddTouchAsync(new TouchRecord(Guid.NewGuid(), "billing", "plan", TouchKind.SendBack, Now.AddHours(-1)), default); // another project
+        for (var i = 0; i < 11; i++)
+        {
+            var id = Guid.NewGuid();
+            var since = Now.AddHours(-20);
+            var auto = i < 6;
+            await store.AddGateReviewAsync(new GateReview(id, "orders", "implement", since, since, ReviewMode.Shadow,
+                GatePolicy.Human, new GateVerdict(i == 6 ? RiskLevel.High : RiskLevel.Low, "s", [], [], [])), default);
+            await store.AddGateDecisionAsync(new GateDecisionRecord(id, "orders", "implement", since, GateDecision.Approved, auto, Now.AddHours(-2)), default);
+        }
+
+        var cut = RenderBoard("/?project=orders");
+
+        var strip = cut.Find("[data-project='orders'] [data-touches]");
+        Assert.Equal("Touches this week: 4 (last week 9) · send-backs 2 · unblocks 1 · overrules 1 · auto-approved 6 of 11 gates Stats",
+            string.Join(' ', strip.TextContent.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)));
+        Assert.Equal("/stats?project=orders", strip.QuerySelector("a")!.GetAttribute("href"));
+        Assert.Contains("implement: 11 send-backs, 0 unblocks, 1 overrules", strip.GetAttribute("title"));
+    }
+
+    [Fact]
+    public async Task Heading_shows_usage_pause_with_reset_and_resume_button()
+    {
+        await limits.PauseAsync("claude-code", new UsageLimit(Now.AddHours(1)), default);
+        await limits.PauseAsync("codex:chatgpt", new UsageLimit(null), default); // no orders job runs on Codex
+        var cut = RenderBoard("/?project=orders");
+
+        var pause = cut.Find("[data-project='orders'] [data-usage-pause='claude-code']");
+        Assert.Contains("Paused: Claude usage limit, resets 13:00", pause.TextContent);
+        Assert.Empty(cut.FindAll("[data-usage-pause='codex:chatgpt']"));
+        Assert.Empty(RenderBoard("/").FindAll("[data-usage-pause]")); // the filtered board's heading only
+
+        cut = RenderBoard("/?project=orders");
+        cut.Find("[data-usage-pause='claude-code'] button").Click();
+
+        cut.WaitForAssertion(() => Assert.Empty(cut.FindAll("[data-usage-pause]")));
+        Assert.Equal(["codex:chatgpt"], limits.Pauses.Select(p => p.Key));
+        Assert.Contains("Claude resumed", StatusLine());
+    }
+
+    [Fact]
+    public async Task Heading_shows_an_unknown_reset_as_retrying()
+    {
+        await limits.PauseAsync("claude-code", new UsageLimit(null), default);
+
+        var pause = RenderBoard("/?project=orders").Find("[data-usage-pause='claude-code']");
+
+        Assert.Contains("Paused: Claude usage limit, trying again every 30 minutes", pause.TextContent);
+    }
+
+    [Fact]
     public void Host_mode_project_is_marked()
     {
         Assert.Contains("host mode", RenderBoard("/?project=billing").Find("[data-project='billing']").TextContent);
@@ -486,6 +667,53 @@ public sealed class BoardComponentTests : IDisposable
         Assert.Contains(SymphonistPaths.Resolve("projects"), cut.Find(".setup-hint").TextContent);
         Assert.Equal("All projects", cut.Find("h1").TextContent.Trim()); // the focus target stays
     }
+
+    [Fact]
+    public void Load_errors_show_as_banner_text()
+    {
+        home.WriteProject("bad.yaml", "id: <b>x</b>\n");
+        registry.Reload();
+
+        var cut = RenderBoard();
+
+        var banner = cut.Find("[data-load-error='bad.yaml']");
+        Assert.StartsWith("bad.yaml skipped: ", banner.TextContent.Trim());
+        Assert.Contains("invalid id '<b>x</b>'", banner.TextContent);
+        Assert.Empty(banner.QuerySelectorAll("b"));
+    }
+
+    [Fact]
+    public void Reload_button_reloads_projects_and_reports_skipped_files()
+    {
+        var cut = RenderBoard();
+        Assert.Empty(cut.FindAll("[data-load-error]"));
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Reload projects").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("Reloaded 3 project(s)", StatusLine()));
+        Assert.Contains("shop", registry.Projects.Select(p => p.Id));
+
+        home.WriteProject("bad.yaml", "id: bad\n");
+        cut.FindAll("button").Single(b => b.TextContent.Trim() == "Reload projects").Click();
+
+        cut.WaitForAssertion(() => Assert.Equal("1 project file(s) skipped", StatusLine()));
+        cut.WaitForAssertion(() => Assert.Contains("missing required", cut.Find("[data-load-error='bad.yaml']").TextContent));
+    }
+
+    [Fact]
+    public void Board_links_to_add_project_and_project_setup()
+    {
+        var cut = RenderBoard();
+        Assert.Contains(cut.FindAll("a"), a => a.GetAttribute("href") == "/projects/new" && a.TextContent.Trim() == "Add project");
+        Assert.Empty(cut.FindAll("a[aria-label^='Set up']"));
+
+        cut = RenderBoard("/?project=orders");
+        var setup = cut.Find("a[aria-label='Set up Project orders']");
+        Assert.Equal("/projects/orders/setup", setup.GetAttribute("href"));
+        Assert.Equal("Setup", setup.TextContent.Trim());
+    }
+
     /// <summary>The browser side of folding: at phone width, with <paramref name="stored"/> in localStorage.</summary>
     private BunitJSModuleInterop SetupFolds(Dictionary<string, bool>? stored = null)
     {
@@ -584,10 +812,42 @@ public sealed class BoardComponentTests : IDisposable
         cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("[data-column='Triage'] .column-header button")));
         Assert.Equal("Plan", cut.Find("[data-column='Plan'] .column-title").TextContent.Trim());
 
-        Toggle(cut, "Triage").Click(); // empty, but still a lane's width on a desktop
-        Assert.Contains("collapsed", Column(cut, "Triage").ClassList);
-        Assert.Equal(new Dictionary<string, bool> { ["Triage"] = true },
+        Assert.Contains("collapsed", Column(cut, "Triage").ClassList); // empty: folded by default
+        Assert.DoesNotContain("collapsed", Column(cut, "Plan").ClassList);
+
+        Toggle(cut, "Triage").Click(); // opening an empty stage lasts only for this page
+        Assert.DoesNotContain("collapsed", Column(cut, "Triage").ClassList);
+        Assert.Empty(module.Invocations["save"]);
+
+        Toggle(cut, "Plan").Click();
+        Assert.Contains("collapsed", Column(cut, "Plan").ClassList);
+        Assert.Equal(new Dictionary<string, bool> { ["Plan"] = true },
             module.Invocations["save"][^1].Arguments[0] as Dictionary<string, bool>);
+    }
+
+    [Fact]
+    public async Task Empty_stages_fold_whatever_was_stored_until_they_have_tickets()
+    {
+        await Seed("ORD-1", "plan", StageStatus.Pending);
+        var module = ctx.JSInterop.SetupModule("./js/board-folds.js");
+        module.Setup<Dictionary<string, bool>?>("load", _ => true)
+            .SetResult(new Dictionary<string, bool> { ["Triage"] = false, ["Implement"] = true, ["Done"] = false });
+        module.Setup<bool>("watchPhone", _ => true).SetResult(false);
+        module.Setup<bool>("save", _ => true).SetResult(true);
+
+        var cut = RenderBoard();
+        cut.WaitForAssertion(() => Assert.Single(module.Invocations["load"]));
+
+        Assert.Contains("collapsed", Column(cut, "Triage").ClassList); // stored open, but empty
+        Assert.Contains("collapsed", Column(cut, "Implement").ClassList);
+        Assert.DoesNotContain("collapsed", Column(cut, "Done").ClassList); // Done always follows the choice, even empty
+
+        await Seed("ORD-2", "triage", StageStatus.Pending);
+        await Seed("ORD-3", "implement", StageStatus.Pending);
+        notifier.Notify();
+        time.Advance(BoardNotifier.Window);
+        cut.WaitForAssertion(() => Assert.DoesNotContain("collapsed", Column(cut, "Triage").ClassList));
+        Assert.Contains("collapsed", Column(cut, "Implement").ClassList); // back to the stored choice
     }
 
     [Fact]
@@ -667,5 +927,34 @@ public sealed class BoardComponentTests : IDisposable
         Assert.Equal("Project billing", cut.Find("h1").TextContent.Trim());
         Assert.Empty(cut.FindAll("[data-project]"));
         Assert.Equal("billing", ctx.Services.GetRequiredService<DashboardChrome>().CurrentProject);
+    }
+
+    [Fact]
+    public async Task Card_shows_gathering_evidence_and_still_waits_on_you()
+    {
+        await Seed("ORD-9", "implement", StageStatus.AwaitingApproval, with: t => { t.EvidenceDue = true; t.PullRequestId = 7; });
+
+        var cut = RenderBoard();
+
+        var card = Card(cut, "ORD-9");
+        Assert.Equal("Gathering evidence", card.QuerySelector("[data-card-evidence]")!.TextContent.Trim());
+        Assert.DoesNotContain("Waiting on you", card.TextContent);
+        Assert.Contains(card.QuerySelectorAll("button"), b => b.TextContent.Trim() == "Approve");
+        Assert.Empty(Card(cut, "ORD-9").QuerySelectorAll("[data-evidence-issues]"));
+    }
+
+    [Fact]
+    public async Task Card_shows_evidence_issues_marker()
+    {
+        var bad = await Seed("ORD-8", "implement", StageStatus.AwaitingApproval);
+        var good = await Seed("ORD-7", "implement", StageStatus.AwaitingApproval);
+        await store.AddEvidenceAsync(new EvidenceRecord(bad.Id, "orders", "implement", Now, Now, "abc", null, true, null, [], true), default);
+        await store.AddEvidenceAsync(new EvidenceRecord(good.Id, "orders", "implement", Now, Now, "abc", null, false, null, [], true), default);
+
+        var cut = RenderBoard();
+
+        Assert.Equal("Evidence: issues found", Card(cut, "ORD-8").QuerySelector("[data-evidence-issues]")!.TextContent.Trim());
+        Assert.Empty(Card(cut, "ORD-7").QuerySelectorAll("[data-evidence-issues]"));
+        Assert.Contains("Waiting on you", Card(cut, "ORD-8").QuerySelector(".status-label")!.TextContent);
     }
 }

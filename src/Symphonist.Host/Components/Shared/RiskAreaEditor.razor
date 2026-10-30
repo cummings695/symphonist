@@ -1,0 +1,54 @@
+@using Symphonist.Core.Onboarding
+@* Parts of the code that always need you: name, what to look for, and path globs one per line. *@
+@if (Areas.Count == 0)
+{
+    <p class="hint">No risk areas yet.</p>
+}
+<ol class="risk-list">
+    @for (var i = 0; i < Areas.Count; i++)
+    {
+        var index = i;
+        var area = Areas[i];
+        var prefix = $"risk-{index}";
+        <li class="risk-row" data-risk-row @key="area">
+            <fieldset>
+                <legend>@($"Risk area {index + 1}")</legend>
+                <div class="setup-fields">
+                    <div class="setup-field">
+                        <label for="@($"{prefix}-name")">Name</label>
+                        <input id="@($"{prefix}-name")" type="text" value="@area.Name" autocomplete="off" spellcheck="false"
+                               @onchange="e => EditAsync(() => area.Name = e.Value as string ?? string.Empty)" />
+                    </div>
+                    <div class="setup-field setup-field-wide">
+                        <label for="@($"{prefix}-description")">Description</label>
+                        <textarea id="@($"{prefix}-description")" rows="2" value="@area.Description"
+                                  @onchange="e => EditAsync(() => area.Description = ProviderSectionEditor.Text(e.Value as string))"></textarea>
+                    </div>
+                    <div class="setup-field setup-field-wide">
+                        <label for="@($"{prefix}-paths")">Paths</label>
+                        <textarea id="@($"{prefix}-paths")" rows="2" spellcheck="false" placeholder="One glob per line, e.g. src/Pricing/**"
+                                  value="@string.Join("\n", area.Paths)"
+                                  @onchange="e => EditAsync(() => area.Paths = ProviderSectionEditor.Lines(e.Value as string))"></textarea>
+                    </div>
+                </div>
+                <div class="stage-actions">
+                    <button type="button" class="button button-quiet" aria-label="@($"Remove risk area {area.Name}")"
+                            @onclick="() => EditAsync(() => Areas.Remove(area))">Remove</button>
+                </div>
+            </fieldset>
+        </li>
+    }
+</ol>
+<button type="button" class="button" @onclick="() => EditAsync(() => Areas.Add(new RiskAreaForm()))">Add risk area</button>
+
+@code {
+    [Parameter, EditorRequired] public List<RiskAreaForm> Areas { get; set; } = [];
+
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private Task EditAsync(Action edit)
+    {
+        edit();
+        return OnChanged.InvokeAsync();
+    }
+}

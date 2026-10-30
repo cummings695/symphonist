@@ -78,6 +78,38 @@ public sealed class GitWorkspaceTests : IDisposable
     }
 
     [Fact]
+    public async Task Origin_url_of_non_repo_is_null()
+    {
+        var plain = Path.Combine(root, "plain");
+        Directory.CreateDirectory(plain);
+        Assert.Null(await git.OriginUrlAsync(plain, default));
+        Assert.Null(await git.OriginUrlAsync(Path.Combine(root, "missing"), default));
+
+        var noOrigin = Path.Combine(root, "no origin");
+        Run(root, "init", "-b", "main", noOrigin);
+        Assert.Null(await git.OriginUrlAsync(noOrigin, default));
+
+        Assert.Equal(Norm(bare), Norm((await git.OriginUrlAsync(dev, default))!));
+        Run(dev, "remote", "set-url", "origin", CredentialUrl);
+        Assert.Equal("https://bitbucket.org/acme/orders.git", await git.OriginUrlAsync(dev, default));
+    }
+
+    [Fact]
+    public async Task Remove_deletes_workspace_and_ignores_missing()
+    {
+        var ws = await git.PrepareAsync(project, "_onboarding", "main", default);
+        Assert.True(Directory.Exists(ws));
+
+        await git.RemoveAsync(project, "_onboarding", default);
+
+        Assert.False(Directory.Exists(ws));
+        await git.RemoveAsync(project, "_onboarding", default);
+        await git.RemoveAsync(project, "_container-check", default);
+        await Assert.ThrowsAsync<ArgumentException>(() => git.RemoveAsync(project, "..", default));
+        Assert.True(Directory.Exists(dev));
+    }
+
+    [Fact]
     public async Task Prepare_twice_reuses_workspace_and_keeps_changes()
     {
         var ws = await git.PrepareAsync(project, "ORD-1", "symphonist/ORD-1", default);
@@ -380,6 +412,41 @@ public sealed class GitWorkspaceTests : IDisposable
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
             Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    [Fact]
+    public async Task First_parent_commits_list_merges_and_direct_commits_newest_first()
+    {
+        Run(dev, "push", "origin", "main:production");
+        Run(dev, "checkout", "-b", "feature");
+        File.WriteAllText(Path.Combine(dev, "feature.txt"), "f");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "feature work");
+        var featureWork = Git(dev, "rev-parse HEAD");
+        Run(dev, "checkout", "main");
+        Run(dev, "merge", "--no-ff", "-m", "merge feature", "feature");
+        var merge = Git(dev, "rev-parse HEAD");
+        File.WriteAllText(Path.Combine(dev, "direct.txt"), "d");
+        Run(dev, "add", "-A");
+        Run(dev, "commit", "-m", "direct");
+        var direct = Git(dev, "rev-parse HEAD");
+        Run(dev, "push", "origin", "main");
+        var ws = await git.PrepareAsync(project, "_release", "main", default);
+
+        var commits = await git.FirstParentCommitsAsync(ws,
+            "refs/remotes/origin/production..refs/remotes/origin/main", default);
+
+        Assert.Equal([direct, merge], commits);
+        Assert.DoesNotContain(featureWork, commits);
+        Assert.Empty(await git.FirstParentCommitsAsync(ws, "refs/remotes/origin/main..refs/remotes/origin/production", default));
+    }
+
+    [Fact]
+    public async Task First_parent_commits_refuse_a_range_that_reads_as_an_option()
+    {
+        var ws = await git.PrepareAsync(project, "_release", "main", default);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => git.FirstParentCommitsAsync(ws, "--all", default));
     }
 
     [Fact]

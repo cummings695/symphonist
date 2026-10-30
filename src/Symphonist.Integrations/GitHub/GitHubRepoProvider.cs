@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text.Json;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Integrations.Providers;
@@ -19,7 +21,37 @@ public sealed class GitHubRepoProvider : IRepoProvider
 
     public string Type => "github";
 
+    public string DisplayName => "GitHub";
+
     public string HttpClientName => "github";
+
+    public IReadOnlyList<string> FullNameKeys { get; } = ["owner", "repo"];
+
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("owner", "Owner", ProviderFieldKind.Text, Required: true, Help: "User or organization that owns the repository"),
+        new("repo", "Repository", ProviderFieldKind.Text, Required: true, Help: "Repository name"),
+        new("localPath", "Local clone path", ProviderFieldKind.Path, Required: true, Help: "Existing local clone; use an absolute path"),
+        new("mainBranch", "Main branch", ProviderFieldKind.Text, Default: "main", Help: "Feature PRs target it"),
+        new("productionBranch", "Production branch", ProviderFieldKind.Text, Default: "production", Help: "Release PRs target it"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the GitHub token"),
+        new("mergeStrategy", "Merge strategy", ProviderFieldKind.Choice, Default: "merge", Options: MergeStrategies),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(RepoConfig config)
+    {
+        var c = (GitHubRepoConfig)config;
+        return new Dictionary<string, object?>
+        {
+            ["owner"] = c.Owner,
+            ["repo"] = c.Repo,
+            ["localPath"] = c.LocalPath,
+            ["mainBranch"] = c.MainBranch,
+            ["productionBranch"] = c.ProductionBranch,
+            ["tokenSecret"] = c.TokenSecret,
+            ["mergeStrategy"] = c.MergeStrategy,
+        };
+    }
 
     public RepoConfig Parse(RepoSection section)
     {
@@ -35,6 +67,33 @@ public sealed class GitHubRepoProvider : IRepoProvider
 
     public ISourceControl Create(ProjectConfig project, HttpClient http, string token) =>
         new GitHubSourceControl(http, Config(project), token);
+
+    public async Task<RepositoryDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token,
+        CancellationToken ct)
+    {
+        var config = Config(draft);
+        var api = new GitHubApi(http, token);
+        var repoPath = $"repos/{Uri.EscapeDataString(config.Owner)}/{Uri.EscapeDataString(config.Repo)}";
+        string fullName, mainBranch;
+        using (var doc = await api.SendAsync(HttpMethod.Get, repoPath, null, ct))
+        {
+            fullName = Text(doc.RootElement, "full_name") is { Length: > 0 } name ? name : config.FullName;
+            mainBranch = Text(doc.RootElement, "default_branch");
+        }
+
+        var branchPath = $"{repoPath}/branches/{GitHubApi.EscapeRef(config.ProductionBranch)}";
+        var (status, text) = await api.SendRawAsync(HttpMethod.Get, branchPath, null, ct);
+        var exists = status switch
+        {
+            HttpStatusCode.OK => true,
+            HttpStatusCode.NotFound => false,
+            _ => throw GitHubApi.Failure(HttpMethod.Get, branchPath, status, text),
+        };
+        return new RepositoryDiscovery(fullName, mainBranch, exists);
+    }
+
+    private static string Text(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
 
     public Uri PullRequestUrl(ProjectConfig project, long id) => GitHubSourceControl.PullRequestUrl(Config(project), id);
 

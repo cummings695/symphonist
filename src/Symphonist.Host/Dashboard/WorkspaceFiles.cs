@@ -196,7 +196,7 @@ public sealed class WorkspaceFiles(string workRoot, ILogger<WorkspaceFiles>? log
     }
 
     /// <summary>One path segment (a project id or ticket key) that cannot climb or name a root.</summary>
-    private static bool IsSafeName(string name) =>
+    internal static bool IsSafeName(string name) =>
         !string.IsNullOrWhiteSpace(name) && name.IndexOfAny(['/', '\\']) < 0 && IsSafeSegment(name);
 
     private static bool IsSafeRelative(string path, out string[] segments)

@@ -33,6 +33,7 @@
             <span class="chip @(totals.Blocked > 0 ? "chip-blocked" : null)" data-count="blocked"><b>@totals.Blocked</b><span class="chip-words"> blocked</span></span>
         </p>
         <div class="top-actions">
+            <a class="top-button" href="/stats">Stats</a>
             <button type="button" class="top-button" @onclick="PollNow">Poll now</button>
             <button type="button" class="top-button theme-button" data-theme-toggle aria-label="@ThemeLabel" title="@ThemeLabel" @onclick="ToggleThemeAsync">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">

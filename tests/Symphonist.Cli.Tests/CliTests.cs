@@ -503,4 +503,110 @@ public sealed class CliTests
     [InlineData(60 * 24 * 2 + 5, "2d")]
     public void Age_is_humanized(int minutes, string expected) =>
         Assert.Equal(expected, StatusTable.Age(Now - TimeSpan.FromMinutes(minutes), Now));
+
+    [Fact]
+    public async Task Projects_reload_prints_count_and_errors()
+    {
+        var ok = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/projects/reload", HttpStatusCode.OK,
+            """{"projects":["orders","web"],"errors":{}}"""), "", "projects", "reload");
+        var failed = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/projects/reload", HttpStatusCode.OK,
+            """{"projects":["orders"],"errors":{"bad.yaml":"missing required 'tracker'","a.yaml":"project id 'x' is declared by 2 files"}}"""),
+            "", "projects", "reload");
+
+        Assert.Equal((0, "Reloaded 2 project(s)" + Environment.NewLine, ""), (ok.Exit, ok.Out, ok.Err));
+        Assert.Equal(1, failed.Exit);
+        Assert.Equal("Reloaded 1 project(s)" + Environment.NewLine, failed.Out);
+        Assert.Equal("skipped a.yaml: project id 'x' is declared by 2 files" + Environment.NewLine
+            + "skipped bad.yaml: missing required 'tracker'" + Environment.NewLine, failed.Err);
+    }
+
+    private static string Local(string at) => DateTimeOffset.Parse(at).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+
+    [Fact]
+    public async Task Cli_limits_prints_pauses()
+    {
+        var handler = new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/limits", HttpStatusCode.OK,
+                """[{"key":"claude-code","provider":"Claude","since":"2026-10-21T11:00:00+00:00","resetsAt":"2026-10-21T13:00:00+00:00","nextProbeAt":null},"""
+                + """{"key":"codex:chatgpt","provider":"Codex","since":"2026-10-21T11:30:00+00:00","resetsAt":null,"nextProbeAt":"2026-10-21T12:15:00+00:00"}]""")
+            .On(HttpMethod.Post, "/api/limits/resume", HttpStatusCode.NoContent, "");
+
+        var list = await RunAsync(handler, "", "limits");
+        var resume = await RunAsync(handler, "", "limits", "resume", "codex:chatgpt");
+
+        Assert.Equal(0, list.Exit);
+        var lines = list.Out.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Matches(@"^PROVIDER\s+KEY\s+SINCE\s+RESETS / NEXT TRY$", lines[0]);
+        Assert.Matches($@"^Claude\s+claude-code\s+{Local("2026-10-21T11:00:00Z")}\s+resets {Local("2026-10-21T13:00:00Z")}$", lines[1]);
+        Assert.Matches($@"^Codex\s+codex:chatgpt\s+{Local("2026-10-21T11:30:00Z")}\s+next try {Local("2026-10-21T12:15:00Z")}$", lines[2]);
+        Assert.Equal((0, "Resumed codex:chatgpt" + Environment.NewLine), (resume.Exit, resume.Out));
+        Assert.Contains(handler.Requests, r => r.Method == HttpMethod.Post && r.PathAndQuery == "/api/limits/resume"
+            && r.Body!.Contains("\"key\":\"codex:chatgpt\""));
+    }
+
+    private const string PreviewJson = """
+        {"projectId":"orders","ready":["ORD-1","ORD-2"],"alsoShipped":[{"key":"ORD-9","stageId":"build","status":"Pending","finishes":true},
+        {"key":"ORD-8","stageId":"implement","status":"Running","finishes":false}],"outsideCommits":1,"mainHead":"abc1234","unavailable":null,"productionBranch":"production"}
+        """;
+
+    [Fact]
+    public async Task Cli_release_asks_before_starting()
+    {
+        var handler = new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK, PreviewJson)
+            .On(HttpMethod.Post, "/api/projects/orders/release", HttpStatusCode.OK,
+                """{"started":true,"message":"started _release-1; approve it to open the release","releaseKey":"_release-1"}""");
+
+        var declined = await RunAsync(handler, "n\n", "release", "orders");
+
+        Assert.Equal(0, declined.Exit);
+        Assert.Contains("ORD-1, ORD-2", declined.Out);
+        Assert.Contains("ORD-9", declined.Out);
+        Assert.Contains("1 commit(s) from outside Symphonist", declined.Out);
+        Assert.Contains("Release 3 ticket(s) to production? [y/N]", declined.Out);
+        Assert.DoesNotContain(handler.Requests, r => r.Method == HttpMethod.Post);
+
+        var answered = await RunAsync(handler, "y\n", "release", "orders");
+        var assumed = await RunAsync(handler, "", "release", "orders", "--yes");
+
+        Assert.Equal((0, 0), (answered.Exit, assumed.Exit));
+        Assert.DoesNotContain("[y/N]", assumed.Out);
+        Assert.Contains("started _release-1", assumed.Out);
+        var posts = handler.Requests.Where(r => r.Method == HttpMethod.Post).ToList();
+        Assert.Equal(2, posts.Count);
+        Assert.All(posts, p => Assert.Contains("\"ready\":[\"ORD-1\",\"ORD-2\"]", p.Body));
+        Assert.All(posts, p => Assert.Contains("\"mainHead\":\"abc1234\"", p.Body));
+    }
+
+    [Fact]
+    public async Task Cli_release_reports_a_refusal_and_an_unavailable_release()
+    {
+        var refused = await RunAsync(new StubHttpHandler()
+            .On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK, PreviewJson)
+            .On(HttpMethod.Post, "/api/projects/orders/release", HttpStatusCode.Conflict,
+                """{"error":"the release changed; review it again"}"""), "", "release", "orders", "--yes");
+        var unavailable = await RunAsync(new StubHttpHandler().On(HttpMethod.Get, "/api/projects/orders/release", HttpStatusCode.OK,
+            """{"projectId":"orders","ready":[],"alsoShipped":[],"outsideCommits":0,"mainHead":null,"unavailable":"_release-1 is still open"}"""),
+            "", "release", "orders", "--yes");
+
+        Assert.Equal((1, "the release changed; review it again" + Environment.NewLine), (refused.Exit, refused.Err));
+        Assert.Equal((1, "_release-1 is still open" + Environment.NewLine), (unavailable.Exit, unavailable.Err));
+    }
+
+    [Fact]
+    public async Task Cli_limits_says_when_nothing_is_paused()
+    {
+        var r = await RunAsync(new StubHttpHandler().On(HttpMethod.Get, "/api/limits", HttpStatusCode.OK, "[]"), "", "limits");
+
+        Assert.Equal((0, "No provider is paused by a usage limit" + Environment.NewLine), (r.Exit, r.Out));
+    }
+
+    [Fact]
+    public async Task Cli_limits_resume_reports_a_provider_not_paused()
+    {
+        var r = await RunAsync(new StubHttpHandler().On(HttpMethod.Post, "/api/limits/resume", HttpStatusCode.NotFound,
+            """{"error":"'claude-code' is not paused"}"""), "", "limits", "resume", "claude-code");
+
+        Assert.Equal((1, "'claude-code' is not paused" + Environment.NewLine), (r.Exit, r.Err));
+    }
 }

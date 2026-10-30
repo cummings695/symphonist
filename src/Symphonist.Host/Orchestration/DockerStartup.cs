@@ -16,19 +16,25 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // Fail closed from the start: only images ensured below (EnableImage) run, so a project added or reloaded
+        // later with a new image is refused until its container check prepares it.
+        launcher.RequirePreparedImages();
+
         // One entry per distinct image; the review agent runs in the same image as the project's agent.
         var images = projects.Projects
             .Where(p => p.Agent.Isolation == Isolation.Container)
             .Select(p => p.Agent)
             .DistinctBy(TryImageFor, StringComparer.Ordinal)
             .ToList();
-        if (images.Count == 0) return;
+        if (images.Count == 0)
+            return;
 
         if (!await docker.IsAvailableAsync(cancellationToken))
         {
             log.LogError("Docker is not available (is Docker running?); agent stages of container-isolated projects will fail with \"{Error}\"",
                 IsolationLauncher.DockerNotAvailable);
             launcher.DisableContainers(IsolationLauncher.DockerNotAvailable);
+            // A container check later re-enables containers, but only the image it ensured stays runnable.
             return;
         }
 
@@ -49,6 +55,7 @@ public sealed class DockerStartup(ProjectRegistry projects, DockerLauncher docke
             {
                 log.LogInformation("Checking agent image {Image} (first build can take several minutes)", image);
                 await docker.EnsureImageAsync(settings, cancellationToken);
+                launcher.EnableImage(image);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {

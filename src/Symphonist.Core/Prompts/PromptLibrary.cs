@@ -13,6 +13,19 @@ public static class PromptLibrary
     public static string GetReview(ProjectConfig project) =>
         Load(project.Review.PromptPath, "review", "no review prompt template");
 
+    /// <summary>Returns the evidence prompt override (<see cref="EvidenceConfig.PromptPath"/>) if configured, else the embedded default. The result is validated.</summary>
+    public static string GetEvidence(ProjectConfig project) =>
+        Load(project.Evidence.PromptPath, "evidence", "no evidence prompt template");
+
+    /// <summary>The embedded onboarding (proposal) prompt; there is no override. The result is validated.</summary>
+    public static string GetOnboarding() => Load(null, "onboarding", "no onboarding prompt template");
+
+    /// <summary>The embedded container check (build and test) prompt; there is no override. The result is validated.</summary>
+    public static string GetContainerCheck() => Load(null, "container-check", "no container check prompt template");
+
+    /// <summary>The embedded PR comments (fix run) prompt; there is no override. The result is validated.</summary>
+    public static string GetPrComments() => Load(null, "pr-comments", "no pr-comments prompt template");
+
     private static string Load(string? overridePath, string defaultName, string missing)
     {
         string template;

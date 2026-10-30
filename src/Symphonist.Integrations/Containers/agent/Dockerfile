@@ -1,4 +1,4 @@
-# Sandbox image for unattended Claude Code runs. Built by DockerLauncher.EnsureImageAsync as symphonist/agent-claude:1.
+# Sandbox image for unattended Claude Code and Codex runs. Built by DockerLauncher.EnsureImageAsync as symphonist/agent:2.
 # Node 22 LTS comes from the official image: the SDK base (Ubuntu 24.04) only ships Node 18 via apt.
 FROM node:22.23.4-bookworm-slim AS node
 
@@ -18,9 +18,13 @@ COPY --from=node /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 COPY --from=node /usr/local/include/node/ /usr/local/include/node/
 RUN node --version | grep -q '^v22\.' && npm --version
 
-RUN npm install -g @anthropic-ai/claude-code \
+# Codex is pinned: CodexRunner's read-only guards (-c project_doc_max_bytes=0, -c web_search="disabled", and a fresh
+# CODEX_HOME that trusts no project) were verified against this version. Bump it only after re-running the AGENTS.md /
+# .codex smoke check. Claude Code stays unpinned.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex@0.164.0 \
  && npm cache clean --force \
- && claude --version
+ && claude --version \
+ && codex --version
 
 # Chromium: the base image is Ubuntu 24.04, whose apt "chromium-browser" is only a snap stub (unusable in a
 # container) and which has no "chromium" package, so install Playwright's Chromium build plus its apt deps.

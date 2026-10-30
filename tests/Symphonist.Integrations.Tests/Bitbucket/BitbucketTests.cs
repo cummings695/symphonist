@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
+using Symphonist.Core.Integrations.Providers;
 using Symphonist.Integrations.Bitbucket;
 using Symphonist.Tests.Http;
 
@@ -300,5 +301,200 @@ public class BitbucketTests
         Assert.Equal(expected, await watcher.GetStatusAsync(hash, BuildPurpose.Build, CancellationToken.None));
         Assert.Contains("sort=-created_on", stub.Requests[0].PathAndQuery);
         Assert.Contains("pagelen=50", stub.Requests[0].PathAndQuery);
+    }
+
+    private static ProjectConfig Draft() => new("orders", "Orders", null!, Repo,
+        new BitbucketPipelinesConfig("bitbucket-pipelines", 45), null!, 3, [], new Dictionary<StageKind, string>(), "/cfg");
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound, false)]
+    [InlineData(HttpStatusCode.OK, true)]
+    public async Task Bitbucket_discover_reads_full_name_main_branch_and_production(HttpStatusCode branch, bool exists)
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, RepoPrefix + "/refs/branches/production", branch, "{\"name\":\"production\"}")
+            .On(HttpMethod.Get, RepoPrefix, HttpStatusCode.OK, Fixture("bb-repo.json"));
+
+        var result = await new BitbucketProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token, CancellationToken.None);
+
+        Assert.Equal(new RepositoryDiscovery("Acme/Orders", "main", exists), result);
+        Assert.All(stub.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
+        var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("dev@example.com:" + Token));
+        Assert.All(stub.Authorizations, a => Assert.Equal(expected, a));
+    }
+
+    [Fact]
+    public async Task Bitbucket_discover_throws_when_branch_check_fails()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, RepoPrefix + "/refs/branches/production", HttpStatusCode.Forbidden, "{}")
+            .On(HttpMethod.Get, RepoPrefix, HttpStatusCode.OK, Fixture("bb-repo.json"));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            new BitbucketProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token, CancellationToken.None));
+
+        Assert.Equal(HttpStatusCode.Forbidden, ex.StatusCode);
+        Assert.DoesNotContain(Token, ex.Message);
+    }
+
+    [Fact]
+    public async Task Pipelines_discover_reports_latest_run_or_none()
+    {
+        const string latest = RepoPrefix + "/pipelines/?pagelen=1&sort=-created_on";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.OK, Fixture("bb-pipelines-latest.json"));
+        var result = await new BitbucketPipelinesProvider().DiscoverAsync(Draft(), new HttpClient(stub), Token,
+            CancellationToken.None);
+        Assert.Equal("latest pipeline #57 (COMPLETED)", result.Summary);
+        Assert.Empty(result.Workflows);
+        Assert.Equal(latest, Assert.Single(stub.Requests).PathAndQuery);
+
+        var none = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.OK, "{\"pagelen\":1,\"values\":[]}");
+        Assert.Equal("no pipeline runs yet", (await new BitbucketPipelinesProvider().DiscoverAsync(Draft(),
+            new HttpClient(none), Token, CancellationToken.None)).Summary);
+
+        var failing = new StubHttpHandler().On(HttpMethod.Get, latest, HttpStatusCode.Unauthorized, "{}");
+        await Assert.ThrowsAsync<HttpRequestException>(() => new BitbucketPipelinesProvider().DiscoverAsync(Draft(),
+            new HttpClient(failing), Token, CancellationToken.None));
+    }
+
+    private const string BbComments = RepoPrefix + "/pullrequests/7/comments?pagelen=100";
+    private const string BbUser = "/2.0/user";
+    private const string BbMe = "{\"account_id\":\"acc-me\",\"display_name\":\"Me\"}";
+
+    private static string BbComment(int id, string accountId, string name, string raw, string created = "2026-10-01T10:00:00+00:00",
+        string extra = "") =>
+        "{\"id\":" + id + ",\"created_on\":\"" + created + "\",\"content\":{\"raw\":" + JsonSerializer.Serialize(raw)
+        + "},\"user\":{\"display_name\":\"" + name + "\",\"account_id\":\"" + accountId + "\"}" + extra + "}";
+
+    [Fact]
+    public async Task Lists_comments_with_inline_and_reply_fields()
+    {
+        var page = "{\"values\":[" + BbComment(1, "acc-other", "Ann", "top level") + ","
+            + BbComment(2, "acc-me", "Me", "inline", extra: ",\"inline\":{\"path\":\"src/a.cs\",\"from\":null,\"to\":12},\"parent\":{\"id\":1}")
+            + "," + BbComment(3, "acc-other", "Ann", "old side", extra: ",\"inline\":{\"path\":\"src/b.cs\",\"from\":4,\"to\":null}")
+            + "]}";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK, page);
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(3, comments.Count);
+        Assert.Equal(new PullRequestComment("1", "Ann", false, DateTimeOffset.Parse("2026-10-01T10:00:00+00:00"), "top level"), comments[0]);
+        Assert.Equal(("2", "Me", true, "src/a.cs", 12, "1"),
+            (comments[1].Id, comments[1].Author, comments[1].IsMine, comments[1].Path, comments[1].Line, comments[1].ParentId));
+        Assert.Equal(("src/b.cs", 4), (comments[2].Path, comments[2].Line));
+    }
+
+    [Fact]
+    public async Task Follows_pagination()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, RepoPrefix + "/pullrequests/7/comments?page=2", HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(2, "a", "A", "second") + "]}")
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "first") + "],\"next\":\"https://api.bitbucket.org" + RepoPrefix
+                + "/pullrequests/7/comments?page=2\"}");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal(["first", "second"], comments.Select(c => c.Body));
+    }
+
+    [Fact]
+    public async Task Marks_own_comments_mine()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "acc-me", "Me", "mine") + "," + BbComment(2, "acc-x", "X", "theirs") + "]}");
+        var scm = Scm(stub);
+
+        var first = await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+        await scm.ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal([true, false], first.Select(c => c.IsMine));
+        Assert.Single(stub.Requests, r => r.PathAndQuery == BbUser);
+    }
+
+    [Fact]
+    public async Task Skips_deleted_comments()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "gone", extra: ",\"deleted\":true") + "," + BbComment(2, "a", "A", "kept") + "]}");
+
+        var comments = await Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None);
+
+        Assert.Equal("kept", Assert.Single(comments).Body);
+    }
+
+    [Fact]
+    public async Task Reply_is_threaded()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/comments", HttpStatusCode.Created, "{}");
+        var original = new PullRequestComment("5", "Ann", false, DateTimeOffset.UnixEpoch, "x");
+
+        await Scm(stub).ReplyToPullRequestCommentAsync(7, original, "done", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("done", body.RootElement.GetProperty("content").GetProperty("raw").GetString());
+        Assert.Equal(5, body.RootElement.GetProperty("parent").GetProperty("id").GetInt64());
+    }
+
+    [Fact]
+    public async Task Decline_posts_to_the_decline_endpoint()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline", HttpStatusCode.OK,
+            "{\"id\":7,\"state\":\"DECLINED\"}");
+
+        await Scm(stub).DeclinePullRequestAsync(7, CancellationToken.None);
+
+        var request = Assert.Single(stub.Requests);
+        Assert.Equal((HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline"), (request.Method, request.PathAndQuery));
+    }
+
+    [Fact]
+    public async Task Decline_failure_throws()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/decline", HttpStatusCode.BadRequest,
+            "{\"error\":{\"message\":\"already merged\"}}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).DeclinePullRequestAsync(7, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Comment_on_pull_request_posts_markdown()
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Post, RepoPrefix + "/pullrequests/7/comments", HttpStatusCode.Created, "{}");
+
+        await Scm(stub).CommentOnPullRequestAsync(7, "**hi**", CancellationToken.None);
+
+        using var body = JsonDocument.Parse(Assert.Single(stub.Requests).Body!);
+        Assert.Equal("**hi**", body.RootElement.GetProperty("content").GetProperty("raw").GetString());
+        Assert.False(body.RootElement.TryGetProperty("parent", out _));
+    }
+
+    [Theory]
+    [InlineData("https://evil.example/2.0/repositories/acme/orders/pullrequests/7/comments?page=2")]
+    [InlineData("http://api.bitbucket.org/2.0/repositories/acme/orders/pullrequests/7/comments?page=2")]
+    public async Task Refuses_paging_link_to_foreign_host(string next)
+    {
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[" + BbComment(1, "a", "A", "first") + "],\"next\":\"" + next + "\"}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None));
+
+        Assert.Equal(2, stub.Requests.Count); // /user and page 1 only
+    }
+
+    [Fact]
+    public async Task Repeating_paging_link_stops()
+    {
+        var loop = "https://api.bitbucket.org" + RepoPrefix + "/pullrequests/7/comments?pagelen=100";
+        var stub = new StubHttpHandler().On(HttpMethod.Get, BbUser, HttpStatusCode.OK, BbMe)
+            .On(HttpMethod.Get, BbComments, HttpStatusCode.OK,
+                "{\"values\":[],\"next\":\"" + loop + "\"}");
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => Scm(stub).ListPullRequestCommentsAsync(7, CancellationToken.None));
     }
 }

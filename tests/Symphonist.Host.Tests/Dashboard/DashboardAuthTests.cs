@@ -128,6 +128,30 @@ public sealed class DashboardAuthTests : IDisposable
         Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
     }
 
+    [Theory]
+    [InlineData("/projects/new")]
+    [InlineData("/projects/orders/setup")]
+    public async Task Setup_pages_require_sign_in(string path)
+    {
+        var response = await Client().GetAsync(path);
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
+    }
+
+    [Fact]
+    public async Task Setup_page_forbids_framing()
+    {
+        var client = Client();
+        await SignInAsync(client);
+
+        foreach (var path in new[] { "/projects/new", "/projects/orders/setup" })
+        {
+            var response = await client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            AssertNotFramable(response);
+        }
+    }
+
     [Fact]
     public async Task Document_page_with_unknown_kind_is_404()
     {
@@ -316,5 +340,27 @@ public sealed class DashboardAuthTests : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, "/");
         request.Headers.Add("Cookie", cookie);
         Assert.Equal(HttpStatusCode.OK, (await restarted.SendAsync(request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Evidence_file_requires_sign_in()
+    {
+        var file = SymphonistPaths.Resolve("evidence", "orders", "ORD-1", "20261021T120000Z", "home.png");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllBytes(file, [0x89, 0x50, 0x4E, 0x47]);
+
+        var response = await Client().GetAsync("/evidence/orders/ORD-1/20261021T120000Z/home.png");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.StartsWith("/signed-out", response.Headers.Location!.OriginalString.Replace(Origin, ""));
+
+        var client = Client();
+        await SignInAsync(client);
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Get, "/evidence/orders/ORD-1/20261021T120000Z/home.png");
+        crossOrigin.Headers.Add("Origin", "http://evil.example");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(crossOrigin)).StatusCode);
+        var signedIn = await client.GetAsync("/evidence/orders/ORD-1/20261021T120000Z/home.png");
+        Assert.Equal(HttpStatusCode.OK, signedIn.StatusCode);
+        AssertNotFramable(signedIn);
     }
 }

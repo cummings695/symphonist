@@ -1,0 +1,197 @@
+@using System.Globalization
+@using Symphonist.Core.Evidence
+@using Symphonist.Core.Risk
+@using Symphonist.Core.Storage
+@* The evidence gathered for a ticket's gate rounds, newest first. Everything in a report comes from an agent that read
+   the change and the PR, so it is rendered as text only; states are words ("Passed", "Failed", "Guessed"), not colour. *@
+<section class="panel evidence-panel" aria-labelledby="evidence-heading">
+    <h2 id="evidence-heading">Evidence</h2>
+    @if (Records.Count == 0)
+    {
+        <p class="empty">No evidence yet.</p>
+    }
+    else
+    {
+        <ol class="evidence-list">
+            @foreach (var record in Records)
+            {
+                var report = record.Report;
+                <li class="evidence" data-evidence>
+                    <p class="evidence-head">
+                        <strong>@record.StageId</strong>
+                        <time datetime="@record.At.ToString("O", CultureInfo.InvariantCulture)">@LocalTime(record.At)</time>
+                        @if (record.Head is { Length: > 0 } head)
+                        {
+                            <code title="Commit the evidence was gathered on">@Short(head)</code>
+                        }
+                        <span class="badge">@(record.Posted ? "Posted" : "Not posted")</span>
+                        @if (report is not null)
+                        {
+                            <span class="evidence-outcome">@(record.HasIssues ? "Issues found" : "No issues found")</span>
+                        }
+                    </p>
+                    @if (record.Error is { Length: > 0 } error)
+                    {
+                        <p class="evidence-error" data-evidence-error><strong>Error:</strong> @error</p>
+                    }
+                    @if (report is not null)
+                    {
+                        @foreach (var line in report.Headline)
+                        {
+                            <p class="evidence-headline" data-evidence-headline>@line</p>
+                        }
+                        @if (report.Guessed)
+                        {
+                            <p class="evidence-guessed" data-evidence-guessed>
+                                <strong>Guessed:</strong> the agent guessed how to run the app or what to try. Check it before relying on it.
+                            </p>
+                        }
+
+                        <div class="evidence-part" data-regressions>
+                            <h3>Regressions</h3>
+                            @if (report.Regressions.Count == 0)
+                            {
+                                <p class="empty">None found.</p>
+                            }
+                            else
+                            {
+                                <ul>
+                                    @foreach (var r in report.Regressions)
+                                    {
+                                        <li data-regression>
+                                            <strong>@r.Area</strong>
+                                            <span class="evidence-tag">@(r.Intended ? "Intended" : "Unintended")</span>
+                                            <span class="evidence-tag">@(r.Risk == RiskLevel.High ? "High risk" : "Low risk")</span>
+                                            <span>@r.Reason</span>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+
+                        <div class="evidence-part">
+                            <h3>Tests and coverage</h3>
+                            @if (report.Tests is { } tests)
+                            {
+                                <p data-tests>
+                                    <strong>@(tests.Passed ? "Passed" : "Failed")</strong>
+                                    @if (tests.Command.Length > 0)
+                                    {
+                                        <code>@tests.Command</code>
+                                    }
+                                    <span>@tests.Summary</span>
+                                </p>
+                            }
+                            else
+                            {
+                                <p data-tests><strong>Not run</strong></p>
+                            }
+                            @if (report.Coverage.Count > 0)
+                            {
+                                <ul>
+                                    @foreach (var c in report.Coverage)
+                                    {
+                                        <li data-coverage>
+                                            <strong>@c.Area</strong>
+                                            @if (c.Tests.Count > 0)
+                                            {
+                                                <span>Tests: @string.Join(", ", c.Tests)</span>
+                                            }
+                                            <span>@(c.Gap.Length > 0 ? $"Gap: {c.Gap}" : "Covered")</span>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+
+                        <div class="evidence-part" data-walkthrough>
+                            <h3>Walkthrough</h3>
+                            @if (!report.Walkthrough.Ran)
+                            {
+                                <p><strong>Not run:</strong> @report.Walkthrough.WhyNot</p>
+                            }
+                            else
+                            {
+                                <p class="evidence-source">How the app was run: @SourceWord(report.Walkthrough.RunSource)</p>
+                            }
+                            @foreach (var feature in report.Walkthrough.Features)
+                            {
+                                <div class="evidence-feature" data-feature>
+                                    <h4><span data-feature-name>@feature.Name</span> <span class="badge">@SourceWord(feature.Source)</span></h4>
+                                    <ol class="evidence-steps">
+                                        @foreach (var step in feature.Steps)
+                                        {
+                                            <li data-step="@(step.Passed ? "passed" : "failed")">
+                                                <strong data-step-result>@(step.Passed ? "Passed" : "Failed")</strong>
+                                                <span>@step.Action</span>
+                                                <span class="evidence-result">@step.Result</span>
+                                                @if (ScreenshotUrl(record, step.Screenshot) is { } src)
+                                                {
+                                                    <img class="evidence-shot" alt="@step.Action" src="@src" loading="lazy" />
+                                                }
+                                            </li>
+                                        }
+                                    </ol>
+                                </div>
+                            }
+                        </div>
+
+                        @if (Known && HasProposal(report))
+                        {
+                            <p class="evidence-proposal">
+                                The agent proposed how to run the app or what to try.
+                                <a href="@SetupUrl" data-use-evidence>Use for this project</a>
+                            </p>
+                        }
+                    }
+                </li>
+            }
+        </ol>
+    }
+</section>
+
+@code {
+    /// <summary>The ticket's evidence records, newest first.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<EvidenceRecord> Records { get; set; } = [];
+
+    [Parameter, EditorRequired] public string Project { get; set; } = "";
+
+    [Parameter, EditorRequired] public string Key { get; set; } = "";
+
+    /// <summary>The ticket's project is in the configuration, so its setup can take a proposal.</summary>
+    [Parameter] public bool Known { get; set; }
+
+    private string SetupUrl => $"/projects/{Uri.EscapeDataString(Project)}/setup?evidenceFrom={Uri.EscapeDataString(Key)}";
+
+    public static bool HasProposal(EvidenceReport report) =>
+        report.ProposedRun is { IsEmpty: false } || report.ProposedFeatures.Count > 0;
+
+    /// <summary>
+    /// The stored screenshot the step names: a file of this record's own stamp folder ("stamp/file" in
+    /// <see cref="EvidenceRecord.Screenshots"/>); null when the report names a file that was not kept.
+    /// </summary>
+    private string? ScreenshotUrl(EvidenceRecord record, string? file)
+    {
+        if (file is null) return null;
+        foreach (var stored in record.Screenshots)
+        {
+            var slash = stored.IndexOf('/');
+            if (slash <= 0 || !string.Equals(stored[(slash + 1)..], file, StringComparison.Ordinal)) continue;
+            return $"/evidence/{Uri.EscapeDataString(record.ProjectId)}/{Uri.EscapeDataString(Key)}/"
+                + $"{Uri.EscapeDataString(stored[..slash])}/{Uri.EscapeDataString(file)}";
+        }
+        return null;
+    }
+
+    private static string SourceWord(EvidenceSource source) => source switch
+    {
+        EvidenceSource.Config => "Config",
+        EvidenceSource.Added => "Added for this change",
+        _ => "Guessed",
+    };
+
+    private static string Short(string head) => head.Length <= 12 ? head : head[..12];
+
+    private static string LocalTime(DateTimeOffset at) =>
+        at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+}

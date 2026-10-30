@@ -1,11 +1,16 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
+using Symphonist.Core.Evidence;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
+using Symphonist.Host.Dashboard;
+using Symphonist.Host.Notifications;
 using Symphonist.Host.Orchestration;
 using Symphonist.Host.Tests.Fakes;
 
@@ -47,17 +52,35 @@ public sealed class OrchestratorTests : IDisposable
           - { id: deploy,    kind: deploy }
           - { id: done,      kind: done,      onEnterStatus: Done }
         review: { mode: off }
+        evidence: { mode: off }
         """;
 
     private readonly string home = Path.Combine(Path.GetTempPath(), "symphonist-tests-" + Guid.NewGuid().ToString("N"));
     private readonly FakeTimeProvider time = new(Now);
     private readonly FakeGitWorkspace git = new();
     private readonly FakeAgentRunner agent = new();
+    private readonly FakeAgentRunner codex = new();
     private readonly FakeTicketStore store = new();
     private readonly FakeTracker tracker = new();
     private readonly FakeSourceControl scm = new();
     private readonly FakeBuildWatcher builds = new();
+    /// <summary>The evidence runner's own clone (a separate fake, so stage tests see only their workspace's calls).</summary>
+    private readonly FakeGitWorkspace evidenceGit = new();
     private readonly ProjectRegistry registry;
+    private readonly ProviderLimits limits;
+    private readonly CapturingNotifier notifier = new();
+    private readonly NotificationCenter center;
+
+    private sealed class CapturingNotifier : INotifier
+    {
+        public List<DesktopNotification> Sent { get; } = [];
+
+        public Task ShowAsync(DesktopNotification notification, CancellationToken ct)
+        {
+            Sent.Add(notification);
+            return Task.CompletedTask;
+        }
+    }
 
     private static AgentRunResult StageResult => FakeAgentRunner.Ok(FakeAgentRunner.Output(
         summary: "done", specPath: "docs/spec.md", planPath: "docs/plan.md", prTitle: "Export orders"));
@@ -68,11 +91,16 @@ public sealed class OrchestratorTests : IDisposable
         Directory.CreateDirectory(Path.Combine(home, "projects"));
         File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), OrdersYaml);
         registry = new ProjectRegistry(NullLogger<ProjectRegistry>.Instance);
-        agent.OnRun = _ => StageResult;
+        limits = new ProviderLimits(store, time);
+        center = new NotificationCenter(notifier, new DashboardAddress(5199), id => id == "orders" ? "Orders (Acme)" : id, time,
+            NullLogger<NotificationCenter>.Instance);
+        agent.OnRun = r => r.OutputSchema == PrFixOutputSchema.Json ? FakeAgentRunner.PrFix() : StageResult;
+        evidenceGit.WorkspacePath = Path.Combine(home, "evidence-ws");
     }
 
     public void Dispose()
     {
+        center.Dispose();
         Environment.SetEnvironmentVariable("SYMPHONIST_HOME", null);
         if (Directory.Exists(home)) Directory.Delete(home, true);
     }
@@ -82,11 +110,17 @@ public sealed class OrchestratorTests : IDisposable
     /// <param name="tickAfterCommands">Off by default here, so tests observe a command's own effect.</param>
     private Orchestrator Create(int maxRuns = 1, bool tickAfterCommands = false) =>
         new(registry, store, factory ??= new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time,
-            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, Runners(), store, time), Reviewer(), Evidence(), limits, time,
+            new OrchestratorOptions(TimeSpan.FromMinutes(2), maxRuns, tickAfterCommands), NullLogger<Orchestrator>.Instance, center);
 
     private GateReviewer Reviewer() =>
-        new(git, new AgentRunners(new Dictionary<string, IAgentRunner> { ["claude-code"] = agent }), store, time);
+        new(git, Runners(), store, time);
+
+    private EvidenceRunner Evidence() =>
+        new(evidenceGit, Runners(), store, time);
+
+    private AgentRunners Runners() =>
+        new(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent, [AgentTypes.Codex] = codex });
 
     private void Source(string key, string status, params SourceComment[] comments) =>
         tracker.Tickets.Add(new SourceTicket(key, $"Title {key}", $"Description {key}", status, comments,
@@ -606,6 +640,20 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "ORD-1", CancellationToken.None));
     }
 
+    [Fact] public async Task Forget_refuses_an_open_release_but_not_a_finished_one()
+    {
+        var release = PipelineEngine.CreateRelease(registry.Get("orders"), 1, "Release 1", "symphonist/release-1", "", Now);
+        await store.SaveAsync(release, CancellationToken.None);
+        var o = Create();
+
+        Assert.Equal(ForgetResult.OpenRelease, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+        Assert.Single(store.Tickets);
+
+        release.Status = StageStatus.Done;
+        await store.SaveAsync(release, CancellationToken.None);
+        Assert.Equal(ForgetResult.Forgotten, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+    }
+
     [Fact] public async Task Forgotten_ticket_is_picked_up_again_if_still_matching()
     {
         await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
@@ -701,9 +749,16 @@ public sealed class OrchestratorTests : IDisposable
         Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude answers: A, B"));
         time.Advance(TimeSpan.FromMinutes(10));
         var o = Create();
-        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ =>
+        {
+            started.TrySetResult();
+            return new TaskCompletionSource<AgentRunResult>().Task;
+        };
 
         await o.TickAsync(CancellationToken.None);
+        // The run is started by the tick but proceeds after a yield: wait for it to reach the agent.
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         var t = store.Single("ORD-1");
         Assert.Equal(("triage", StageStatus.Running, "answers: A, B"), (t.StageId, t.Status, t.Feedback));
@@ -1031,26 +1086,89 @@ public sealed class OrchestratorTests : IDisposable
             store.EventMessages("ORD-1"));
     }
 
+    [Fact] public async Task Done_ticket_moved_back_by_qa_runs_again()
+    {
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"),
+            OrdersYaml.Replace("kind: implement, gate: human,", "kind: implement, gate: human, entryStatuses: [QA Failed],"));
+        registry.Reload();
+        await Seed("ORD-1", "done", StageStatus.Done, "Done", t => { t.PullRequestId = 7; t.MergeCommit = "merge-1"; });
+        tracker.Move("ORD-1", "QA Failed");
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task; // keep the run in flight
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", "In Progress"), (t.StageId, t.LastSourceStatus)); // the card moved on to the stage's status
+        Assert.Null(t.MergeCommit);
+        Assert.Null(t.PullRequestId);
+        Assert.Equal("symphonist/ORD-1-202610211000", t.Branch);
+        Assert.Contains("reopened at implement: card moved to 'QA Failed'", store.EventMessages("ORD-1"));
+        Assert.Equal([("ORD-1", "symphonist/ORD-1-202610211000")], git.Prepared);
+    }
+
+    [Fact] public async Task Done_ticket_moved_elsewhere_stays_done()
+    {
+        await Seed("ORD-1", "done", StageStatus.Done, "Done");
+        tracker.Move("ORD-1", "QA Failed");
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("done", StageStatus.Done), (t.StageId, t.Status));
+        Assert.Equal(["card moved to 'QA Failed' after the ticket was done; Symphonist does not reopen done tickets"],
+            store.EventMessages("ORD-1"));
+        Assert.Empty(git.Prepared);
+    }
+
+    [Fact] public async Task Pipeline_without_release_finishes_when_the_pr_merges()
+    {
+        var yaml = Regex.Replace(OrdersYaml, @"\r?\n\s*- \{ id: (triage|plan|build|release|deploy),[^\r\n]*", "");
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), yaml);
+        Assert.Empty(registry.Reload().Errors);
+        Source("ORD-1", "In Progress");
+        var o = Create();
+
+        for (var i = 0; i < 5 && store.Tickets.SingleOrDefault()?.Status != StageStatus.AwaitingApproval; i++) await TickIdle(o);
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        for (var i = 0; i < 5 && store.Single("ORD-1").Status != StageStatus.Done; i++) await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("done", StageStatus.Done), (t.StageId, t.Status));
+        Assert.Single(scm.MergeCalls);
+        Assert.Single(scm.Opened);
+        Assert.Equal("Done", tracker.Tickets.Single().Status);
+    }
+
     [Fact] public async Task Release_with_nothing_to_release_waits_at_gate_then_deploy_watches_production_head()
     {
         await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "merge-1");
         scm.OpenError = new NoChangesToPullException("There are no changes to be pulled");
         scm.BranchHeads["production"] = "prod-head";
-        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "main");
+        scm.OnBranchContains = (branch, other) => (branch, other) == ("production", "symphonist/release-1");
         builds.Statuses["prod-head"] = BuildStatus.Succeeded;
         var o = Create();
+        git.FirstParentCommits = []; // e.g. its merge was released by hand already: a release with ready tickets only
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.True((await o.ReleaseNowAsync("orders", preview, CancellationToken.None)).Started);
 
         await TickIdle(o);
-        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
-        Assert.Contains("already in production: production already contains main (at prod-head)", store.EventMessages("ORD-1"));
+        Assert.Equal(("release", StageStatus.AwaitingApproval),
+            (store.Single("_release-1").StageId, store.Single("_release-1").Status));
+        Assert.Contains("already in production: production already contains symphonist/release-1 (at prod-head)",
+            store.EventMessages("_release-1"));
 
-        await o.ApproveAsync("orders", "ORD-1", CancellationToken.None);
+        await o.ApproveAsync("orders", "_release-1", CancellationToken.None);
         await TickIdle(o); // post-approval: nothing to merge
         await TickIdle(o); // deploy sees the production head's pipeline
 
         Assert.Equal(StageStatus.Done, store.Single("ORD-1").Status);
+        Assert.Equal("prod-head", store.Single("ORD-1").ReleaseMergeCommit);
         Assert.Equal([("prod-head", BuildPurpose.Deploy)], builds.Calls);
         Assert.Empty(scm.MergeCalls);
+        Assert.Empty(tracker.Comments);
     }
 
     [Fact] public async Task Waiting_merge_event_is_recorded_once()
@@ -1173,7 +1291,7 @@ public sealed class OrchestratorTests : IDisposable
         tracker.OnQuery = () => Interlocked.Increment(ref queries) % 2 == 0 ? throw new HttpRequestException("flaky") : [];
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1199,7 +1317,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMilliseconds(20), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1232,7 +1350,7 @@ public sealed class OrchestratorTests : IDisposable
         };
         var options = new OrchestratorOptions(TimeSpan.FromMinutes(10), 1);
         var o = new Orchestrator(registry, store, new FakeIntegrationFactory(new ProjectIntegrations(tracker, scm, builds)),
-            new StageExecutor(git, agent, store, time), Reviewer(), time, options, NullLogger<Orchestrator>.Instance);
+            new StageExecutor(git, new AgentRunners(new Dictionary<string, IAgentRunner> { [AgentTypes.ClaudeCode] = agent }), store, time), Reviewer(), Evidence(), limits, time, options, NullLogger<Orchestrator>.Instance);
         using var service = new OrchestratorService(o, options, NullLogger<OrchestratorService>.Instance);
 
         await service.StartAsync(CancellationToken.None);
@@ -1275,15 +1393,23 @@ public sealed class OrchestratorTests : IDisposable
         await Approve();
         await Until(StageStatus.AwaitingApproval, "implement");
         await Approve();
-        await Until(StageStatus.AwaitingApproval, "release");
-        await Approve();
+        await Until(StageStatus.Pending, "release"); // ready to release
+        await TickIdle(o);
+        Assert.Single(scm.Opened); // a ready ticket opens no release PR of its own
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Equal(["ORD-1"], preview.Ready);
+        Assert.True((await o.ReleaseNowAsync("orders", preview, CancellationToken.None)).Started);
+        scm.BranchHeads["symphonist/release-1"] = preview.MainHead!; // pushed at the previewed main head
+        await TickIdle(o); // the release PR is opened and waits
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
         await Until(StageStatus.Done, "done");
 
         var final = store.Single("ORD-1");
         Assert.Equal(StageStatus.Done, final.Status);
         Assert.Equal(2, scm.Opened.Count);
         Assert.Equal(("symphonist/ORD-1", "main"), (scm.Opened[0].Source, scm.Opened[0].Destination));
-        Assert.Equal(("main", "production"), (scm.Opened[1].Source, scm.Opened[1].Destination));
+        Assert.Equal(("symphonist/release-1", "production"), (scm.Opened[1].Source, scm.Opened[1].Destination));
         Assert.Equal([1L, 2L], scm.MergeCalls);
         Assert.Equal(("merge-1", "merge-2"), (final.MergeCommit, final.ReleaseMergeCommit));
         Assert.Equal(["Planned", "In Progress", "In Review", "Done"], tracker.Transitions.Select(t => t.Status));
@@ -1605,19 +1731,31 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Empty(AutoApprovalComments);
     }
 
+    /// <summary>ORD-1 waiting at release with the release PR from main it opened before batches (finishes the old way).</summary>
+    private async Task SeedLegacyRelease()
+    {
+        var pr = await scm.OpenPullRequestAsync("main", "production", "Release ORD-1", "", CancellationToken.None);
+        scm.Opened.Clear();
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "build-1";
+            t.ReleasePullRequestId = pr.Id;
+        });
+    }
+
     [Theory]
     [InlineData("main", "main001", "merge held: main moved since auto-approval (main000 → main001)")]
     [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
-    public async Task Auto_approved_release_waits_again_when_main_or_production_moves_before_the_merge(string branch,
+    public async Task Legacy_auto_approved_release_waits_again_when_main_or_production_moves_before_the_merge(string branch,
         string newHead, string message)
     {
         Configure("active", ("release", "auto"));
         AnswerReviews(Low);
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         var o = Create();
-        await TickIdle(o); // release PR opened
+        await TickIdle(o); // its open release PR: waiting at the gate
         await TickIdle(o); // review: low -> approved
         var approved = store.Single("ORD-1");
         Assert.Equal(StageStatus.Approved, approved.Status);
@@ -1641,11 +1779,11 @@ public sealed class OrchestratorTests : IDisposable
         // A busy main: every auto-approved release is overtaken by another merge before its own.
         Configure("active", ("release", "auto"));
         AnswerReviews(Low);
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         var o = Create();
-        await TickIdle(o); // release PR opened
+        await TickIdle(o); // its open release PR: waiting at the gate
         await TickIdle(o); // review: low -> approved
 
         for (var i = 1; i <= 3; i++)
@@ -1920,13 +2058,13 @@ public sealed class OrchestratorTests : IDisposable
     {
         Configure("active", ("release", "auto"));
         AnswerReviews(() => FakeAgentRunner.Review("low", "one safe change", checkedItems: ["diff", "build passed"]));
-        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t => t.MergeCommit = "build-1");
+        await SeedLegacyRelease(); // opened its own release PR before batches
         scm.BranchHeads["main"] = "main000";
         scm.BranchHeads["production"] = "prod000";
         builds.Statuses["merge-1"] = BuildStatus.Succeeded;
         var o = Create();
 
-        await TickIdle(o); // release PR opened, waiting at the gate
+        await TickIdle(o); // its open release PR: waiting at the gate
         Assert.Equal((StageStatus.AwaitingApproval, true), (store.Single("ORD-1").Status, store.Single("ORD-1").ReviewDue));
         await TickIdle(o); // review: low -> approved
         Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
@@ -1972,4 +2110,1680 @@ public sealed class OrchestratorTests : IDisposable
         Assert.Equal(0, ReviewRequests);
         Assert.Empty(store.GateReviews);
     }
+
+    private const string PlanLine =
+        "  - { id: plan,      kind: plan,      gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }\n";
+
+    /// <summary>A hand edit that drops the plan stage, then a reload.</summary>
+    private void RemovePlanStage()
+    {
+        var yaml = OrdersYaml.ReplaceLineEndings("\n");
+        Assert.Contains(PlanLine, yaml);
+        File.WriteAllText(Path.Combine(home, "projects", "orders.yaml"), yaml.Replace(PlanLine, ""));
+        Assert.Empty(registry.Reload().Errors);
+    }
+
+    [Fact] public async Task Ticket_at_removed_stage_is_blocked_and_can_be_sent_back()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        var o = Create();
+        RemovePlanStage();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Blocked, t.Status);
+        Assert.Equal("plan", t.StageId);
+        Assert.Contains("no longer in the pipeline", t.BlockedReason);
+        Assert.Single(store.EventMessages("ORD-1"), m => m.Contains("no longer in the pipeline"));
+        const string wayOut = "stage 'plan' is no longer in the pipeline; send it back to an existing stage (--to)";
+        Assert.Equal(wayOut, (await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Message);
+        var noTarget = await o.SendBackAsync("orders", "ORD-1", "again", null, CancellationToken.None);
+        Assert.Equal((false, wayOut), (noTarget.Changed, noTarget.Message));
+
+        var outcome = await o.SendBackAsync("orders", "ORD-1", "plan it again", "triage", CancellationToken.None);
+
+        Assert.True(outcome.Changed, outcome.Message);
+        t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Pending), (t.StageId, t.Status));
+        Assert.Equal("plan it again", t.Feedback);
+    }
+
+    [Fact] public async Task Card_move_of_ticket_at_removed_stage_does_not_stop_the_tick()
+    {
+        await Seed("ORD-1", "plan", StageStatus.AwaitingApproval, "Planned");
+        Source("ORD-2", "Backlog");
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task; // keep ORD-2's run in flight
+        RemovePlanStage();
+        tracker.Move("ORD-1", "Backlog");
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("ORD-1").Status);
+        Assert.Equal(("triage", StageStatus.Running), (store.Single("ORD-2").StageId, store.Single("ORD-2").Status));
+    }
+
+    [Fact] public async Task Run_in_flight_when_its_stage_is_removed_finishes_then_is_blocked()
+    {
+        Source("ORD-1", "Planned");
+        var run = new TaskCompletionSource<AgentRunResult>();
+        agent.OnRunAsync = _ => run.Task;
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(("plan", StageStatus.Running), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+
+        RemovePlanStage();
+        await o.TickAsync(CancellationToken.None); // in flight: left alone
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+        run.SetResult(StageResult);
+        await o.WhenIdleAsync(); // applied with the configuration the run started with
+        Assert.Equal(("plan", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("ORD-1").Status);
+    }
+
+    [Fact] public async Task Reloaded_project_is_ticked_without_restart()
+    {
+        var o = Create();
+        await TickIdle(o);
+        Assert.Equal(1, tracker.QueryCount);
+
+        File.WriteAllText(Path.Combine(home, "projects", "billing.yaml"), OrdersYaml.Replace("id: orders", "id: billing"));
+        var reload = await o.ReloadProjectsAsync(CancellationToken.None);
+        await TickIdle(o);
+
+        Assert.Equal(["billing", "orders"], reload.ProjectIds.Order(StringComparer.Ordinal));
+        Assert.Equal(3, tracker.QueryCount);
+    }
+
+    [Fact] public async Task Reload_waits_for_a_running_tick()
+    {
+        var querying = new TaskCompletionSource();
+        using var release = new ManualResetEventSlim();
+        tracker.OnQuery = () =>
+        {
+            querying.TrySetResult();
+            release.Wait();
+            return tracker.Tickets.ToList();
+        };
+        var o = Create();
+        var tick = Task.Run(() => o.TickAsync(CancellationToken.None));
+        await querying.Task;
+
+        var reload = o.ReloadProjectsAsync(CancellationToken.None);
+        await Task.Delay(100);
+        Assert.False(reload.IsCompleted);
+
+        release.Set();
+        await tick;
+        await reload;
+    }
+
+    #region PrComments_*
+
+    private void PrComments(long pr, params PullRequestComment[] comments) => scm.Comments[pr] = [.. comments];
+
+    private static PullRequestComment PrComment(int minutes, string body, bool mine = true, string author = "me",
+        string id = "issue:1") =>
+        new(id, author, mine, Now.AddMinutes(minutes), body);
+
+    private void AllowPrCommentsFromOthers()
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path) + "\nprComments: { fromOthers: true }\n");
+        registry.Reload();
+        Assert.True(registry.Get("orders").PrComments.FromOthers);
+    }
+
+    private Task SeedImplementGate(Action<Ticket>? with = null) =>
+        Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review", t =>
+        {
+            t.PullRequestId = 7;
+            with?.Invoke(t);
+        });
+
+    private const string MergedFirst =
+        "Merged before this could be addressed; open a follow-up ticket if it still needs a change.";
+
+    [Fact] public async Task Pr_comment_reruns_implement_with_pr_feedback()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo to Bar") with { Path = "src/Foo.cs", Line = 3 });
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Running, ""), (t.StageId, t.Status, t.Feedback));
+        var feedback = Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson));
+        Assert.Equal(new PrFeedbackComment("issue:1", "me", true, "rename Foo to Bar", "src/Foo.cs", 3, null), feedback);
+        Assert.Equal(Now.AddMinutes(5), t.PrCommentsHandledAt);
+        Assert.Null(t.ClaudeCommentsHandledAt);
+        var events = store.EventMessages("ORD-1");
+        Assert.Equal(["@claude PR comment from me: rerunning implement", "sent back to implement"], events.Take(2));
+        var decision = Assert.Single(store.GateDecisions);
+        Assert.Equal(("implement", GateDecision.SentBack, false), (decision.StageId, decision.Decision, decision.Auto));
+    }
+
+    [Fact] public async Task Touch_is_recorded_against_the_stage_it_left()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var touch = Assert.Single(store.Touches);
+        Assert.Equal(("orders", "implement", TouchKind.SendBack), (touch.ProjectId, touch.StageId, touch.Kind));
+    }
+
+    [Fact] public async Task Teammate_pr_comment_rerun_is_not_a_touch()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo", mine: false, author: "sam"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+        Assert.Empty(store.Touches);
+    }
+
+    [Fact] public async Task Own_marker_comment_rerun_is_a_touch()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Single(store.Touches);
+    }
+
+    [Fact] public async Task Pr_comment_triggers_once()
+    {
+        // The host's clock is ahead: the comment is later than the rerun's StageStartedAt, so only PrCommentsHandledAt
+        // keeps it from triggering again.
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status); // the rerun reached its gate
+        Assert.Null(store.Single("ORD-1").PrFeedbackJson); // used up by the run
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.Single(store.EventMessages("ORD-1"), m => m.StartsWith("@claude PR comment", StringComparison.Ordinal));
+    }
+
+    private void UseCommentMarker(string marker)
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path) + $"\ncommentMarker: \"{marker}\"\n");
+        registry.Reload();
+        Assert.Equal(marker, registry.Get("orders").CommentMarker);
+    }
+
+    [Fact] public async Task Tracker_comment_with_the_projects_marker_reruns_and_claude_is_ignored()
+    {
+        UseCommentMarker("@symphonist");
+        await Seed("ORD-1", "triage", StageStatus.AwaitingApproval, "Backlog");
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude ignored"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(6), "@Symphonist answers: A"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("triage", StageStatus.Running, "answers: A"), (t.StageId, t.Status, t.Feedback));
+        Assert.Contains("@symphonist comment: rerunning triage", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Pr_comment_with_the_projects_marker_reruns_and_claude_is_ignored()
+    {
+        UseCommentMarker("@symphonist");
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        PrComments(7, PrComment(5, "@claude rename Foo"), PrComment(6, "@symphonist rename Foo to Bar", id: "issue:2"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Running), (t.StageId, t.Status));
+        Assert.Equal("rename Foo to Bar", Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson)).Request);
+        Assert.Contains("@symphonist PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Others_comments_ignored_by_default()
+    {
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude use v3", mine: false, author: "ann"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, null, null), (t.Status, t.PrFeedbackJson, t.PrCommentsHandledAt));
+        Assert.Empty(agent.Requests);
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Others_comments_rerun_without_decision_when_allowed()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7,
+            PrComment(5, "@claude use v3", mine: false, author: "ann"),
+            PrComment(6, "@claude and v4", mine: false, author: "bob", id: "issue:2"),
+            PrComment(7, "@claude also v5", mine: false, author: "ann", id: "issue:3"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, ""), (t.Status, t.Feedback));
+        Assert.Equal(["issue:1", "issue:2", "issue:3"], PrFeedback.FromJson(t.PrFeedbackJson).Select(c => c.Id));
+        Assert.Contains("@claude PR comment from ann, bob: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Empty(store.GateDecisions); // a teammate's comment is not the developer's decision
+    }
+
+    [Fact] public async Task Signed_pr_comment_never_triggers()
+    {
+        AllowPrCommentsFromOthers();
+        await SeedImplementGate();
+        PrComments(7, PrComment(5, "@claude ...\n\n— posted by Symphonist"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(agent.Requests);
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Pr_comment_during_run_applies_at_gate()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.PullRequestId = 7);
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = _ => agent.Requests.Count == 1 ? release.Task : Task.FromResult(FakeAgentRunner.PrFix());
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(StageStatus.Running, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        PrComments(7, PrComment(1, "@claude also cover refunds"));
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal((StageStatus.Running, null), (store.Single("ORD-1").Status, store.Single("ORD-1").PrFeedbackJson));
+
+        release.SetResult(StageResult);
+        await o.WhenIdleAsync();
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.AwaitingApproval), (t.StageId, t.Status));
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Equal(Now.AddMinutes(1), t.PrCommentsHandledAt);
+        Assert.Contains("@claude PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Tracker_and_pr_comments_combine_into_one_run()
+    {
+        await SeedImplementGate();
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude also cover refunds"));
+        PrComments(7, PrComment(6, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, "also cover refunds"), (t.Status, t.Feedback));
+        Assert.Equal("rename Foo", Assert.Single(PrFeedback.FromJson(t.PrFeedbackJson)).Request);
+        Assert.Equal((Now.AddMinutes(5), Now.AddMinutes(6)), (t.ClaudeCommentsHandledAt, t.PrCommentsHandledAt));
+        var events = store.EventMessages("ORD-1");
+        Assert.Single(events, m => m == "sent back to implement");
+        Assert.Single(events, m => m.StartsWith("@claude", StringComparison.Ordinal));
+        Assert.Contains("@claude PR comment from me: rerunning implement", events);
+        Assert.Single(store.GateDecisions);
+        Assert.Single(agent.Requests);
+    }
+
+    [Fact] public async Task Pr_comment_while_approved_waits_then_merged_first_reply()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Approved, "In Review", t => t.PullRequestId = 7);
+        scm.AddOpen(7, "symphonist/ORD-1");
+        scm.MergeResults.Enqueue(new MergeResult(false, null, "needs 1 approval"));
+        PrComments(7,
+            PrComment(5, "@claude rename Foo"),
+            PrComment(6, "thanks", id: "issue:2"),
+            PrComment(7, TrackerComments.Sign("@claude quoted"), id: "issue:3"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o); // the merge waits: the comment does not rerun an approved stage
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+        Assert.Empty(scm.Replies);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o); // merged
+
+        var t = store.Single("ORD-1");
+        Assert.Equal("build", t.StageId);
+        Assert.Equal([(7L, "issue:1", TrackerComments.Sign(MergedFirst))], scm.Replies);
+        Assert.Equal(Now.AddMinutes(5), t.PrCommentsHandledAt);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o);
+        Assert.Single(scm.Replies);
+    }
+
+    [Fact] public async Task Pr_comment_after_merge_hold_applies()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Approved, "In Review", t =>
+        {
+            t.PullRequestId = 7;
+            t.ApprovedBranch = "symphonist/ORD-1";
+            t.ApprovedHead = "head-old"; // auto-approved on an older commit
+        });
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.AddOpen(7, "symphonist/ORD-1");
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        var o = Create();
+
+        await TickIdle(o); // merge held: waits again
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(agent.Requests);
+
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.Contains("@claude PR comment from me: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Equal("issue:1", Assert.Single(scm.Replies).CommentId); // the fix run answers the comment
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Pr_comments_error_does_not_stop_tracker_comments()
+    {
+        await SeedImplementGate();
+        scm.CommentsError = new HttpRequestException("bad paging link");
+        time.Advance(TimeSpan.FromMinutes(10));
+        agent.OnRunAsync = _ => new TaskCompletionSource<AgentRunResult>().Task;
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(["could not read PR comments: bad paging link"], store.EventMessages("ORD-1")); // once
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+
+        Comments("ORD-1", new SourceComment("Me", true, Now.AddMinutes(5), "@claude also cover refunds"));
+        await o.TickAsync(CancellationToken.None);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Running, "also cover refunds", null), (t.Status, t.Feedback, t.PrFeedbackJson));
+        Assert.Contains("@claude comment: rerunning implement", store.EventMessages("ORD-1"));
+        Assert.Single(store.GateDecisions);
+    }
+
+    [Fact] public async Task Pr_comment_cancels_running_evidence()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the evidence run is in progress
+
+        PrComments(7, PrComment(5, "@claude rename Foo"));
+        time.Advance(TimeSpan.FromMinutes(10));
+        await o.TickAsync(CancellationToken.None);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        var events = store.EventMessages("ORD-1");
+        Assert.Contains("@claude PR comment from me: rerunning implement", events);
+        Assert.Contains("evidence for implement cancelled: the gate was decided", events);
+        Assert.Equal(("implement", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(store.Evidence);
+    }
+
+    #endregion
+
+    #region Evidence_*
+
+    /// <summary><see cref="Configure"/>, with evidence gathered in <paramref name="evidenceMode"/>.</summary>
+    private void ConfigureEvidence(string reviewMode, string evidenceMode = "high-risk", params (string Stage, string Gate)[] gates)
+    {
+        Configure(reviewMode, gates);
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path).Replace("evidence: { mode: off }", $"evidence: {{ mode: {evidenceMode} }}"));
+        registry.Reload();
+        Assert.NotEqual(EvidenceMode.Off, registry.Get("orders").Evidence.Mode);
+    }
+
+    private static bool IsEvidence(AgentRunRequest r) => r.OutputSchema == EvidenceSchema.Json;
+
+    private int EvidenceRequests => agent.Requests.Count(IsEvidence);
+
+    /// <summary>Review runs answer with <paramref name="review"/>, evidence runs with <paramref name="evidence"/>.</summary>
+    private void Answer(Func<AgentRunResult> review, Func<AgentRunResult> evidence) =>
+        agent.OnRun = r => FakeAgentRunner.IsReview(r) ? review() : IsEvidence(r) ? evidence() : StageResult;
+
+    private static AgentRunResult EvidenceReport() =>
+        new(true, null, 0.5m, TimeSpan.FromMinutes(4), null, """{"raw":"evidence"}""",
+            JsonSerializer.SerializeToElement(new Dictionary<string, object>
+            {
+                ["headline"] = new[] { "All tests pass", "Checkout works" },
+                ["regressions"] = Array.Empty<object>(),
+                ["coverage"] = Array.Empty<object>(),
+                ["walkthrough"] = new Dictionary<string, object>
+                {
+                    ["ran"] = true, ["run_source"] = "config",
+                    ["features"] = new[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["name"] = "Export", ["source"] = "added",
+                            ["steps"] = new[] { new Dictionary<string, object> { ["action"] = "open", ["result"] = "ok", ["passed"] = true } },
+                        },
+                    },
+                },
+            }));
+
+    /// <summary>Evidence runs block until their token is cancelled (other runs answer as usual).</summary>
+    private (TaskCompletionSource Started, Func<bool> Cancelled) BlockEvidence()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = false;
+        agent.OnRunCancellableAsync = async (r, ct) =>
+        {
+            if (!IsEvidence(r)) return FakeAgentRunner.IsReview(r) ? Low() : StageResult;
+            var run = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var registration = ct.Register(() =>
+            {
+                Volatile.Write(ref cancelled, true);
+                run.TrySetCanceled(ct);
+            });
+            started.TrySetResult();
+            return await run.Task;
+        };
+        return (started, () => Volatile.Read(ref cancelled));
+    }
+
+    /// <summary>A high-risk implement round waiting on the developer, evidence owed, no review (review off).</summary>
+    private Task SeedEvidenceDue(string key = "ORD-1") =>
+        Seed(key, "implement", StageStatus.AwaitingApproval, "In Review", t =>
+        {
+            t.Risk = RiskLevel.High;
+            t.EvidenceDue = true;
+            t.PullRequestId = 7;
+        });
+
+    private void UseCodexFor(string section, string mode)
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, File.ReadAllText(path)
+            .Replace($"{section}: {{ mode: {mode} }}", $"{section}: {{ mode: {mode}, agent: {{ type: codex }} }}"));
+        registry.Reload();
+        Assert.Equal(AgentTypes.ClaudeCode, registry.Get("orders").Agent.Type);
+    }
+
+    [Fact] public async Task Reviewer_and_evidence_use_their_own_providers()
+    {
+        ConfigureEvidence("active", "always");
+        UseCodexFor("review", "active");
+        UseCodexFor("evidence", "always");
+        var p = registry.Get("orders");
+        Assert.Equal((AgentTypes.Codex, AgentTypes.Codex), (p.Review.Agent.Type, p.Evidence.Agent.Type));
+        codex.OnRun = r => FakeAgentRunner.IsReview(r) ? FakeAgentRunner.Review("low") : EvidenceReport();
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review
+        await TickIdle(o); // evidence
+
+        Assert.Contains(codex.Requests, FakeAgentRunner.IsReview);
+        Assert.Contains(codex.Requests, IsEvidence);
+        Assert.All(codex.Requests, r => Assert.Equal(AgentTypes.Codex, r.Settings.Type));
+        Assert.Empty(agent.Requests);
+    }
+
+    [Fact] public async Task Evidence_runs_after_review_and_posts_to_pr_and_tracker()
+    {
+        ConfigureEvidence("active");
+        Answer(() => FakeAgentRunner.Review("high", "touches tax", reasons: ["changes the tax rule"]), EvidenceReport);
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review: high
+        Assert.Equal(0, EvidenceRequests);
+        await TickIdle(o); // evidence
+
+        Assert.Equal([true, false], agent.Requests.Select(FakeAgentRunner.IsReview));
+        Assert.True(IsEvidence(agent.Requests[1]));
+        var (pr, body) = Assert.Single(scm.PostedComments);
+        Assert.Equal(7, pr);
+        Assert.True(TrackerComments.IsSymphonist(body));
+        Assert.Contains("All tests pass", body);
+        Assert.Contains("### Walkthrough", body);
+        var line = Assert.Single(tracker.Comments);
+        Assert.Equal("ORD-1", line.Key);
+        Assert.True(TrackerComments.IsSymphonist(line.Markdown));
+        Assert.StartsWith("Evidence posted on the PR: All tests pass", line.Markdown);
+        var t = store.Single("ORD-1");
+        var record = Assert.Single(store.Evidence);
+        Assert.Equal((t.Id, "implement", t.WaitingSince!.Value, "head000", true, false, (string?)null),
+            (record.TicketId, record.StageId, record.WaitingSince, record.Head, record.Posted, record.HasIssues, record.Error));
+        Assert.Equal("All tests pass", record.Report!.Headline[0]);
+        Assert.Equal((StageStatus.AwaitingApproval, false, RiskLevel.High), (t.Status, t.EvidenceDue, t.Risk));
+        var events = store.EventMessages("ORD-1");
+        Assert.Equal(["gathering evidence for implement", "evidence for head000 gathered"], events.TakeLast(2));
+        Assert.Empty(store.GateDecisions); // evidence never decides the gate
+
+        await TickIdle(o); // nothing owed any more
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Evidence_does_not_run_when_auto_approved()
+    {
+        ConfigureEvidence("active", "always", ("implement", "auto"));
+        Answer(Low, EvidenceReport);
+        git.ChangedFiles = ["src/Export/Csv.cs"]; // a change the reviewer can call low
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        scm.AddOpen(7, "symphonist/ORD-1");
+        var o = Create();
+
+        await TickIdle(o); // review: low, auto-approved
+        Assert.Equal((StageStatus.Approved, false), (store.Single("ORD-1").Status, store.Single("ORD-1").EvidenceDue));
+        await TickIdle(o); // the merge
+
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events);
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Low_verdict_owes_no_evidence()
+    {
+        ConfigureEvidence("active");
+        Answer(Low, EvidenceReport); // human gate: a low verdict still waits on the developer
+        git.ChangedFiles = ["src/Export/Csv.cs"];
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o); // review: low
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false, RiskLevel.Low), (t.Status, t.EvidenceDue, t.Risk));
+        Assert.False(PipelineEngine.WaitsOnEvidence(registry.Get("orders"), t)); // the card is not gathering evidence
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events); // no clone
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(store.Evidence);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Not_needed_posts_nothing_and_clears_due()
+    {
+        ConfigureEvidence("off"); // no review: only the clone tells whether a risk area was touched
+        Answer(Low, EvidenceReport);
+        evidenceGit.ChangedFiles = ["src/Export/Csv.cs"];
+        await SeedWaiting("ORD-1", "implement", "In Review", t => { t.PullRequestId = 7; t.EvidenceDue = true; });
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Contains("remove _evidence-ORD-1", evidenceGit.Events); // checked in a clone, then removed
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.Evidence);
+        Assert.Equal("no evidence needed for head000: not high risk", store.EventMessages("ORD-1")[^1]);
+
+        await TickIdle(o);
+        Assert.Equal(1, evidenceGit.Events.Count(e => e == "prepare _evidence-ORD-1"));
+    }
+
+    [Fact] public async Task Evidence_waits_for_a_pull_request()
+    {
+        ConfigureEvidence("off", "always");
+        Answer(Low, EvidenceReport);
+        await Seed("ORD-1", "implement", StageStatus.AwaitingApproval, "In Review", t => t.EvidenceDue = true);
+        var o = Create();
+
+        await TickIdle(o);
+
+        Assert.Equal(0, EvidenceRequests);
+        Assert.Empty(evidenceGit.Events);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("evidence", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Evidence_failure_never_blocks()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, () => FakeAgentRunner.Fail("timed out"));
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.AwaitingApproval, false, 0), (t.StageId, t.Status, t.EvidenceDue, t.Attempts));
+        Assert.Null(t.BlockedReason);
+        var (_, body) = Assert.Single(scm.PostedComments);
+        Assert.True(TrackerComments.IsSymphonist(body));
+        Assert.StartsWith("Evidence could not be gathered: timed out", body);
+        Assert.StartsWith("Evidence could not be gathered: timed out", Assert.Single(tracker.Comments).Markdown);
+        var record = Assert.Single(store.Evidence);
+        Assert.Equal(("timed out", (string?)null, true, false), (record.Error, record.ReportJson, record.Posted, record.HasIssues));
+        Assert.Equal("evidence for head000 failed: timed out", store.EventMessages("ORD-1")[^1]);
+        Assert.Empty(store.GateDecisions);
+
+        await TickIdle(o); // no second run for the round
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Evidence_comment_failure_is_recorded_and_not_retried()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        scm.CommentError = new HttpRequestException("pr host down");
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(tracker.Comments); // the tracker line points at the PR comment, which is not there
+        var record = Assert.Single(store.Evidence);
+        Assert.False(record.Posted);
+        Assert.NotNull(record.Report);
+        Assert.Contains("evidence comment failed: pr host down", store.EventMessages("ORD-1"));
+        Assert.False(store.Single("ORD-1").EvidenceDue);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Decision_cancels_running_evidence_and_posts_nothing()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        scm.PullRequests[7] = FakeSourceControl.Pr(7);
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10)); // the evidence run is in progress
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        Assert.Equal("remove _evidence-ORD-1", evidenceGit.Events[^1]); // its clone removed
+        Assert.Contains("evidence for implement cancelled: the gate was decided", store.EventMessages("ORD-1"));
+        Assert.Equal(StageStatus.Approved, store.Single("ORD-1").Status);
+
+        await TickIdle(o); // the merge goes ahead
+
+        Assert.Equal([7L], scm.MergeCalls);
+        Assert.Equal("build", store.Single("ORD-1").StageId);
+        Assert.Empty(scm.PostedComments);
+        Assert.Empty(tracker.Comments);
+        Assert.Empty(store.Evidence);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Shutdown_keeps_evidence_owed()
+    {
+        ConfigureEvidence("off");
+        var (started, cancelled) = BlockEvidence();
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        o.CancelRuns();
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancelled());
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (t.Status, t.EvidenceDue));
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.Contains("cancelled", StringComparison.Ordinal));
+    }
+
+    [Fact] public async Task Evidence_respects_max_concurrent_runs()
+    {
+        ConfigureEvidence("off");
+        var (started, _) = BlockEvidence();
+        await SeedEvidenceDue();
+        Source("ORD-2", "Planned");
+        var o = Create(maxRuns: 1);
+
+        await o.TickAsync(CancellationToken.None); // ORD-1's evidence takes the slot (ORD-2 is created after it)
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await o.TickAsync(CancellationToken.None);
+
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-2").Status);
+        Assert.Single(agent.Requests);
+        o.CancelRuns();
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact] public async Task Evidence_waits_for_a_free_slot()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = r => IsEvidence(r) ? Task.FromResult(EvidenceReport()) : release.Task;
+        Source("ORD-2", "Planned");
+        var o = Create(maxRuns: 1);
+        await o.TickAsync(CancellationToken.None); // ORD-2's plan run takes the slot
+        await SeedEvidenceDue();
+
+        await o.TickAsync(CancellationToken.None);
+        Assert.Equal(0, EvidenceRequests);
+        Assert.DoesNotContain(store.EventMessages("ORD-1"), m => m.StartsWith("gathering", StringComparison.Ordinal));
+
+        release.SetResult(StageResult);
+        await o.WhenIdleAsync();
+        await TickIdle(o);
+        Assert.Equal(1, EvidenceRequests);
+    }
+
+    [Fact] public async Task Merge_hold_on_same_head_reuses_evidence()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, EvidenceReport);
+        evidenceGit.ChangedFiles = ["src/Pricing/Tax.cs"]; // a risk area: evidence is needed whatever the risk
+        await SeedEvidenceDue();
+        var o = Create();
+        await TickIdle(o); // round 1: gathered and posted for head000
+        Assert.Single(scm.PostedComments);
+        var first = store.Single("ORD-1").WaitingSince;
+
+        // Round 1 was later auto-approved on an older commit (pinned); the branch is now at head000.
+        var approved = store.Single("ORD-1").Clone();
+        approved.Status = StageStatus.Approved;
+        approved.ApprovedBranch = "symphonist/ORD-1";
+        approved.ApprovedHead = "head-old";
+        await store.SaveAsync(approved, CancellationToken.None);
+        scm.BranchHeads["symphonist/ORD-1"] = "head000";
+        scm.AddOpen(7, "symphonist/ORD-1");
+        time.Advance(TimeSpan.FromMinutes(1));
+
+        await TickIdle(o); // merge held: a new round, evidence owed
+        var held = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (held.Status, held.EvidenceDue));
+        Assert.NotEqual(first, held.WaitingSince);
+        await TickIdle(o); // round 2: the same head
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+        Assert.Single(scm.PostedComments);
+        Assert.Single(store.Evidence);
+        Assert.Equal(1, EvidenceRequests);
+        Assert.Equal("evidence for head000 already gathered", store.EventMessages("ORD-1")[^1]);
+    }
+
+    [Fact] public async Task Evidence_finishing_after_a_new_round_is_stored_not_posted()
+    {
+        ConfigureEvidence("off");
+        var release = new TaskCompletionSource<AgentRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        agent.OnRunAsync = r =>
+        {
+            if (!IsEvidence(r)) return Task.FromResult(StageResult);
+            started.TrySetResult();
+            return release.Task; // ignores cancellation: finishes with a report anyway
+        };
+        await SeedEvidenceDue();
+        var o = Create();
+        await o.TickAsync(CancellationToken.None);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True((await o.SendBackAsync("orders", "ORD-1", "redo", null, CancellationToken.None)).Changed);
+        release.SetResult(EvidenceReport());
+        await o.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(scm.PostedComments);
+        var record = Assert.Single(store.Evidence);
+        Assert.False(record.Posted);
+        Assert.Contains("evidence for implement finished after the gate was decided; not posted",
+            store.EventMessages("ORD-1"));
+    }
+
+    #endregion
+
+    #region Usage limits
+
+    private const string ClaudeKey = "claude-code";
+
+    private bool Paused(string key) => limits.Pauses.Any(p => p.Key == key);
+
+    [Fact] public async Task Limited_stage_run_goes_back_to_pending_without_an_attempt()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(Now.AddHours(1)));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("implement", StageStatus.Pending, 0), (t.StageId, t.Status, t.Attempts));
+        Assert.Equal("implement paused: Claude usage limit, resets 11:00", store.EventMessages("ORD-1")[^1]);
+        var pause = Assert.Single(limits.Pauses);
+        Assert.Equal((ClaudeKey, (DateTimeOffset?)Now.AddHours(1)), (pause.Key, pause.ResetsAt));
+        Assert.Empty(tracker.Transitions);
+        Assert.False(Assert.Single(store.AgentRuns).Succeeded); // the run is still recorded
+    }
+
+    [Fact] public async Task Limited_key_starts_no_job_until_reset()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        await Seed("ORD-2", "plan", StageStatus.Pending, "Planned");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(Now.AddHours(1)));
+        var o = Create();
+
+        await TickIdle(o); // the first run hits the limit
+        var events = store.Events.Count;
+        await TickIdle(o);
+        time.Advance(TimeSpan.FromMinutes(59));
+        await TickIdle(o);
+
+        Assert.Single(agent.Requests);
+        Assert.All(store.Tickets, t => Assert.Equal(StageStatus.Pending, t.Status));
+        Assert.Equal(events, store.Events.Count); // waiting for the reset leaves the tickets as they are
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        await TickIdle(o);
+
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Contains(store.Tickets, t => t.Status == StageStatus.AwaitingApproval);
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Other_provider_keeps_running()
+    {
+        var path = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(path, OrdersYaml.Replace("onGateStatus: In Review }", "onGateStatus: In Review, agent: { type: codex } }"));
+        registry.Reload();
+        await limits.PauseAsync(ClaudeKey, new UsageLimit(Now.AddHours(1)), CancellationToken.None);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        await Seed("ORD-2", "plan", StageStatus.Pending, "Planned");
+        var o = Create(maxRuns: 2);
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Equal(StageStatus.Pending, store.Single("ORD-2").Status);
+        Assert.Single(codex.Requests);
+        Assert.Empty(agent.Requests);
+        Assert.True(Paused(ClaudeKey));
+    }
+
+    [Fact] public async Task Limited_review_keeps_the_review_owed()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Limited(Now.AddHours(1)));
+        await SeedWaiting("ORD-1", "plan", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o); // paused: the review is not started again
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(("plan", StageStatus.AwaitingApproval, true), (t.StageId, t.Status, t.ReviewDue));
+        Assert.Empty(store.GateReviews);
+        Assert.Empty(AutoApprovalComments);
+        Assert.Equal(1, ReviewRequests);
+        Assert.True(Paused(ClaudeKey));
+        Assert.Single(store.EventMessages("ORD-1"), m => m == "review of plan paused: Claude usage limit, resets 11:00");
+
+        time.Advance(TimeSpan.FromHours(1));
+        AnswerReviews(Low);
+        await TickIdle(o);
+
+        Assert.Equal("implement", store.Single("ORD-1").StageId); // reviewed and auto-approved after the reset
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Limited_evidence_keeps_evidence_owed()
+    {
+        ConfigureEvidence("off");
+        Answer(Low, () => FakeAgentRunner.Limited(null));
+        await SeedEvidenceDue();
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.AwaitingApproval, true), (t.Status, t.EvidenceDue));
+        Assert.Empty(store.Evidence);
+        Assert.Empty(scm.PostedComments);
+        Assert.Equal(1, EvidenceRequests);
+        Assert.True(Paused(ClaudeKey));
+        Assert.Single(store.EventMessages("ORD-1"),
+            m => m == "evidence for implement paused: Claude usage limit, trying again every 30 minutes");
+    }
+
+    [Fact] public async Task Successful_probe_lifts_the_pause()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        var o = Create();
+
+        await TickIdle(o);
+        Assert.Equal("implement paused: Claude usage limit, trying again every 30 minutes", store.EventMessages("ORD-1")[^1]);
+        time.Advance(TimeSpan.FromMinutes(29));
+        await TickIdle(o);
+        Assert.Single(agent.Requests);
+
+        time.Advance(TimeSpan.FromMinutes(1));
+        await TickIdle(o);
+
+        Assert.Equal(2, agent.Requests.Count);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("ORD-1").Status);
+        Assert.Empty(limits.Pauses);
+    }
+
+    [Fact] public async Task Three_limited_runs_never_block()
+    {
+        Assert.Equal(3, registry.Get("orders").MaxAttemptsPerStage);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        for (var i = 0; i < 3; i++) agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        var o = Create();
+
+        for (var i = 0; i < 3; i++)
+        {
+            await TickIdle(o);
+            time.Advance(ProviderLimits.ProbeInterval);
+        }
+
+        var t = store.Single("ORD-1");
+        Assert.Equal((StageStatus.Pending, 0), (t.Status, t.Attempts));
+        Assert.Equal(3, agent.Requests.Count);
+        Assert.True(Paused(ClaudeKey));
+    }
+
+    [Fact] public async Task Failed_run_lifts_the_pause_and_counts_an_attempt()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        agent.Results.Enqueue(FakeAgentRunner.Limited(null));
+        agent.Results.Enqueue(FakeAgentRunner.Fail("boom"));
+        var o = Create();
+
+        await TickIdle(o);
+        time.Advance(ProviderLimits.ProbeInterval);
+        await TickIdle(o);
+
+        Assert.Equal(1, store.Single("ORD-1").Attempts);
+        Assert.Empty(limits.Pauses);
+    }
+
+    #endregion
+
+    #region Notifications_*
+
+    private async Task<IReadOnlyList<DesktopNotification>> Flushed()
+    {
+        await center.FlushAsync();
+        var sent = notifier.Sent.ToList();
+        notifier.Sent.Clear();
+        return sent;
+    }
+
+    [Fact] public async Task Human_gate_posts_waiting_on_you_once_per_round()
+    {
+        ConfigureEvidence("off", "always");
+        Answer(Low, EvidenceReport);
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress");
+        var o = Create();
+
+        await TickIdle(o); // the stage succeeds: waiting on you
+        var first = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is waiting on you", "Orders (Acme) · implement"), (first.Title, first.Body));
+
+        await TickIdle(o); // evidence completes on the same round
+        Assert.Equal(1, EvidenceRequests);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Auto_gate_posts_only_after_the_review_leaves_it_with_you()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(() => FakeAgentRunner.Review("high", "touches tax", reasons: ["changes the tax rule"]));
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o); // plan run: the review is still owed
+        Assert.Empty(await Flushed());
+
+        await TickIdle(o); // review: high
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is waiting on you", "Orders (Acme) · plan · reviewer says high risk"), (n.Title, n.Body));
+    }
+
+    [Fact] public async Task Auto_approved_round_posts_nothing()
+    {
+        Configure("active", ("plan", "auto"));
+        AnswerReviews(Low);
+        Source("ORD-1", "Planned");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal("implement", store.Single("ORD-1").StageId);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Blocked_ticket_posts_blocked_with_reason()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.Attempts = 2);
+        agent.Results.Enqueue(FakeAgentRunner.Fail("boom"));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Equal(StageStatus.Blocked, t.Status);
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("ORD-1 is blocked", $"Orders (Acme) · {t.BlockedReason}"), (n.Title, n.Body));
+
+        await TickIdle(o);
+        Assert.Empty(await Flushed());
+    }
+
+    [Fact] public async Task Blocked_notification_is_one_short_line_of_the_reason()
+    {
+        await Seed("ORD-1", "implement", StageStatus.Pending, "In Progress", t => t.Attempts = 2);
+        var stderr = string.Join("\n", Enumerable.Range(1, 100).Select(i => $"stderr line {i}"));
+        agent.Results.Enqueue(FakeAgentRunner.Fail(stderr));
+        var o = Create();
+
+        await TickIdle(o);
+
+        var t = store.Single("ORD-1");
+        Assert.Contains("\n", t.BlockedReason); // the full reason stays on the ticket
+        var n = Assert.Single(await Flushed());
+        var line = n.Body["Orders (Acme) · ".Length..];
+        Assert.DoesNotContain('\n', line);
+        Assert.True(line.Length <= 200, $"{line.Length} characters");
+        Assert.Contains("stderr line 1 stderr line 2", line);
+    }
+
+    [Fact] public async Task Limit_pause_and_resume_post_once_each()
+    {
+        LimitNotifications.Subscribe(limits, center, time, TimeZoneInfo.Utc);
+        var resetsAt = DateTimeOffset.Parse("2026-10-21T11:00:00Z");
+
+        await limits.PauseAsync(ClaudeKey, new UsageLimit(resetsAt), CancellationToken.None);
+        var paused = Assert.Single(await Flushed());
+        Assert.Equal(("Claude usage limit reached", "Claude jobs paused, resets 11:00"), (paused.Title, paused.Body));
+
+        await limits.ResumeAsync(ClaudeKey, CancellationToken.None);
+        var resumed = Assert.Single(await Flushed());
+        Assert.Equal(("Claude jobs resumed", "Jobs are running again"), (resumed.Title, resumed.Body));
+    }
+
+    #endregion
+
+    #region Release batches
+
+    /// <summary>Replaces the release stage's settings (in the current project file) with <paramref name="settings"/>.</summary>
+    private void ReleaseSettings(string settings)
+    {
+        var file = Path.Combine(home, "projects", "orders.yaml");
+        var yaml = Regex.Replace(File.ReadAllText(file), @"\{ id: release,[^}]*\}", $"{{ id: release, kind: release, {settings} }}");
+        File.WriteAllText(file, yaml);
+        registry.Reload();
+    }
+
+    private Task SeedReady(string key, string mergeCommit, string sourceStatus = "In Review") =>
+        Seed(key, "release", StageStatus.Pending, sourceStatus, t => t.MergeCommit = mergeCommit);
+
+    /// <summary>Release now for the project, with main..production holding <paramref name="commits"/>; returns the preview.</summary>
+    private async Task<ReleasePreview> ReleaseNow(Orchestrator o, params string[] commits)
+    {
+        git.FirstParentCommits = [.. commits];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(preview.Unavailable);
+        var started = await o.ReleaseNowAsync("orders", preview, CancellationToken.None);
+        Assert.True(started.Started, started.Message);
+        // The push created the release branch at the previewed main head.
+        scm.BranchHeads.TryAdd(store.Single(started.ReleaseKey!).Branch!, preview.MainHead!);
+        return preview;
+    }
+
+    private long ReleasePr => store.Single("_release-1").ReleasePullRequestId!.Value;
+
+    [Fact] public async Task Release_ticket_opens_pr_from_release_branch_waits_merges_and_finishes_members()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        var o = Create();
+        await ReleaseNow(o, "merge-2", "merge-1");
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((TicketKind.Release, "release", StageStatus.AwaitingApproval), (release.Kind, release.StageId, release.Status));
+        var opened = Assert.Single(scm.Opened);
+        Assert.Equal(("symphonist/release-1", "production", "Release 1: ORD-1, ORD-2"), (opened.Source, opened.Destination, opened.Title));
+        Assert.Equal(release.ReleaseSummary, opened.Description);
+        Assert.Contains("- ORD-1: Title ORD-1", opened.Description);
+        Assert.Equal(("release", StageStatus.Pending, release.Id), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status,
+            store.Single("ORD-1").ReleaseTicketId));
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, $"merge-{ReleasePr}"), (release.Status, release.ReleaseMergeCommit));
+        foreach (var key in new[] { "ORD-1", "ORD-2" })
+        {
+            var m = store.Single(key);
+            Assert.Equal(("deploy", (Guid?)null, $"merge-{ReleasePr}"), (m.StageId, m.ReleaseTicketId, m.ReleaseMergeCommit));
+            Assert.Contains("released; advanced to deploy", store.EventMessages(key));
+        }
+        Assert.Contains("release merged", store.EventMessages("_release-1"));
+
+        builds.Statuses[$"merge-{ReleasePr}"] = BuildStatus.Succeeded;
+        await TickIdle(o);
+        Assert.Equal((StageStatus.Done, "done"), (store.Single("ORD-1").Status, store.Single("ORD-1").StageId));
+        Assert.Equal("Done", tracker.Tickets.Single(t => t.Key == "ORD-1").Status);
+    }
+
+    [Fact] public async Task Ticket_merged_after_release_now_is_not_in_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        // After Release now: ORD-2 merges into main (main moves) and becomes ready.
+        await SeedReady("ORD-2", "merge-2");
+        git.RemoteCommits["refs/remotes/origin/main"] = "main001";
+        scm.BranchHeads["main"] = "main001";
+
+        await TickIdle(o);
+
+        // The PR ships the frozen branch, pushed at the main head the developer confirmed.
+        var opened = Assert.Single(scm.Opened);
+        Assert.Equal("symphonist/release-1", opened.Source);
+        Assert.Equal("main000", git.RemoteCommits["refs/remotes/origin/symphonist/release-1"]);
+        Assert.DoesNotContain("ORD-2", opened.Description);
+        Assert.DoesNotContain("ORD-2", opened.Title);
+        Assert.Null(store.Single("ORD-2").ReleaseTicketId);
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        var two = store.Single("ORD-2");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null, (string?)null),
+            (two.StageId, two.Status, two.ReleaseTicketId, two.ReleaseMergeCommit));
+        Assert.True(PipelineEngine.IsReadyToRelease(registry.Get("orders"), two));
+        git.FirstParentCommits = ["merge-2"];
+        var next = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(next.Unavailable);
+        Assert.Equal(["ORD-2"], next.Ready);
+    }
+
+    [Fact] public async Task Member_card_moved_to_approved_status_does_not_approve()
+    {
+        ReleaseSettings("gate: human, approvedWhenStatus: Released");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // the release PR is open, waiting at the gate
+
+        tracker.Move("ORD-1", "Released");
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+        Assert.Empty(scm.MergeCalls);
+        Assert.Empty(store.GateDecisions);
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, store.Single("_release-1").Id), (m.StageId, m.Status, m.ReleaseTicketId));
+
+        // Only the release ticket's own approval merges, and the moved card is then simply advanced.
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+    }
+
+    [Fact] public async Task Member_card_moved_back_goes_to_that_stage_after_merge()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        var o = Create();
+        await ReleaseNow(o, "merge-2", "merge-1");
+        await TickIdle(o);
+
+        tracker.Move("ORD-2", "In Progress"); // the developer wants it reworked
+        await TickIdle(o);
+        Assert.Equal(("release", "In Progress"), (store.Single("ORD-2").StageId, store.Single("ORD-2").PendingSourceStatus));
+        Assert.Equal(store.Single("_release-1").Id, store.Single("ORD-2").ReleaseTicketId); // its code ships anyway
+
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        var two = store.Single("ORD-2");
+        Assert.Equal(("implement", (Guid?)null), (two.StageId, two.ReleaseTicketId));
+        Assert.Contains("released; sent back to implement: card moved to 'In Progress'", store.EventMessages("ORD-2"));
+    }
+
+    [Fact] public async Task Members_cards_move_to_gate_status_while_release_waits()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+        await SeedReady("ORD-3", "merge-3");
+        var o = Create();
+        await ReleaseNow(o, "merge-3", "merge-2", "merge-1");
+        tracker.Move("ORD-3", "In Progress"); // moved back before the release waits: its card stays there
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+        Assert.Equal([("ORD-1", "Ready For Release"), ("ORD-2", "Ready For Release")], tracker.Transitions);
+        Assert.Equal("Ready For Release", store.Single("ORD-1").LastSourceStatus);
+        Assert.Equal("In Progress", tracker.Tickets.Single(t => t.Key == "ORD-3").Status);
+        Assert.Equal("In Progress", store.Single("ORD-3").PendingSourceStatus);
+
+        await TickIdle(o); // our own moves are not developer moves
+        Assert.Null(store.Single("ORD-1").PendingSourceStatus);
+        Assert.Equal(StageStatus.AwaitingApproval, store.Single("_release-1").Status);
+    }
+
+    [Fact] public async Task Member_card_move_that_fails_is_retried_for_that_member()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        tracker.TransitionError = new HttpRequestException("jira down");
+
+        await TickIdle(o);
+        Assert.Equal("Ready For Release", store.Single("ORD-1").TrackerRetryStatus);
+        Assert.Contains("tracker transition to 'Ready For Release' failed: jira down", store.EventMessages("ORD-1"));
+
+        tracker.TransitionError = null;
+        await TickIdle(o);
+        Assert.Equal(("Ready For Release", (string?)null),
+            (store.Single("ORD-1").LastSourceStatus, store.Single("ORD-1").TrackerRetryStatus));
+        Assert.Null(store.Single("_release-1").TrackerRetryStatus);
+    }
+
+    [Fact] public async Task Release_ticket_never_touches_the_tracker_with_its_own_key()
+    {
+        ReleaseSettings("gate: human, onGateStatus: Ready For Release");
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+
+        await TickIdle(o);
+        await TickIdle(o);
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.DoesNotContain(tracker.Transitions, t => t.Key.StartsWith('_'));
+        Assert.DoesNotContain(tracker.Comments, c => c.Key.StartsWith('_'));
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, (string?)null), (release.Status, release.BlockedReason));
+        Assert.DoesNotContain(store.EventMessages("_release-1"), m => m.Contains("no longer matches tracker query"));
+        Assert.DoesNotContain(store.EventMessages("_release-1"), m => m.Contains("tracker"));
+    }
+
+    [Fact] public async Task Pr_merged_outside_symphonist_completes_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Merged, "merged-by-hand");
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, "merged-by-hand"), (release.Status, release.ReleaseMergeCommit));
+        Assert.Empty(scm.MergeCalls);
+        var decision = Assert.Single(store.GateDecisions);
+        Assert.Equal((release.Id, GateDecision.Approved, false), (decision.TicketId, decision.Decision, decision.Auto));
+        Assert.Contains($"release PR {ReleasePr} merged outside Symphonist; release approved", store.EventMessages("_release-1"));
+        var m = store.Single("ORD-1");
+        Assert.Equal(("deploy", "merged-by-hand", (Guid?)null), (m.StageId, m.ReleaseMergeCommit, m.ReleaseTicketId));
+    }
+
+    [Fact] public async Task Pr_closed_outside_symphonist_cancels_the_batch()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Declined);
+
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, (string?)null), (release.Status, release.ReleaseMergeCommit));
+        Assert.Empty(scm.DeclineCalls); // already closed
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal(GateDecision.SentBack, Assert.Single(store.GateDecisions).Decision);
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
+        Assert.Contains("_release-1 cancelled; ready to release again", store.EventMessages("ORD-1"));
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Null(preview.Unavailable);
+        Assert.Equal(["ORD-1"], preview.Ready);
+    }
+
+    [Fact] public async Task Sending_back_the_release_declines_the_pr_and_returns_members()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+
+        var outcome = await o.SendBackAsync("orders", "_release-1", "not before the holidays", null, CancellationToken.None);
+
+        Assert.True(outcome.Changed);
+        Assert.Equal([ReleasePr], scm.DeclineCalls);
+        var release = store.Single("_release-1");
+        Assert.Equal((StageStatus.Done, "not before the holidays"), (release.Status, release.Feedback));
+        Assert.Contains($"release PR {ReleasePr} closed", store.EventMessages("_release-1"));
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
+        Assert.Contains("_release-1 cancelled; ready to release again", store.EventMessages("ORD-1"));
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Send_back_after_the_pr_merged_on_the_host_completes_the_batch_instead()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.PullRequests[ReleasePr] = FakeSourceControl.Pr(ReleasePr, PullRequestState.Merged, "merged-by-hand"); // not seen yet
+
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "wait", null, CancellationToken.None)).Changed);
+
+        Assert.Empty(scm.DeclineCalls);
+        Assert.Equal("merged-by-hand", store.Single("_release-1").ReleaseMergeCommit);
+        Assert.Equal(("deploy", "merged-by-hand"), (store.Single("ORD-1").StageId, store.Single("ORD-1").ReleaseMergeCommit));
+    }
+
+    [Fact] public async Task Failed_decline_is_recorded_and_the_batch_is_still_cancelled()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        scm.DeclineError = new HttpRequestException("bitbucket down");
+
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "no", null, CancellationToken.None)).Changed);
+
+        Assert.Contains($"could not close release PR {ReleasePr}: bitbucket down; close it by hand", store.EventMessages("_release-1"));
+        Assert.Null(store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Theory]
+    [InlineData("gate: human")]
+    [InlineData("gate: none")]
+    public async Task Legacy_ticket_with_open_release_pr_finishes_the_old_way(string gate)
+    {
+        ReleaseSettings(gate);
+        var pr = scm.AddOpen(5, "main");
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "merge-1";
+            t.ReleasePullRequestId = pr.Id;
+        });
+        builds.Statuses["merge-5"] = BuildStatus.Succeeded;
+        var o = Create();
+
+        await TickIdle(o);
+
+        // A release always needs one more approval: with gate none too, the legacy PR now waits for it.
+        Assert.Equal(("release", StageStatus.AwaitingApproval), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        git.FirstParentCommits = ["merge-1"];
+        var preview = await o.PreviewReleaseAsync("orders", CancellationToken.None);
+        Assert.Empty(preview.Ready);
+        Assert.Equal([new AlsoShipped("ORD-1", "release", StageStatus.AwaitingApproval, false)], preview.AlsoShipped);
+
+        Assert.True((await o.ApproveAsync("orders", "ORD-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Equal([5L], scm.MergeCalls);
+        Assert.Empty(scm.Opened);
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+        Assert.Equal((StageStatus.Done, "merge-5"), (store.Single("ORD-1").Status, store.Single("ORD-1").ReleaseMergeCommit));
+    }
+
+    [Fact] public async Task Legacy_ticket_whose_pr_closed_waits_for_a_batch_instead_of_opening_one()
+    {
+        scm.PullRequests[5] = FakeSourceControl.Pr(5, PullRequestState.Declined);
+        await Seed("ORD-1", "release", StageStatus.Pending, "In Review", t =>
+        {
+            t.MergeCommit = "merge-1";
+            t.ReleasePullRequestId = 5;
+        });
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(scm.Opened);
+        var t = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (long?)null), (t.StageId, t.Status, t.ReleasePullRequestId));
+        Assert.True(PipelineEngine.IsReadyToRelease(registry.Get("orders"), t));
+    }
+
+    [Fact] public async Task Ready_ticket_opens_no_pr_of_its_own()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        Assert.Empty(scm.Opened);
+        Assert.Equal(("release", StageStatus.Pending), (store.Single("ORD-1").StageId, store.Single("ORD-1").Status));
+        Assert.Empty(store.EventMessages("ORD-1"));
+    }
+
+    [Fact] public async Task Auto_approval_comment_for_a_release_goes_on_the_pr()
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened, waiting at the gate with a review owed
+
+        await TickIdle(o); // review: low -> approved
+
+        var release = store.Single("_release-1");
+        Assert.Equal(StageStatus.Approved, release.Status);
+        Assert.Equal(("symphonist/release-1", "main000", "prod000"), (release.ApprovedBranch, release.ApprovedHead, release.ApprovedBaseHead));
+        var comment = Assert.Single(scm.PostedComments);
+        Assert.Equal(ReleasePr, comment.Pr);
+        Assert.StartsWith("Auto-approved release: low risk.", comment.Body);
+        Assert.Empty(tracker.Comments);
+        Assert.Contains(git.DiffCalls, c => c.Range == "prod000...main000");
+
+        await TickIdle(o); // merge
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal("deploy", store.Single("ORD-1").StageId);
+        Assert.True(Assert.Single(store.GateDecisions).Auto);
+    }
+
+    [Theory]
+    [InlineData("symphonist/release-1", "rel0001",
+        "merge held: release branch moved since Release now (main000 → rel0001); send the release back and release again")]
+    [InlineData("production", "prod001", "merge held: production moved since auto-approval (prod000 → prod001)")]
+    public async Task Auto_approved_release_waits_again_when_its_branch_or_production_moves(string branch, string newHead,
+        string message)
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened
+        await TickIdle(o); // review: low -> approved
+
+        scm.BranchHeads[branch] = newHead;
+        await TickIdle(o);
+
+        var release = store.Single("_release-1");
+        Assert.Empty(scm.MergeCalls);
+        Assert.Equal((StageStatus.AwaitingApproval, true), (release.Status, release.ReviewDue));
+        Assert.Equal(message, store.EventMessages("_release-1")[^1]);
+        Assert.Equal(store.Single("_release-1").Id, store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Fact] public async Task Human_approved_release_is_held_when_the_release_branch_moved()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o); // release PR opened
+        Assert.Equal("main000", store.Single("_release-1").ReleaseBaseHead);
+
+        scm.BranchHeads["symphonist/release-1"] = "rel0001"; // someone pushed to the release branch
+        Assert.True((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        await TickIdle(o);
+
+        Assert.Empty(scm.MergeCalls);
+        var release = store.Single("_release-1");
+        Assert.Equal(StageStatus.AwaitingApproval, release.Status);
+        Assert.Equal("merge held: release branch moved since Release now (main000 → rel0001); send the release back and release again",
+            store.EventMessages("_release-1")[^1]);
+        Assert.Equal(release.Id, store.Single("ORD-1").ReleaseTicketId);
+    }
+
+    [Fact] public async Task Auto_approved_release_merges_although_main_moved()
+    {
+        Configure("active", ("release", "auto"));
+        AnswerReviews(Low);
+        await SeedReady("ORD-1", "merge-1");
+        scm.BranchHeads["symphonist/release-1"] = "main000";
+        scm.BranchHeads["production"] = "prod000";
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        await TickIdle(o);
+
+        scm.BranchHeads["main"] = "main001"; // another ticket merged: not in this release, so nothing to re-review
+        await TickIdle(o);
+
+        Assert.Equal([ReleasePr], scm.MergeCalls);
+        Assert.Equal(StageStatus.Done, store.Single("_release-1").Status);
+    }
+
+    [Fact] public async Task Ready_tickets_post_one_release_ready_notification()
+    {
+        var o = Create();
+        await TickIdle(o); // nothing ready: recorded
+        await SeedReady("ORD-1", "merge-1");
+        await SeedReady("ORD-2", "merge-2");
+
+        await TickIdle(o);
+        await TickIdle(o);
+
+        var n = Assert.Single(await Flushed());
+        Assert.Equal(("Orders (Acme) has work ready to release", "Orders (Acme) · 2 tickets ready to release"), (n.Title, n.Body));
+    }
+
+    [Fact] public async Task Release_ticket_whose_stage_left_the_pipeline_is_blocked_and_can_be_cancelled()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        await TickIdle(o);
+        var yaml = Path.Combine(home, "projects", "orders.yaml");
+        File.WriteAllText(yaml, Regex.Replace(File.ReadAllText(yaml), @"\s+- \{ id: release,[^}]*\}", ""));
+        registry.Reload();
+        Assert.Null(registry.Get("orders").ReleaseStage);
+
+        await TickIdle(o);
+
+        Assert.Equal(StageStatus.Blocked, store.Single("_release-1").Status);
+        Assert.False((await o.ApproveAsync("orders", "_release-1", CancellationToken.None)).Changed);
+        Assert.True((await o.SendBackAsync("orders", "_release-1", "stage removed", null, CancellationToken.None)).Changed);
+        Assert.Equal(StageStatus.Done, store.Single("_release-1").Status);
+        Assert.Null(store.Single("ORD-1").ReleaseTicketId);
+        Assert.Empty(scm.MergeCalls);
+    }
+
+    [Fact] public async Task Members_of_a_forgotten_release_are_released_from_it()
+    {
+        await SeedReady("ORD-1", "merge-1");
+        var o = Create();
+        await ReleaseNow(o, "merge-1");
+        // Forget refuses an open release (its PR would be orphaned); the store can still lose it (e.g. an older host).
+        Assert.Equal(ForgetResult.OpenRelease, await o.ForgetAsync("orders", "_release-1", CancellationToken.None));
+        Assert.True(await store.DeleteAsync("orders", "_release-1", CancellationToken.None));
+
+        await TickIdle(o);
+
+        var m = store.Single("ORD-1");
+        Assert.Equal(("release", StageStatus.Pending, (Guid?)null), (m.StageId, m.Status, m.ReleaseTicketId));
+    }
+
+    #endregion
 }

@@ -128,6 +128,15 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         "--no-renames", "--ignore-submodules=none", "--submodule=short",
     ];
 
+    /// <summary>The trailing <c>--</c> keeps the range from being read as a path; a range starting with '-' is refused.</summary>
+    public async Task<IReadOnlyList<string>> FirstParentCommitsAsync(string workspace, string range, CancellationToken ct)
+    {
+        if (range.Length == 0 || range.StartsWith('-'))
+            throw new ArgumentException($"'{range}' is not a revision range", nameof(range));
+        var output = await GitAsync(workspace, ct, "rev-list", "--first-parent", range, "--");
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
     /// <summary>
     /// A full ref name (<c>refs/...</c>) must exist exactly as named: <c>rev-parse</c> alone would fall back to e.g.
     /// <c>refs/tags/refs/remotes/origin/x</c>, a tag anyone who can push tags can plant.
@@ -140,6 +149,38 @@ public sealed class GitWorkspace(IProcessRunner runner, string workRoot, ILogger
         if (!r.TimedOut && r.ExitCode == 1) return null; // --quiet: no such commit
         throw new GitCommandException(GitUrls.Redact(
             $"git rev-parse {rev} failed (exit {r.ExitCode}{(r.TimedOut ? ", timed out" : "")}): {r.StandardError.Trim()}"));
+    }
+
+    /// <summary>
+    /// Only a directory holding its own <c>.git</c> counts as a checkout, so a folder inside some other repository
+    /// never reports that repository's origin.
+    /// </summary>
+    public async Task<string?> OriginUrlAsync(string checkoutPath, CancellationToken ct)
+    {
+        var dotGit = Path.Combine(checkoutPath, ".git");
+        if (!Directory.Exists(dotGit) && !File.Exists(dotGit)) return null;
+        var r = await RunAsync(checkoutPath, ct, "remote", "get-url", "origin");
+        if (r.TimedOut)
+            throw new GitCommandException($"git remote get-url origin timed out in {checkoutPath}");
+        var url = r.StandardOutput.Trim();
+        return r.ExitCode == 0 && url.Length > 0 ? GitUrls.StripUserInfo(url) : null;
+    }
+
+    public Task RemoveAsync(ProjectConfig project, string key, CancellationToken ct)
+    {
+        if (key.Length == 0 || key is "." or ".." || key.IndexOfAny(['/', '\\']) >= 0
+            || key.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            throw new ArgumentException($"'{key}' is not a workspace key", nameof(key));
+        var ws = Path.Combine(workRoot, project.Id, key);
+        if (Directory.Exists(ws))
+        {
+            // Git marks object files read-only, which Directory.Delete refuses on Windows.
+            foreach (var f in Directory.EnumerateFiles(ws, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(ws, true);
+        }
+
+        return Task.CompletedTask;
     }
 
     /// <summary>Whether the full ref <paramref name="name"/> exists exactly (no fallbacks to other namespaces).</summary>

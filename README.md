@@ -9,7 +9,8 @@ along the way. A host process does the work; the `symphonist` CLI talks to it ov
 
 - .NET 10 SDK.
 - A Docker-compatible engine, running (needed for the default `container` isolation).
-- The `claude` CLI, logged in (used once to create a long-lived token).
+- The `claude` CLI, logged in (used once to create a long-lived token). Only needed for projects that use Claude Code;
+  see [Agent providers](#agent-providers) for Codex.
 - git, with credentials for Bitbucket or GitHub already working on this machine. Symphonist pushes from the host with your git
   credentials; they are never given to the agent.
 - A Jira Cloud account and a Bitbucket Cloud account for the project you want to automate, or a GitHub account (github.com)
@@ -27,6 +28,8 @@ is never taken from arguments.
    claude setup-token
    symphonist secret set claude-code-token
    ```
+
+   Projects that run Codex need their own sign-in instead; see [Agent providers](#agent-providers).
 
 2. Jira: create an Atlassian API token (id.atlassian.com, Security, API tokens). Jira authenticates with your account
    email plus the token.
@@ -63,11 +66,18 @@ is never taken from arguments.
    GitHub's docs on these gaps say they are not permanent, so re-check them if you want a fine-grained token for a
    personal board.
 
-5. Project file: copy `samples/projects/orders.example.yaml` (Jira and Bitbucket) or
+5. Project: add it on the dashboard's setup screen (see [Adding a project](#adding-a-project)), which also stores its
+   secrets. Or, by hand, copy `samples/projects/orders.example.yaml` (Jira and Bitbucket) or
    `samples/projects/orders-github.example.yaml` (all GitHub) to `~/.symphonist/projects/<name>.yaml` and edit it. The
    example documents every field. The host reads `*.yaml` / `*.yml` from the `projects` folder of `$SYMPHONIST_HOME`
    (default `~/.symphonist`). An invalid file is logged and skipped, as are all files declaring the same project `id`;
-   other projects still load. Projects are loaded when the host starts, so restart it after editing.
+   other projects still load. After editing a file by hand, run `symphonist projects reload` (or use Reload projects on
+   the board); the setup screen reloads by itself. A ticket whose stage you removed is blocked until you send it back
+   to an existing stage. Docker images are prepared when the host starts, so after adding a container project or
+   changing its `agent` image or packages by hand, run the container check on the project's setup screen (or restart
+   the host) before its first agent run. If the host could not prepare images at startup (Docker was down, or no
+   project used containers yet), such a project's runs are refused with "agent image not prepared" until its check
+   passes.
 
    Each of `tracker`, `repo` and `build` picks its provider with `type`, and you can mix them: for example a Jira
    tracker with a GitHub repository, or a GitHub Projects board with a Bitbucket repository. The one rule is that the
@@ -89,7 +99,16 @@ Setting `SYMPHONIST_SECRET_<NAME>` overrides the credential store (name in upper
 `SYMPHONIST_SECRET_CLAUDE_CODE_TOKEN` or `SYMPHONIST_SECRET_JIRA_ACME`. When set, the OS store is not touched. On Linux
 the credential store needs Git Credential Manager's `GCM_CREDENTIAL_STORE` configured (`secretservice`, `gpg`, ...); on a
 headless Linux machine use the environment overrides instead. The overrides are read by the host, so set them in the
-environment that starts it. (`symphonist secret set` always writes to the OS store.)
+environment that starts it. (`symphonist secret set` writes to the store `SYMPHONIST_SECRET_STORE` picks.)
+
+`SYMPHONIST_SECRET_STORE` picks where secrets are kept, for the host and the CLI alike:
+
+- unset or `os`: the OS credential store (default).
+- `file`: `secrets.json` in `SYMPHONIST_HOME`, for machines without a usable credential store. It is readable by your
+  user only: mode 0600 on macOS and Linux, encrypted for your Windows account (DPAPI) on Windows. Anyone who can log in
+  as you can read it.
+- `memory`: kept by the running process only and lost when it stops; nothing is written. For development and manual
+  testing, together with a throwaway `SYMPHONIST_HOME`, so trying the setup screen never touches your real secrets.
 
 ## Starting the host
 
@@ -102,11 +121,49 @@ During development the Aspire AppHost (`src/Symphonist.AppHost`) starts it as we
 - The API listens on `127.0.0.1` only, port `5199` by default; override with `SYMPHONIST_PORT`. The CLI reads the same
   variable, so set it for both if you change it. The host refuses to serve if it ends up bound to anything else.
 - Every API call needs the token in `~/.symphonist/api-token` (created on first start); the CLI reads it for you.
+- Desktop notifications are on by default on Windows; see "Desktop notifications" below for turning them off.
 - State (ticket database, work copies, API token, `paused.json`) lives in `SYMPHONIST_HOME`, default `~/.symphonist`.
 - If any project uses container isolation, the host first removes agent containers left over from a previous run and
   makes sure the agent image (and any `agent.packages` image) exists. The first image build can take several minutes
   and delays startup (and the first poll) until it finishes. If Docker is not running, the host still starts, but agent
-  stages of container projects fail with a clear error until you start Docker and restart the host.
+  stages of container projects fail with a clear error until you start Docker and run the container check on the
+  project's setup screen (no restart needed; restarting the host also works).
+- The container check (setup screen, optional) checks that Docker answers, builds the agent image (and any
+  `agent.packages` image) when missing or stale, then lets an agent build and test the repository in a throwaway clone
+  (`work/<id>/_container-check`, deleted before and after; nothing is committed or pushed), with the project's normal
+  container sandbox and `allowedDomains`. A passing Docker step switches container runs back on, and a ready image
+  clears that image's startup error, so no restart is needed. It can be cancelled, and a failing check does not stop
+  you saving. Host-isolated projects skip it. Its log is written to `logs/<id>/_onboarding/container-check-<time>.json`.
+
+## Adding a project
+
+The dashboard's setup screen adds a project, or edits one, without touching YAML:
+
+1. Run `symphonist dashboard` and choose **Add project** on the board. To edit an existing project, open its board and
+   choose **Setup**.
+2. Pick the tracker, repository and build providers. The fields shown are the ones that provider's section of the
+   project file takes; required ones say "(required)". For Jira, entering a project key fills a blank JQL with
+   `project = KEY AND assignee = currentUser() AND labels = Claude AND statusCategory != Done`.
+3. Fill in the connections, and enter each secret in its password field with **Save secret**. The value goes straight to
+   the OS credential store; it is never shown again, kept by the page or written to the project file. The default
+   names follow the project id (`jira-<id>`, `bitbucket-<id>`, `github-<id>`). GitHub token scopes are as in
+   [One-time setup](#one-time-setup) step 4.
+4. **Check connections**. Each check says Passed, Failed or Skipped, with the reason. Nothing is written to the tracker or
+   the repository.
+5. **Propose mapping and risk areas**. An agent reads the tracker's statuses and a read-only clone of the repository and
+   proposes the statuses for each stage, extra stages and risk areas, each with its reason.
+6. Review the proposal, edit it, and **Apply proposal**. Applying changes only the form: stages it changes show
+   "(changed)", proposed stages are added only if you tick them, and a status your tracker does not have says so next to
+   the field.
+7. Optionally **Run container check** (container projects): it builds the agent image and lets an agent build and test
+   the repository in a throwaway clone.
+8. **Save project**. Nothing reaches the projects folder or the orchestrator before this. The file is checked by the
+   same loader the host uses before it is written, a new project is saved as `<id>.yaml`, and the projects reload.
+
+Editing an existing project rewrites only the sections you changed: comments and formatting elsewhere in the file stay,
+comments inside a changed section are lost, and the previous file is kept as `<file>.bak`. A save is refused (and
+nothing written) when the file changed on disk since you opened the screen, or when the pipeline drops a stage that
+active tickets sit at. The project id cannot be changed.
 
 ## Daily use
 
@@ -119,10 +176,14 @@ symphonist unblock <project> <key>          retry a blocked ticket
 symphonist forget <project> <key>           drop a ticket from Symphonist only (Jira, Bitbucket and the workspace
                                             are untouched, its downloaded attachments are deleted; if it still
                                             matches the query it is picked up again as new)
+symphonist release <project> [--yes]        Release now: ship the tickets waiting at the release stage as one release
+symphonist limits                           list providers paused by a usage limit
+symphonist limits resume <key>              let a paused provider start jobs again now
 symphonist poll                             ask the host to poll now
 symphonist projects                         list projects (and any problem stopping one)
 symphonist projects pause <id>              stop working on a project (kept in paused.json)
 symphonist projects resume <id>
+symphonist projects reload                  reload the project files after editing them by hand (lists skipped files)
 symphonist dashboard [--no-browser]         open the dashboard in your browser
 ```
 
@@ -148,6 +209,62 @@ when the host is back.
 - The dashboard needs its static assets (`blazor.web.js`), so run the host with `dotnet run` / the launch profile
   (Development) or from a `dotnet publish` output. An unpublished build run in Production returns 500 for
   `blazor.web.js`.
+
+### Releases
+
+Tickets that reach a `release` stage wait there instead of each opening their own pull request. **Release now**
+(the button on the board, or `symphonist release <project>`) ships all of them together as one release.
+
+- Release now lists the tickets that will ship, and under "what else ships" any other tickets already merged to
+  `mainBranch` (and whether they finish with this release) and any commits from outside Symphonist. Confirm to
+  continue; `--yes` on the CLI skips the question.
+- Symphonist freezes a copy of `mainBranch` as `symphonist/release-{n}` and opens one pull request from it into the
+  production branch. Later merges to `mainBranch` do not change what ships.
+- A release always waits for one more approval from you, even when the release stage has `gate: none`. Approve it from
+  the dashboard, the CLI, or by merging the PR.
+- Sending a release back cancels it: the PR is closed and the tickets go back to waiting at the release stage.
+- Moving a tracker card never approves a release. Use Symphonist or the PR.
+- A PR merged outside Symphonist completes the release; one closed outside Symphonist cancels it.
+- Release PRs opened per ticket before release batches existed finish the old way.
+
+The same thing is available over the API: `GET /api/projects/{id}/release` previews the release and
+`POST /api/projects/{id}/release` starts it.
+
+### Usage limits
+
+When Claude Code or Codex says you have used up your plan, Symphonist stops starting jobs for that provider and sign-in
+and keeps everything else running. Pauses are per provider and sign-in: `claude-code`, `codex:chatgpt`, and
+`codex:api-key:{secret}` for each Codex API key.
+
+- A pause ends at the reset time the provider gave. Without one, Symphonist tries again every 30 minutes.
+- A plain rate limit pauses for 5 minutes.
+- A pause never costs a ticket an attempt; the job simply runs later.
+- The board shows a badge for each paused provider with a Resume button.
+
+```
+symphonist limits                  list paused providers and when they resume
+symphonist limits resume <key>     let that provider start jobs again now
+```
+
+The API has `GET /api/limits` and `POST /api/limits/resume`.
+
+### Touch stats
+
+How often does a ticket need you? The strip at the top of the board and the Stats page (`/stats`) count touches:
+sending a ticket back, unblocking it, and approving a round the risk reviewer called high risk. The page shows eight
+weekly buckets; weeks start on Monday in your local time.
+
+### Desktop notifications
+
+On Windows, Symphonist shows a notification when a ticket is waiting on you, a ticket is blocked, a release is ready,
+and when a provider is paused by or resumed from a usage limit. Notifications that arrive close together are folded
+into one over 30 seconds, and clicking one opens the dashboard. Set `SYMPHONIST_NOTIFICATIONS=off` to turn them off.
+On macOS and Linux this does nothing yet.
+
+### Reopened tickets
+
+If QA moves the card of a Done ticket to the entry status of a stage, Symphonist restarts the ticket at that stage on
+a fresh branch from `mainBranch`.
 
 ### Working from Jira instead
 
@@ -177,6 +294,42 @@ rerun go together into one rerun. A comment made while the stage runs applies wh
 comments are ignored, and a card move made in the same poll takes priority. On GitHub an `@claude` comment also
 notifies the GitHub user `claude` and triggers the Claude GitHub App if you have it installed on the repository.
 Symphonist reads only the first 20 assignees and 50 labels of an issue, so keep the assignee and label within those.
+
+The marker is `@claude` unless the project sets `commentMarker` (an `@` and a name of letters, digits, `-` and `_`, at
+most 39 characters, matched without regard to case). Quote it in the YAML, because a bare `@` starts a reserved YAML
+indicator. The same marker drives Jira, GitHub issue and PR comments, and it is also on the project setup screen:
+
+```yaml
+commentMarker: "@symphonist"
+```
+
+Symphonist breaks the marker (and `@claude`) in the comments it posts, so its own text never reads as a request.
+
+### Answering Symphonist on the PR
+
+At the implement stage you can also steer the fix from the pull request. A PR comment that starts with the comment marker (`@claude`, or the project's `commentMarker`) reruns
+implement on the same PR and branch, with the comment (minus the marker) as feedback. Symphonist replies to each
+comment it addressed.
+
+- Only your own comments count by default (the PR host user that Symphonist's token belongs to). To act on teammates'
+  comments too, set `prComments.fromOthers: true`. Those comments then direct an agent that pushes under your
+  account, so enable it only for a team you trust.
+- Inline code comments count too, with the lines around them passed to the agent.
+- Each comment triggers at most one run. Several made together, or together with an `@claude` tracker comment, go into
+  one run. A comment made while implement runs applies when it reaches the gate. Symphonist's own comments are signed
+  and never trigger anything.
+- A comment made while the stage is approved and waiting to merge applies if the merge is held and the gate comes
+  back. Once the PR has merged, a comment that arrived too late gets a "merged first" reply asking you to open a
+  follow-up ticket.
+- A comment from you reruns the gate round like an `@claude` tracker comment. A teammate's comment (with `fromOthers`)
+  reruns it without deciding the gate.
+- Upgrading: on the first poll after you upgrade to a version with PR comments, `@claude` PR comments made since the
+  implement stage started, on tickets already waiting at the implement gate, are acted on.
+
+```yaml
+prComments:
+  fromOthers: false   # the default
+```
 
 ### Risk reviewer
 
@@ -236,11 +389,90 @@ Before each triage, plan or implement stage, Symphonist downloads the ticket's J
 - Jira only: GitHub Projects tickets have no attachments for now.
 - `symphonist forget` deletes the ticket's attachment folder.
 
+### Evidence on high-risk PRs
+
+Before a gated implement round waits on you, an agent can run the app from the pushed branch and report what it saw, so
+you review a result instead of a diff alone. It runs once per pushed head, only once the round has a pull request, and
+only when it is due:
+
+- `mode: high-risk` (the default): with the risk reviewer on, when its verdict is `high` (a change that touches a
+  `riskAreas` path is always `high`); a `low` verdict gathers nothing. With the reviewer off, when the change touches a
+  `riskAreas` path; without `riskAreas` it never runs.
+- `mode: always`: every gated implement round. `mode: off`: never.
+
+The report has three parts: a regression analysis (what the change could break, especially areas it was not meant to
+touch), test coverage of the affected areas with the result of the test suite, and a walkthrough of the app's major
+features with screenshots. It also says which of its steps were guesses rather than taken from your config. It appears as a signed comment on the PR, as a line on the ticket in the tracker, and on the dashboard, where
+the card and ticket detail show the states in words (Passed, Failed, Not run, Guessed) and the screenshots. A card
+whose evidence is due shows "Gathering evidence" and still counts as waiting on you.
+
+Evidence is advice for you. It never approves, blocks or fails a stage, and it never commits or pushes; it works in a
+throwaway copy of the branch. If you decide the gate (approve, send back, or move the card) while it runs, it is
+cancelled and nothing is posted.
+
+```yaml
+evidence:
+  mode: high-risk                  # off | high-risk (default) | always
+  # prompt: prompts/evidence.md    # optional prompt override, relative to the project file
+  run:                             # how to start the app; every field is optional
+    setup: [npm ci]                # at most 10 commands, run in order
+    start: npm start
+    url: http://localhost:3000
+    ready: /health                 # what to wait for before using the app
+    notes: Sign in as demo@example.com
+  features:                        # at most 20 things to exercise, in your own words
+    - { name: Checkout, steps: Add an item to the basket and pay with the test card }
+  agent: { timeoutMinutes: 30 }   # only timeoutMinutes and model (default: agent.model) here; the rest comes from `agent`
+```
+
+Onboarding can propose `run` and `features` for you.
+
+### Agent providers
+
+Any job (a stage, the risk reviewer, evidence) can run on Claude Code or on OpenAI Codex. `agent.type` is
+`claude-code` (the default) or `codex`, and the stage kinds, the reviewer and evidence can each override it:
+
+```yaml
+agent:
+  type: claude-code               # claude-code | codex
+  codex:                          # only read when a job uses Codex
+    auth: api-key                 # api-key | chatgpt
+    apiKeySecret: openai-api-key  # secret name; the default, and only with auth: api-key
+pipeline:
+  - { id: plan, kind: plan, gate: human, agent: { type: codex, timeoutMinutes: 30 } }   # type, model, timeoutMinutes
+review:
+  mode: shadow
+  agent: { type: codex }
+evidence:
+  mode: high-risk
+  agent: { type: claude-code }
+```
+
+An override that switches provider without naming a `model` uses that provider's default model, not the project's
+`agent.model`.
+
+- Codex runs only in containers for now: `agent.isolation: host` together with Codex is a load error.
+- `auth: api-key`: store the key in the OS credential store, the same way as the Claude token, under the
+  `apiKeySecret` name (default `openai-api-key`):
+
+  ```
+  symphonist secret set openai-api-key
+  ```
+- `auth: chatgpt`: run `codex login` once on this machine. Symphonist copies `auth.json` into each run and writes a
+  refreshed login back afterwards (only if it is the same account). `CODEX_HOME` is honoured.
+- A run only receives the credential of its own provider.
+- No dollar cost is shown for Codex runs.
+- The default agent image is `symphonist/agent:2`, which has both CLIs. A custom `agent.image` must contain the CLIs
+  the project uses; the setup check verifies this. Images built `FROM` the old `symphonist/agent-claude:1` keep working
+  for Claude-only projects; rebuild them on `symphonist/agent:2` to use Codex.
+- The container firewall allows each provider's own domains automatically (Codex: `api.openai.com`; with
+  `auth: chatgpt` also `auth.openai.com` and `chatgpt.com`), on top of `agent.allowedDomains`.
+
 ### Sandbox
 
 - `container` (default): the agent runs in Docker with the workspace mounted, `.git` mounted read-only, and a network
   allowlist (Claude Code's own hosts plus `agent.allowedDomains`; HTTPS/HTTP on TCP 443/80 only). Jira, Bitbucket and git
-  credentials stay on the host; the only secret the container receives is the Claude token. Symphonist itself commits,
+  credentials stay on the host; the only credential a container receives is the one for its own provider (the Claude token, or the Codex sign-in). Symphonist itself commits,
   pushes and opens PRs from the host using your git credentials. If the origin URL of your checkout embeds credentials
   (`https://user:token@...`), Symphonist strips them from agent workspaces (and masks them in errors) and logs a
   warning; pushes then authenticate through your git credential helper, so make sure one is configured. Git never
@@ -298,11 +530,14 @@ repo with a trivial `bitbucket-pipelines.yml`; or a throwaway GitHub Projects bo
   user, lost the label, or moved to a column outside `statuses`. Build or Deploy `Blocked` with `build failed` means a
   workflow run on the commit failed; re-run it in GitHub Actions, then `symphonist unblock <project> <key>`. Runs
   triggered by issue comments, schedules, manual dispatches and other non-code events are ignored.
-- Docker not running: container stages fail with a Docker error. Start Docker and restart the host (availability is
-  checked at startup).
+- Docker not running: container stages fail with a Docker error. Start Docker, then run the container check on the
+  project's setup screen; when it passes, container runs work again without a restart. (Availability is otherwise
+  checked only at startup, so restarting the host also works.) Run the check once per container project whose image
+  was not prepared.
 - `Symphonist host is not running on 127.0.0.1:<port>` (exit code 2): start the host, and check that `SYMPHONIST_PORT`
   matches for host and CLI. The same message appears if `~/.symphonist/api-token` does not exist yet.
-- A project is missing from `symphonist projects`: check the host log for `Skipping project file ...`.
+- A project is missing from `symphonist projects`: run `symphonist projects reload`; it names each skipped file and
+  why (the board shows the same as banners, and the host log as `Skipping project file ...`).
 - A project's tickets never move and `symphonist projects` shows a `PROBLEM` (for example `secret 'jira-acme' not set;
   run: symphonist secret set jira-acme`, or `tracker query failed: ...`): fix the cause (store the secret, check the
   token or JQL). The problem clears on the next poll that succeeds; run `symphonist poll` to retry now.

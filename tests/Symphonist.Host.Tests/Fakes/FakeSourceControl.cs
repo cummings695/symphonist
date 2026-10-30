@@ -79,6 +79,19 @@ public sealed class FakeSourceControl : ISourceControl
         return Task.FromResult(result);
     }
 
+    public List<long> DeclineCalls { get; } = [];
+
+    /// <summary>Thrown from DeclinePullRequestAsync when set (after recording the call).</summary>
+    public Exception? DeclineError { get; set; }
+
+    public Task DeclinePullRequestAsync(long id, CancellationToken ct)
+    {
+        DeclineCalls.Add(id);
+        if (DeclineError is not null) throw DeclineError;
+        PullRequests[id] = (PullRequests.GetValueOrDefault(id) ?? Pr(id)) with { State = PullRequestState.Declined };
+        return Task.CompletedTask;
+    }
+
     /// <summary>Branch heads for GetBranchHeadAsync; unknown branches throw.</summary>
     public Dictionary<string, string> BranchHeads { get; } = [];
 
@@ -94,4 +107,38 @@ public sealed class FakeSourceControl : ISourceControl
         Task.FromResult(OnBranchContains(branch, other));
 
     public Uri BranchFileUrl(string branch, string path) => new($"https://scm.example/src/{branch}/{path}");
+
+    public Dictionary<long, List<PullRequestComment>> Comments { get; } = [];
+    public List<(long Pr, string Body)> PostedComments { get; } = [];
+    public List<(long Pr, string CommentId, string Body)> Replies { get; } = [];
+
+    /// <summary>Thrown from ReplyToPullRequestCommentAsync when it returns an exception for the comment id.</summary>
+    public Func<string, Exception?>? ReplyError { get; set; }
+
+    /// <summary>Thrown from ListPullRequestCommentsAsync when set.</summary>
+    public Exception? CommentsError { get; set; }
+
+    public Task<IReadOnlyList<PullRequestComment>> ListPullRequestCommentsAsync(long id, CancellationToken ct)
+    {
+        if (CommentsError is not null) throw CommentsError;
+        return Task.FromResult<IReadOnlyList<PullRequestComment>>(
+            Comments.TryGetValue(id, out var list) ? [.. list] : []);
+    }
+
+    /// <summary>Thrown from CommentOnPullRequestAsync when set.</summary>
+    public Exception? CommentError { get; set; }
+
+    public Task CommentOnPullRequestAsync(long id, string markdown, CancellationToken ct)
+    {
+        if (CommentError is not null) throw CommentError;
+        PostedComments.Add((id, markdown));
+        return Task.CompletedTask;
+    }
+
+    public Task ReplyToPullRequestCommentAsync(long id, PullRequestComment comment, string markdown, CancellationToken ct)
+    {
+        if (ReplyError?.Invoke(comment.Id) is { } error) throw error;
+        Replies.Add((id, comment.Id, markdown));
+        return Task.CompletedTask;
+    }
 }

@@ -13,7 +13,7 @@ public sealed class FakeAgentRunner : IAgentRunner
     public Queue<AgentRunResult> Results { get; } = new();
 
     /// <summary>Fallback result; default succeeds with summary "done".</summary>
-    public Func<AgentRunRequest, AgentRunResult> OnRun { get; set; } = _ => Ok(Output());
+    public Func<AgentRunRequest, AgentRunResult> OnRun { get; set; } = r => r.OutputSchema == PrFixOutputSchema.Json ? PrFix() : Ok(Output());
 
     /// <summary>Asynchronous fallback (e.g. to block a run on a TaskCompletionSource); takes precedence over <see cref="OnRun"/>.</summary>
     public Func<AgentRunRequest, Task<AgentRunResult>>? OnRunAsync { get; set; }
@@ -28,8 +28,17 @@ public sealed class FakeAgentRunner : IAgentRunner
     public static AgentRunResult Ok(StageOutput output) =>
         new(true, output, 0.25m, TimeSpan.FromSeconds(3), null, """{"raw":true}""");
 
+    /// <summary>A successful PR comments fix run with no replies (each comment then gets the default reply).</summary>
+    public static AgentRunResult PrFix() =>
+        new(true, null, 0.25m, TimeSpan.FromSeconds(3), null, """{"raw":true}""",
+            JsonSerializer.SerializeToElement(new { status = "completed", summary = "done", replies = Array.Empty<object>() }));
+
     public static AgentRunResult Fail(string error) =>
         new(false, null, null, TimeSpan.FromSeconds(1), error, """{"raw":false}""");
+
+    /// <summary>A run the provider's usage limit stopped; <paramref name="resetsAt"/> null when it named no reset.</summary>
+    public static AgentRunResult Limited(DateTimeOffset? resetsAt, string error = "Claude usage limit reached") =>
+        new(false, null, null, TimeSpan.FromSeconds(1), error, """{"raw":"limited"}""", Limit: new UsageLimit(resetsAt));
 
     /// <summary>A successful review run whose structured output is a gate verdict.</summary>
     public static AgentRunResult Review(string risk, string summary = "reviewed", string[]? reasons = null,

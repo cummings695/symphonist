@@ -1,0 +1,19 @@
+{
+  "data": {
+    "repositoryOwner": {
+      "projectV2": {
+        "id": "PVT_kwDOA1",
+        "title": "Orders board",
+        "field": {
+          "options": [
+            { "name": "Backlog", "description": "Not yet looked at" },
+            { "name": "Planned", "description": "Plan approved" },
+            { "name": "In Progress", "description": "Being built" },
+            { "name": "In Review", "description": "Pull request open" },
+            { "name": "Done", "description": "" }
+          ]
+        }
+      }
+    }
+  }
+}

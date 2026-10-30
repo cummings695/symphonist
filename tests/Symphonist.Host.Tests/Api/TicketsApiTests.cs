@@ -46,6 +46,7 @@ public sealed class TicketsApiTests : IDisposable
     private readonly FakeTracker tracker = new();
     private readonly FakeAgentRunner agent = new();
     private readonly FakeProcessRunner processes = new();
+    private readonly FakeGitWorkspace gitWorkspace = new();
     private readonly FakeIntegrationFactory integrations;
     private readonly WebApplicationFactory<Program> factory;
     private readonly HttpClient client;
@@ -59,7 +60,7 @@ public sealed class TicketsApiTests : IDisposable
         {
             s.AddSingleton<ITicketStore>(store);
             s.AddSingleton<IIntegrationFactory>(integrations);
-            s.AddSingleton<IGitWorkspace>(new FakeGitWorkspace());
+            s.AddSingleton<IGitWorkspace>(gitWorkspace);
             s.AddSingleton<IAgentRunner>(agent);
             s.AddSingleton<IProcessRunner>(processes);
             s.AddSingleton<ISecretStore>(new NoSecrets());
@@ -104,6 +105,79 @@ public sealed class TicketsApiTests : IDisposable
     {
         Assert.True(response.IsSuccessStatusCode, $"{(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
         return await response.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    [Fact]
+    public async Task Api_release_preview_and_start()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var ready = await Seed("ORD-1", "release", StageStatus.Pending);
+        ready.MergeCommit = "merge-1";
+        await store.SaveAsync(ready, default);
+        gitWorkspace.FirstParentCommits = ["merge-1"];
+
+        var preview = await Json(await Authorized().GetAsync("/api/projects/orders/release"));
+        Assert.Equal(["ORD-1"], preview.GetProperty("ready").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(JsonValueKind.Null, preview.GetProperty("unavailable").ValueKind);
+        Assert.Equal("production", preview.GetProperty("productionBranch").GetString());
+
+        // A stale confirmation is refused.
+        var stale = Authorized().PostAsJsonAsync("/api/projects/orders/release",
+            new ReleasePreview("orders", ["ORD-1", "ORD-2"], [], 0, "main000", null));
+        var refused = await stale;
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Equal("the release changed; review it again", (await refused.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+
+        // Posting the preview as received starts it.
+        var started = await Authorized().PostAsync("/api/projects/orders/release", JsonContent.Create(preview));
+        var result = await Json(started);
+        Assert.True(result.GetProperty("started").GetBoolean());
+        Assert.Equal("_release-1", result.GetProperty("releaseKey").GetString());
+        Assert.Contains(store.Tickets, t => t.Kind == TicketKind.Release && t.Key == "_release-1");
+
+        Assert.Equal(HttpStatusCode.NotFound, (await Authorized().GetAsync("/api/projects/nope/release")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateClient().GetAsync("/api/projects/orders/release")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("""{"projectId":"orders","ready":null,"alsoShipped":[],"outsideCommits":0,"mainHead":"main000"}""")]
+    [InlineData("""{"projectId":"orders","ready":["ORD-1"],"alsoShipped":null,"outsideCommits":0,"mainHead":"main000"}""")]
+    [InlineData("""{"projectId":"orders","outsideCommits":0,"mainHead":"main000"}""")]
+    public async Task Release_with_missing_lists_is_400(string body)
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var ready = await Seed("ORD-1", "release", StageStatus.Pending); // a release is available, so the body is compared
+        ready.MergeCommit = "merge-1";
+        await store.SaveAsync(ready, default);
+        gitWorkspace.FirstParentCommits = ["merge-1"];
+
+        var response = await Authorized().PostAsync("/api/projects/orders/release",
+            new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("the confirmed preview is required",
+            (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.DoesNotContain(store.Tickets, t => t.Kind == TicketKind.Release);
+    }
+
+    [Fact]
+    public async Task Forget_refused_for_an_open_release_is_409()
+    {
+        home.WriteProject("orders.yaml", TestHome.ReleaseProjectYaml("orders"));
+        Assert.True((await Authorized().PostAsync("/api/projects/reload", null)).IsSuccessStatusCode);
+        var o = factory.Services.GetRequiredService<Orchestrator>();
+        var p = factory.Services.GetRequiredService<ProjectRegistry>().Get("orders");
+        await store.SaveAsync(PipelineEngine.CreateRelease(p, 1, "Release 1", "symphonist/release-1", "", DateTimeOffset.UtcNow), default);
+
+        var response = await Authorized().DeleteAsync("/api/tickets/orders/_release-1");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("_release-1 is an open release; send it back to cancel it (closing its pull request) before forgetting it",
+            (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Contains(store.Tickets, t => t.Key == "_release-1");
     }
 
     [Fact]
@@ -431,5 +505,58 @@ public sealed class TicketsApiTests : IDisposable
     {
         await Authorized().GetAsync("/api/projects");
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(SymphonistPaths.Resolve("api-token")));
+    }
+
+    [Fact]
+    public async Task Reload_endpoint_returns_projects_and_errors()
+    {
+        var before = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(2, before.GetArrayLength());
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+        home.WriteProject("bad.yaml", "id: bad\n");
+
+        var reload = await Json(await Authorized().PostAsync("/api/projects/reload", null));
+
+        Assert.Equal(["billing", "orders", "shop"],
+            reload.GetProperty("projects").EnumerateArray().Select(p => p.GetString()).Order(StringComparer.Ordinal));
+        var errors = reload.GetProperty("errors");
+        Assert.Contains("missing required", errors.GetProperty("bad.yaml").GetString());
+        var after = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(["billing", "orders", "shop"], after.EnumerateArray().Select(p => p.GetProperty("id").GetString()));
+    }
+
+    [Fact]
+    public async Task Reload_endpoint_requires_api_token()
+    {
+        home.WriteProject("shop.yaml", TestHome.ProjectYaml("shop"));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/projects/reload", null)).StatusCode);
+        var projects = await Json(await Authorized().GetAsync("/api/projects"));
+        Assert.Equal(2, projects.GetArrayLength()); // not reloaded
+    }
+
+    [Fact]
+    public async Task Limits_endpoint_lists_and_resumes()
+    {
+        var limits = factory.Services.GetRequiredService<ProviderLimits>();
+        var resets = DateTimeOffset.UtcNow.AddHours(1);
+        await limits.PauseAsync("codex:chatgpt", new UsageLimit(resets), default);
+
+        var list = await Json(await Authorized().GetAsync("/api/limits"));
+
+        var pause = Assert.Single(list.EnumerateArray());
+        Assert.Equal("codex:chatgpt", pause.GetProperty("key").GetString());
+        Assert.Equal("Codex", pause.GetProperty("provider").GetString());
+        Assert.Equal(resets, pause.GetProperty("resetsAt").GetDateTimeOffset());
+        Assert.Equal(JsonValueKind.Null, pause.GetProperty("nextProbeAt").ValueKind);
+
+        var resumed = await Authorized().PostAsJsonAsync("/api/limits/resume", new { key = "codex:chatgpt" });
+        Assert.Equal(HttpStatusCode.NoContent, resumed.StatusCode);
+        Assert.Empty(limits.Pauses);
+        Assert.Equal(0, (await Json(await Authorized().GetAsync("/api/limits"))).GetArrayLength());
+
+        var again = await Authorized().PostAsJsonAsync("/api/limits/resume", new { key = "codex:chatgpt" });
+        Assert.Equal(HttpStatusCode.NotFound, again.StatusCode);
+        Assert.Contains("codex:chatgpt", await again.Content.ReadAsStringAsync());
     }
 }

@@ -1,0 +1,42 @@
+@using Symphonist.Core.Config
+@* One agent provider choice: Claude Code or Codex, plus an optional leading "use the project's" entry (blank value).
+   Codex is disabled while the project runs on the host; a choice already made is kept and Save reports it. *@
+<div class="setup-field">
+    <label for="@Id">Provider</label>
+    <select id="@Id" value="@(Value ?? string.Empty)" aria-describedby="@(CodexAllowed ? null : HintId)" @onchange="Changed">
+        @if (DefaultLabel is not null)
+        {
+            <option value="" selected="@(string.IsNullOrEmpty(Value))">@DefaultLabel</option>
+        }
+        @foreach (var type in AgentTypes.All)
+        {
+            <option value="@type" selected="@(Value == type)" disabled="@(type == AgentTypes.Codex && !CodexAllowed)">@Display(type)</option>
+        }
+    </select>
+    @if (!CodexAllowed)
+    {
+        <span class="hint" id="@HintId">Codex runs only in containers</span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Id { get; set; } = string.Empty;
+
+    /// <summary>The chosen provider type; null or blank is the default entry.</summary>
+    [Parameter] public string? Value { get; set; }
+
+    /// <summary>The label of the blank entry ("Project default"); null offers no blank entry.</summary>
+    [Parameter] public string? DefaultLabel { get; set; }
+
+    [Parameter] public bool CodexAllowed { get; set; } = true;
+
+    /// <summary>The chosen type, or null for the default entry.</summary>
+    [Parameter] public EventCallback<string?> ValueChanged { get; set; }
+
+    private string HintId => $"{Id}-hint";
+
+    private static string Display(string type) => type == AgentTypes.Codex ? "Codex" : "Claude Code";
+
+    private Task Changed(ChangeEventArgs e) =>
+        ValueChanged.InvokeAsync(e.Value is string text && AgentTypes.All.Contains(text) ? text : null);
+}

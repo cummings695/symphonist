@@ -18,6 +18,8 @@ public sealed class FakeTicketStore : ITicketStore
     public List<AgentRunRecord> AgentRuns { get; } = [];
     public List<GateReview> GateReviews { get; } = [];
     public List<GateDecisionRecord> GateDecisions { get; } = [];
+    public List<EvidenceRecord> Evidence { get; } = [];
+    public List<TouchRecord> Touches { get; } = [];
 
     /// <summary>Thrown from ResetInterruptedRunsAsync when set.</summary>
     public Exception? ResetError { get; set; }
@@ -164,8 +166,58 @@ public sealed class FakeTicketStore : ITicketStore
             AgentRuns.RemoveAll(r => r.TicketId == ticket.Id);
             GateReviews.RemoveAll(r => r.TicketId == ticket.Id);
             GateDecisions.RemoveAll(d => d.TicketId == ticket.Id);
+            Evidence.RemoveAll(x => x.TicketId == ticket.Id);
+            Touches.RemoveAll(x => x.TicketId == ticket.Id);
             return Task.FromResult(true);
         }
+    }
+
+    public Task AddTouchAsync(TouchRecord touch, CancellationToken ct)
+    {
+        lock (sync) Touches.Add(touch);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<GateDecisionRecord>> GateDecisionsAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<GateDecisionRecord>>(GateDecisions
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.At >= since).OrderBy(x => x.At).ToList());
+    }
+
+    public Task<IReadOnlyList<GateReview>> GateReviewsSinceAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<GateReview>>(GateReviews
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.WaitingSince >= since - TimeSpan.FromDays(30))
+                .OrderBy(x => x.At).ToList());
+    }
+
+    public Task<IReadOnlyList<TouchRecord>> TouchesAsync(string? projectId, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<TouchRecord>>(Touches
+                .Where(x => (projectId is null || x.ProjectId == projectId) && x.At >= since).OrderBy(x => x.At).ToList());
+    }
+
+    public Task AddEvidenceAsync(EvidenceRecord record, CancellationToken ct)
+    {
+        lock (sync) Evidence.Add(record);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<EvidenceRecord>> EvidenceAsync(Guid ticketId, CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyList<EvidenceRecord>>(
+                Evidence.Where(x => x.TicketId == ticketId).Reverse().OrderByDescending(x => x.At).ToList());
+    }
+
+    public Task<IReadOnlyDictionary<Guid, bool>> EvidenceIssuesAsync(CancellationToken ct)
+    {
+        lock (sync)
+            return Task.FromResult<IReadOnlyDictionary<Guid, bool>>(Evidence.GroupBy(x => x.TicketId)
+                .ToDictionary(g => g.Key, g => g.Reverse().OrderByDescending(x => x.At).First().HasIssues));
     }
 
     public Task<IReadOnlyDictionary<Guid, decimal>> AgentCostsAsync(CancellationToken ct)
@@ -173,6 +225,32 @@ public sealed class FakeTicketStore : ITicketStore
         lock (sync)
             return Task.FromResult<IReadOnlyDictionary<Guid, decimal>>(AgentRuns.Where(r => r.CostUsd is not null)
                 .GroupBy(r => r.TicketId).ToDictionary(g => g.Key, g => g.Sum(r => r.CostUsd!.Value)));
+    }
+
+    public List<ProviderPause> ProviderPauses { get; } = [];
+
+    public Task<IReadOnlyList<ProviderPause>> ProviderPausesAsync(CancellationToken ct)
+    {
+        lock (sync) return Task.FromResult<IReadOnlyList<ProviderPause>>(ProviderPauses.ToList());
+    }
+
+    public Task SaveProviderPauseAsync(ProviderPause pause, CancellationToken ct)
+    {
+        lock (sync)
+        {
+            ProviderPauses.RemoveAll(p => p.Key == pause.Key);
+            ProviderPauses.Add(pause);
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>When set, RemoveProviderPauseAsync waits for it before removing (a write already under way).</summary>
+    public TaskCompletionSource? HoldPauseRemoval { get; set; }
+
+    public async Task RemoveProviderPauseAsync(string key, CancellationToken ct)
+    {
+        if (HoldPauseRemoval is { } hold) await hold.Task;
+        lock (sync) ProviderPauses.RemoveAll(p => p.Key == key);
     }
 
     public Task<int> ResetInterruptedRunsAsync(Func<string, string, bool> isAgentStage, DateTimeOffset now, CancellationToken ct)

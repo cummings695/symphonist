@@ -1,0 +1,810 @@
+using Symphonist.Core.Config;
+using Symphonist.Core.Integrations.Providers;
+using Symphonist.Core.Onboarding;
+using Symphonist.Integrations;
+using Symphonist.Integrations.GitHub;
+
+namespace Symphonist.Core.Tests.Onboarding;
+
+public class ProjectYamlWriterTests
+{
+    private static readonly ProviderRegistry Registry = BuiltInProviders.Registry;
+    private static readonly string ConfigDir = Path.Combine(AppContext.BaseDirectory, "Config");
+
+    private static string SamplePath(string name) => Path.Combine(ConfigDir, name);
+
+    private static ProjectConfig Parse(string yaml) => ProjectConfigLoader.Parse(yaml, ConfigDir, "test.yaml", Registry);
+
+    private static ProjectForm Sample(string name) => ProjectForm.From(ProjectConfigLoader.Load(SamplePath(name), Registry), Registry);
+
+    /// A new project with every required provider field filled.
+    internal static ProjectForm Filled(string trackerType = "jira", string repoType = "bitbucket")
+    {
+        var form = ProjectForm.NewProject("orders", Registry, trackerType, repoType);
+        Fill(form.Tracker, Registry.Tracker(form.Tracker.Type).Fields);
+        Fill(form.Repo, Registry.Repo(form.Repo.Type).Fields);
+        return form;
+    }
+
+    private static void Fill(ProviderSectionForm section, IReadOnlyList<ProviderField> fields)
+    {
+        foreach (var field in fields.Where(f => f.Required && !section.Values.ContainsKey(f.Key)))
+            section.Values[field.Key] = field.Kind switch
+            {
+                ProviderFieldKind.Url => "https://acme.atlassian.net",
+                ProviderFieldKind.Number => "7",
+                ProviderFieldKind.Path => Path.Combine(Path.GetTempPath(), "acme-orders"),
+                _ => "acme",
+            };
+    }
+
+    [Theory]
+    [InlineData("jira", "bitbucket")]
+    [InlineData("github-projects", "github")]
+    [InlineData("jira", "github")]
+    public void New_file_loads_and_matches_the_form(string tracker, string repo)
+    {
+        var form = Filled(tracker, repo);
+
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Equal("orders", p.Id);
+        Assert.Equal(tracker, p.Tracker.Type);
+        Assert.Equal(repo, p.Repo.Type);
+        Assert.Equal(Registry.BuildsFor(repo)[0].Type, p.Build.Type);
+        Assert.Equal(["triage", "plan", "implement", "build", "release", "deploy", "done"], p.Pipeline.Select(s => s.Id));
+        Assert.Equal(ReviewMode.Off, p.Review.Mode);
+        Assert.Equal(Isolation.Container, p.Agent.Isolation);
+        Assert.Equal(["api.nuget.org", "registry.npmjs.org"], p.Agent.AllowedDomains);
+    }
+
+    [Theory]
+    [InlineData("orders.example.yaml")]
+    [InlineData("orders-github.example.yaml")]
+    public void Rendering_is_idempotent(string sample)
+    {
+        var form = Sample(sample);
+        var again = ProjectForm.From(Parse(ProjectYamlWriter.NewFile(form, Registry)), Registry);
+
+        var first = ProjectYamlWriter.Sections(form, Registry);
+        var second = ProjectYamlWriter.Sections(again, Registry);
+        Assert.Equal(ProjectYamlWriter.SectionOrder, first.Keys);
+        foreach (var key in ProjectYamlWriter.SectionOrder)
+            Assert.Equal(first[key], second[key]);
+    }
+
+    [Theory]
+    [InlineData("Done: QA #2")]
+    [InlineData("*Ready")]
+    [InlineData("\"Quoted\"")]
+    [InlineData("[x]")]
+    [InlineData(" In Review")]
+    [InlineData("yes")]
+    [InlineData("a, b")]
+    [InlineData("null")]
+    [InlineData("https://x.example/a#b")]
+    [InlineData("\u00A0Orders\u3000")]
+    [InlineData("...")]
+    public void Awkward_scalars_round_trip(string status)
+    {
+        var form = Filled();
+        form.Pipeline[0].ApprovedWhenStatus = status;
+        form.Pipeline[1].EntryStatuses = [status, "Planned"];
+        form.Name = status;
+
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Equal(status, p.Pipeline[0].ApprovedWhenStatus);
+        Assert.Equal([status, "Planned"], p.Pipeline[1].EntryStatuses);
+        Assert.Equal(status, p.Name);
+    }
+
+    [Theory]
+    [InlineData("Done: QA #2")]
+    [InlineData("[x]")]
+    [InlineData("yes")]
+    public void Awkward_list_items_in_provider_fields_round_trip(string column)
+    {
+        var form = Filled("github-projects", "github");
+        form.Tracker.Lists["statuses"] = [column];
+
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Equal([column], ((GitHubProjectsTrackerConfig)p.Tracker).Statuses!);
+    }
+
+    [Fact]
+    public void Provider_defaults_are_omitted()
+    {
+        var form = Filled();
+        form.Repo.Values["mainBranch"] = "main";
+        form.Repo.Values["mergeStrategy"] = "merge_commit";
+        form.Build.Values["timeoutMinutes"] = "45";
+
+        var sections = ProjectYamlWriter.Sections(form, Registry);
+
+        Assert.DoesNotContain("mainBranch", sections["repo"]);
+        Assert.DoesNotContain("mergeStrategy", sections["repo"]);
+        Assert.DoesNotContain("timeoutMinutes", sections["build"]);
+        Assert.StartsWith("repo:\n  type: bitbucket\n", sections["repo"]);
+        Assert.Null(sections["maxAttemptsPerStage"]);
+        Assert.Null(sections["riskAreas"]);
+        Assert.Null(sections["prompts"]);
+        Assert.Equal("review:\n  mode: off\n", sections["review"]);
+    }
+
+    [Fact]
+    public void Pipeline_stages_are_one_flow_mapping_per_line()
+    {
+        var form = Filled();
+        form.Pipeline[0].EntryStatuses = ["Backlog"];
+        form.Pipeline[0].ApprovedWhenStatus = "Planned";
+
+        var pipeline = ProjectYamlWriter.Sections(form, Registry)["pipeline"]!;
+
+        Assert.StartsWith(
+            "pipeline:\n  - { id: triage, kind: triage, gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }\n",
+            pipeline);
+        Assert.Contains("  - { id: build, kind: build }\n", pipeline);
+    }
+
+    [Fact]
+    public void Line_breaks_in_values_fail_validation()
+    {
+        var form = Filled();
+        form.Name = "a\nb";
+        form.Tracker.Values["jql"] = "a\rb";
+        form.Pipeline[0].EntryStatuses = ["ok", "x\r"];
+        form.RiskAreas.Add(new RiskAreaForm { Name = "x", Description = "a\u2028b", Paths = [] });
+
+        var errors = form.Validate(Registry);
+
+        Assert.Contains("name must be a single line", errors);
+        Assert.Contains("tracker.jql contains an unsupported line break (only plain line breaks are allowed)", errors);
+        Assert.Contains("pipeline stage 'triage' entryStatuses must be a single line", errors);
+        Assert.Contains("riskAreas 'x' description contains an unsupported line break (only plain line breaks are allowed)",
+            errors);
+    }
+
+    [Fact]
+    public void Descriptions_and_jql_may_span_lines()
+    {
+        var form = Filled();
+        form.Tracker.Values["jql"] = "project = ACME\nAND labels = Claude";
+        form.RiskAreas.Add(new RiskAreaForm { Name = "pricing", Description = "Prices.\nAnd tax.\n", Paths = [] });
+
+        Assert.Empty(form.Validate(Registry));
+    }
+
+    [Theory]
+    [InlineData("line one\nline two")]
+    [InlineData("line one\nline two\n")]
+    [InlineData("line one\nline two\n\n")]
+    [InlineData(" leading space\nnext")]
+    [InlineData("\nstarts with a break")]
+    [InlineData("a: b # not a comment\n  indented\n\n- not a list\n   ")]
+    public void Multi_line_descriptions_and_jql_are_literal_blocks_that_round_trip(string value)
+    {
+        var form = Filled();
+        form.Tracker.Values["jql"] = value;
+        form.RiskAreas.Add(new RiskAreaForm { Name = "pricing", Description = value, Paths = ["src/**"] });
+
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+
+        Assert.Matches(@"\n  jql: \|", text);
+        Assert.Matches(@"\n    description: \|", text);
+        var config = Parse(text);
+        Assert.Equal(value, ((Symphonist.Integrations.Jira.JiraTrackerConfig)config.Tracker).Jql);
+        Assert.Equal(value, Assert.Single(config.RiskAreas).Description);
+        Assert.Equal(["src/**"], config.RiskAreas[0].Paths);
+    }
+
+    private const string FoldedDescription =
+        "    description: >\n      Anything that changes how order prices,\n      discounts or tax are computed.\n";
+
+    private static (string Text, ProjectForm Form) WithFoldedDescription()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n");
+        text = text.Replace("    description: Anything that changes how order prices, discounts or tax are computed.\n",
+            FoldedDescription);
+        Assert.Contains(FoldedDescription, text);
+        return (text, ProjectForm.From(Parse(text), Registry));
+    }
+
+    [Fact]
+    public void Folded_description_is_kept_byte_for_byte_by_an_unrelated_edit()
+    {
+        var (text, original) = WithFoldedDescription();
+        Assert.Equal("Anything that changes how order prices, discounts or tax are computed.\n",
+            original.RiskAreas[0].Description);
+        var edited = original.Clone();
+        edited.Pipeline[3].Gate = GatePolicy.Human;
+
+        Assert.Empty(edited.Validate(Registry));
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        var start = text.IndexOf("riskAreas:", StringComparison.Ordinal);
+        var end = text.IndexOf("# Risk reviewer", StringComparison.Ordinal);
+        Assert.Contains(text[start..end], result);
+        Assert.Equal(GatePolicy.Human, Parse(result).Pipeline[3].Gate);
+        // The draft the setup steps run with (NewFile of the form) loads too.
+        Assert.Equal(original.RiskAreas[0].Description, Parse(ProjectYamlWriter.NewFile(edited, Registry)).RiskAreas[0].Description);
+    }
+
+    [Fact]
+    public void Editing_a_folded_description_to_two_lines_writes_a_literal_block()
+    {
+        var (text, original) = WithFoldedDescription();
+        var edited = original.Clone();
+        edited.RiskAreas[0].Description = "Prices and discounts.\nTax too.";
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Contains("    description: |-\n      Prices and discounts.\n      Tax too.\n", result);
+        Assert.Equal("Prices and discounts.\nTax too.", Parse(result).RiskAreas[0].Description);
+    }
+
+    [Fact]
+    public void Invalid_secret_name_fails_validation()
+    {
+        var form = Filled();
+        form.Tracker.Values["tokenSecret"] = "Jira Acme";
+
+        var errors = form.Validate(Registry);
+
+        Assert.Contains("tracker.tokenSecret: invalid secret name; use lowercase letters, digits and '-'", errors);
+        Assert.DoesNotContain(errors, e => e.Contains("Jira Acme")); // a pasted token must not be echoed
+    }
+
+    [Fact]
+    public void Validation_reports_numbers_duplicate_stages_and_blank_items()
+    {
+        var form = Filled("github-projects", "github");
+        form.Tracker.Values["project"] = "seven";
+        form.Pipeline[1].Id = "triage";
+        form.Tracker.Lists["statuses"] = ["Backlog", " "];
+
+        var errors = form.Validate(Registry);
+
+        Assert.Contains("tracker.project must be a whole number", errors);
+        Assert.Contains("duplicate stage id 'triage'", errors);
+        Assert.Contains("tracker.statuses contains an empty item", errors);
+        Assert.Empty(Filled().Validate(Registry));
+    }
+
+    [Fact]
+    public void Update_rewrites_only_changed_sections()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml"));
+        var original = Sample("orders.example.yaml");
+        var edited = original.Clone();
+        edited.RiskAreas.Add(new RiskAreaForm { Name = "auth", Description = "Sign-in and tokens.", Paths = ["src/Auth/**"] });
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        var start = text.IndexOf("riskAreas:", StringComparison.Ordinal);
+        var end = text.IndexOf("# Risk reviewer", StringComparison.Ordinal);
+        var tail = text[end..];
+        Assert.StartsWith(text[..start], result);
+        Assert.EndsWith(tail, result);
+        var middle = result[start..^tail.Length];
+        Assert.Contains("  - name: auth\n", middle);
+        Assert.Contains("# Example Symphonist project.", result);
+        Assert.Contains("# Stages run in order", result);
+        var p = Parse(result);
+        Assert.Equal(["pricing", "auth"], p.RiskAreas.Select(a => a.Name));
+    }
+
+    [Theory]
+    [InlineData("orders.example.yaml")]
+    [InlineData("orders-github.example.yaml")]
+    public void Update_with_no_changes_returns_text_unchanged(string sample)
+    {
+        var text = File.ReadAllText(SamplePath(sample));
+        var original = Sample(sample);
+
+        Assert.Equal(text, ProjectYamlWriter.Update(text, original, original.Clone(), Registry));
+        var crlf = text.ReplaceLineEndings("\r\n");
+        Assert.Equal(crlf, ProjectYamlWriter.Update(crlf, original, original.Clone(), Registry));
+    }
+
+    [Fact]
+    public void Comment_marker_is_omitted_by_default_and_written_otherwise()
+    {
+        var form = Sample("orders.example.yaml");
+        Assert.Null(ProjectYamlWriter.Sections(form, Registry)["commentMarker"]);
+
+        form.CommentMarker = "@symphonist";
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        Assert.Contains("commentMarker:", text);
+        Assert.Equal("@symphonist", Parse(text).CommentMarker);
+        Assert.Equal("@symphonist", ProjectForm.From(Parse(text), Registry).CommentMarker);
+    }
+
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("@")]
+    [InlineData("@two words")]
+    [InlineData("@-x")]
+    public void Form_rejects_a_bad_comment_marker(string marker)
+    {
+        var form = Filled();
+        form.CommentMarker = marker;
+        Assert.Contains(form.Validate(Registry), e => e.Contains("commentMarker") && e.Contains("@"));
+    }
+
+    [Fact]
+    public void Update_adds_a_changed_comment_marker()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml"));
+        var original = Sample("orders.example.yaml");
+        var edited = original.Clone();
+        edited.CommentMarker = "@symphonist";
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Equal("@symphonist", Parse(result).CommentMarker);
+    }
+
+    [Fact]
+    public void Update_uses_the_files_line_ending()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\r\n");
+        var original = Sample("orders.example.yaml");
+        var edited = original.Clone();
+        edited.MaxAttemptsPerStage = 5;
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.DoesNotMatch("[^\r]\n", result);
+        Assert.Equal(5, Parse(result).MaxAttemptsPerStage);
+    }
+
+    [Fact]
+    public void Update_keeps_hand_formatting_of_unchanged_sections()
+    {
+        var form = Filled();
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        var odd = "tracker:\n    # hand-written note\n    " + string.Join("\n    ", tracker.TrimEnd('\n').Split('\n').Skip(1).Select(l => l.Trim())) + "\n";
+        text = text.Replace(tracker, odd);
+        var original = ProjectForm.From(Parse(text), Registry);
+        var edited = original.Clone();
+        edited.Pipeline[3].Gate = GatePolicy.Human;
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Contains(odd, result);
+        Assert.Equal(GatePolicy.Human, Parse(result).Pipeline[3].Gate);
+    }
+
+    [Fact]
+    public void Update_keeps_provider_keys_the_fields_do_not_model()
+    {
+        var text = File.ReadAllText(SamplePath("orders-github.example.yaml"))
+            .Replace("  # assignee: me ", "  assignee: me   ");
+        var original = ProjectForm.From(Parse(text), Registry);
+        var edited = original.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        var tracker = ProjectYamlDocumentTests.Section(result, "tracker");
+        Assert.Contains("label: Robot", tracker);
+        Assert.Contains("assignee: me", tracker);
+        Assert.Equal("Robot", ((GitHubProjectsTrackerConfig)Parse(result).Tracker).Label);
+    }
+
+    [Fact]
+    public void Update_refuses_unsafe_files()
+    {
+        var form = Filled();
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update("{id: orders}", form, form.Clone(), Registry));
+    }
+
+    [Theory]
+    [InlineData("a\nb")]
+    [InlineData("a\u2028b")]
+    [InlineData("a\u0085b")]
+    public void Multi_line_values_are_refused_by_the_writer(string value)
+    {
+        var form = Filled();
+        form.Name = value;
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.NewFile(form, Registry));
+        Assert.Contains("name must be a single line", form.Validate(Registry));
+    }
+
+    [Fact]
+    public void Unicode_line_separators_fail_validation_in_list_items()
+    {
+        var form = Filled();
+        form.Pipeline[0].EntryStatuses = ["a\u2029b"];
+        Assert.Contains("pipeline stage 'triage' entryStatuses must be a single line", form.Validate(Registry));
+    }
+
+    // Unmodelled keys the loader would refuse still must not be dropped or mangled by a splice.
+    private static (string Text, ProjectForm Form) WithTrackerExtras(string extras)
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        return (text.Replace(tracker, tracker + extras), form);
+    }
+
+    private static Dictionary<object, object?> RawTracker(string text) =>
+        (Dictionary<object, object?>)new YamlDotNet.Serialization.DeserializerBuilder().Build()
+            .Deserialize<Dictionary<string, object?>>(text)["tracker"]!;
+
+    [Fact]
+    public void Update_copies_list_map_and_block_scalar_unmodelled_keys_from_source()
+    {
+        var (text, form) = WithTrackerExtras(
+            "  extraList: [a, 'b: c']   # kept comment\n" +
+            "  extraMap:\n" +
+            "    k: v\n" +
+            "  notes: |\n" +
+            "    line1\n" +
+            "    # not a comment\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        Assert.Contains("  extraList: [a, 'b: c']   # kept comment\n  extraMap:\n    k: v\n  notes: |\n    line1\n    # not a comment\n", result);
+        var tracker = RawTracker(result);
+        Assert.Equal("Robot", tracker["label"]);
+        Assert.Equal(new List<object?> { "a", "b: c" }, tracker["extraList"]);
+        Assert.Equal("v", ((Dictionary<object, object?>)tracker["extraMap"]!)["k"]);
+        Assert.Equal("line1\n# not a comment\n", tracker["notes"]);
+    }
+
+    [Fact]
+    public void Update_reindents_unmodelled_keys_of_a_hand_indented_section()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        var indented = tracker.Replace("\n  ", "\n    ") + "    extraMap:\n      k: v\n    notes: >\n      folded\n";
+        text = text.Replace(tracker, indented);
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        Assert.Contains("  label: Robot\n", result);
+        Assert.Contains("  extraMap:\n    k: v\n  notes: >\n    folded\n", result);
+        Assert.Equal("v", ((Dictionary<object, object?>)RawTracker(result)["extraMap"]!)["k"]);
+    }
+
+    [Fact]
+    public void Update_renders_unmodelled_keys_of_a_flow_section()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        text = text.Replace(tracker,
+            "tracker: { type: github-projects, owner: acme, project: 7, label: Claude, tokenSecret: github-orders, extraList: [a, 'b, c'], extraMap: { k: v } }\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var result = ProjectYamlWriter.Update(text, form, edited, Registry);
+
+        var raw = RawTracker(result);
+        Assert.Equal("Robot", raw["label"]);
+        Assert.Equal(new List<object?> { "a", "b, c" }, raw["extraList"]);
+        Assert.Equal("v", ((Dictionary<object, object?>)raw["extraMap"]!)["k"]);
+    }
+
+    [Fact]
+    public void Update_refuses_a_multi_line_unmodelled_value_it_cannot_copy()
+    {
+        var form = Filled("github-projects", "github");
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var tracker = ProjectYamlWriter.Sections(form, Registry)["tracker"]!;
+        text = text.Replace(tracker,
+            "tracker: { type: github-projects, owner: acme, project: 7, label: Claude, tokenSecret: github-orders, notes: \"a\nb\" }\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+    }
+
+    [Fact]
+    public void Update_refuses_duplicate_nested_keys()
+    {
+        var (text, form) = WithTrackerExtras("  label: twice\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+    }
+
+    [Fact]
+    public void Update_wraps_deserializer_errors()
+    {
+        // The splicer accepts the tag; the raw deserializer cannot read "abc" as an int.
+        var (text, form) = WithTrackerExtras("  extra: !!int abc\n");
+        var edited = form.Clone();
+        edited.Tracker.Values["label"] = "Robot";
+
+        var ex = Assert.Throws<ProjectYamlEditException>(() => ProjectYamlWriter.Update(text, form, edited, Registry));
+        Assert.Contains("edit this file by hand", ex.Message);
+    }
+
+    [Fact]
+    public void Evidence_round_trips_through_writer_and_loader()
+    {
+        var form = Filled();
+        form.Evidence = new EvidenceForm
+        {
+            Mode = EvidenceMode.Always,
+            Setup = ["dotnet restore", "npm ci --prefix web"],
+            Start = "* dotnet run --project src/App",
+            Url = "http://localhost:5000",
+            Ready = "Now listening",
+            Notes = "Sign in as admin.\nThen open the menu.",
+            Features =
+            [
+                new() { Name = "Done: #2 checkout", Steps = "* Add an item\nPay: with card\n" },
+                new() { Name = "search", Steps = "Type a query" },
+            ],
+            TimeoutMinutes = 45,
+            Model = "sonnet",
+            PromptPath = "prompts/evidence.md",
+        };
+        form.PrCommentsFromOthers = true;
+
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+        var back = ProjectForm.From(p, Registry);
+
+        Assert.Equal(EvidenceMode.Always, p.Evidence.Mode);
+        Assert.True(p.PrComments.FromOthers);
+        Assert.Equal(form.Evidence.Setup, back.Evidence.Setup);
+        Assert.Equal(form.Evidence.Start, back.Evidence.Start);
+        Assert.Equal(form.Evidence.Url, back.Evidence.Url);
+        Assert.Equal(form.Evidence.Ready, back.Evidence.Ready);
+        Assert.Equal(form.Evidence.Notes, back.Evidence.Notes);
+        Assert.Equal(form.Evidence.Features.Select(f => (f.Name, f.Steps)), back.Evidence.Features.Select(f => (f.Name, f.Steps)));
+        Assert.Equal(45, back.Evidence.TimeoutMinutes);
+        Assert.Equal("sonnet", back.Evidence.Model);
+        Assert.Equal("prompts/evidence.md", back.Evidence.PromptPath);
+        Assert.True(back.PrCommentsFromOthers);
+        Assert.Empty(form.Validate(Registry));
+    }
+
+    [Fact]
+    public void Default_evidence_and_pr_comments_are_omitted()
+    {
+        var sections = ProjectYamlWriter.Sections(Filled(), Registry);
+
+        Assert.Null(sections["evidence"]);
+        Assert.Null(sections["prComments"]);
+        Assert.DoesNotContain("evidence:", ProjectYamlWriter.NewFile(Filled(), Registry));
+        var off = Filled();
+        off.Evidence.Mode = EvidenceMode.Off;
+        Assert.Equal("evidence:\n  mode: off\n", ProjectYamlWriter.Sections(off, Registry)["evidence"]);
+    }
+
+    [Fact]
+    public void Update_keeps_hand_written_sections_when_evidence_changes()
+    {
+        var original = Filled();
+        var text = ProjectYamlWriter.NewFile(original, Registry).ReplaceLineEndings("\n")
+            + "\n# trailing hand comment\n";
+        var edited = original.Clone();
+        edited.Evidence.Start = "dotnet run";
+        edited.Evidence.Features.Add(new EvidenceFeatureForm { Name = "login", Steps = "Sign in" });
+
+        var result = ProjectYamlWriter.Update(text, original, edited, Registry);
+
+        Assert.Contains("# trailing hand comment", result);
+        Assert.Contains("evidence:\n  run:\n    start: dotnet run\n", result);
+        Assert.Equal("login", Parse(result).Evidence.Features.Single().Name);
+        Assert.StartsWith(text[..text.IndexOf("review:", StringComparison.Ordinal)], result);
+    }
+
+    [Fact]
+    public void Validate_rejects_what_the_loader_would()
+    {
+        var form = Filled();
+        form.Evidence.Start = new string('x', 501);
+        form.Evidence.Url = "a\nb";
+        form.Evidence.Setup = [.. Enumerable.Repeat("x", 11)];
+        form.Evidence.Features = [.. Enumerable.Range(0, 21).Select(i => new EvidenceFeatureForm { Name = "f" + i, Steps = "s" })];
+        form.Evidence.Features[0] = new() { Name = new string('n', 81), Steps = "" };
+
+        var errors = form.Validate(Registry);
+
+        Assert.Contains(errors, e => e.StartsWith("evidence.run.start is 501"));
+        Assert.Contains("evidence.run.url must be a single line", errors);
+        Assert.Contains(errors, e => e.StartsWith("evidence.run.setup has 11"));
+        Assert.Contains(errors, e => e.StartsWith("evidence.features has 21"));
+        Assert.Contains(errors, e => e.StartsWith("evidence.features[].name is 81"));
+        Assert.Contains(errors, e => e.Contains("needs steps"));
+    }
+
+    [Fact]
+    public void Claude_only_form_writes_the_same_sections_as_before()
+    {
+        var sections = ProjectYamlWriter.Sections(Sample("orders.example.yaml"), Registry);
+
+        Assert.Equal("agent:\n  type: claude-code\n  allowedDomains: [api.nuget.org, registry.npmjs.org]\n", sections["agent"]);
+        Assert.Equal(
+            "pipeline:\n"
+            + "  - { id: triage, kind: triage, gate: human, entryStatuses: [Backlog], approvedWhenStatus: Planned }\n"
+            + "  - { id: plan, kind: plan, gate: human, entryStatuses: [Planned], onEnterStatus: Planned, approvedWhenStatus: In Progress }\n"
+            + "  - { id: implement, kind: implement, gate: human, onEnterStatus: In Progress, onGateStatus: In Review }\n"
+            + "  - { id: build, kind: build }\n"
+            + "  - { id: release, kind: release, gate: human }\n"
+            + "  - { id: deploy, kind: deploy }\n"
+            + "  - { id: done, kind: done, onEnterStatus: Done }\n",
+            sections["pipeline"]);
+        Assert.Equal("review:\n  mode: off\n", sections["review"]);
+        Assert.Null(sections["evidence"]);
+
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n")
+            .Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+                "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n")
+            .Replace("review:\n  mode: off",
+                "review:\n  mode: shadow\n  agent: { model: sonnet, timeoutMinutes: 10 }\nevidence:\n  agent: { model: haiku }");
+        sections = ProjectYamlWriter.Sections(ProjectForm.From(Parse(text), Registry), Registry);
+
+        Assert.Equal("agent:\n  type: claude-code\n  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n",
+            sections["agent"]);
+        Assert.Equal("review:\n  mode: shadow\n  agent: { model: sonnet, timeoutMinutes: 10 }\n", sections["review"]);
+        Assert.Equal("evidence:\n  agent: { model: haiku }\n", sections["evidence"]);
+    }
+
+    [Fact]
+    public void Codex_agent_round_trips()
+    {
+        var form = Filled();
+        form.Agent.Type = AgentTypes.Codex;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        form.Agent.Model = "gpt-5-codex";
+
+        var text = ProjectYamlWriter.NewFile(form, Registry);
+        var p = Parse(text);
+
+        Assert.Contains("agent:\n  type: codex\n", text);
+        Assert.Contains("  codex: { auth: chatgpt }\n", text);
+        Assert.Equal(AgentTypes.Codex, p.Agent.Type);
+        Assert.Equal(new CodexSettings(CodexAuth.ChatGpt, CodexSettings.DefaultApiKeySecret), p.Agent.Codex);
+        Assert.Equal("gpt-5-codex", p.Agent.Model);
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Agent.Type);
+        Assert.Equal(CodexAuth.ChatGpt, back.Agent.CodexAuth);
+        Assert.Equal(ProjectYamlWriter.Sections(form, Registry)["agent"], ProjectYamlWriter.Sections(back, Registry)["agent"]);
+
+        form.Agent.CodexAuth = CodexAuth.ApiKey;
+        form.Agent.CodexApiKeySecret = "openai-orders";
+        p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+        Assert.Equal(new CodexSettings(CodexAuth.ApiKey, "openai-orders"), p.Agent.Codex);
+        Assert.Equal("openai-orders", ProjectForm.From(p, Registry).Agent.CodexApiKeySecret);
+    }
+
+    [Fact]
+    public void Default_codex_settings_are_omitted()
+    {
+        var form = Filled();
+        form.Agent.Type = AgentTypes.Codex;
+
+        var agent = ProjectYamlWriter.Sections(form, Registry)["agent"]!;
+
+        Assert.StartsWith("agent:\n  type: codex\n", agent);
+        Assert.DoesNotContain("codex:", agent);
+
+        // Settings for a provider no job uses are not written (the loader rejects them).
+        form.Agent.Type = AgentTypes.ClaudeCode;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        Assert.DoesNotContain("codex", ProjectYamlWriter.Sections(form, Registry)["agent"]);
+        Parse(ProjectYamlWriter.NewFile(form, Registry));
+    }
+
+    [Fact]
+    public void Stage_override_round_trips()
+    {
+        var form = Filled();
+        form.Pipeline[2].AgentType = AgentTypes.Codex;
+        form.Pipeline[2].AgentModel = "m";
+        form.Pipeline[0].AgentModel = "haiku";
+        form.Pipeline[0].AgentTimeoutMinutes = 15;
+
+        var pipeline = ProjectYamlWriter.Sections(form, Registry)["pipeline"]!;
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Contains("  - { id: implement, kind: implement, gate: human, agent: { type: codex, model: m } }\n", pipeline);
+        Assert.Contains("  - { id: triage, kind: triage, gate: human, agent: { model: haiku, timeoutMinutes: 15 } }\n", pipeline);
+        Assert.Equal(AgentTypes.Codex, p.AgentFor("implement").Type);
+        Assert.Equal("m", p.AgentFor("implement").Model);
+        Assert.Equal(AgentTypes.ClaudeCode, p.AgentFor("triage").Type);
+        Assert.Equal(15, p.AgentFor("triage").TimeoutMinutes);
+        Assert.Null(p.Stage("plan").Agent);
+
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Pipeline[2].AgentType);
+        Assert.Equal("m", back.Pipeline[2].AgentModel);
+        Assert.Null(back.Pipeline[2].AgentTimeoutMinutes);
+        Assert.Null(back.Pipeline[0].AgentType);
+        Assert.Equal(pipeline, ProjectYamlWriter.Sections(back, Registry)["pipeline"]);
+    }
+
+    [Fact]
+    public void Stage_override_that_changes_nothing_comes_back_empty()
+    {
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n")
+            .Replace("  allowedDomains: [api.nuget.org, registry.npmjs.org]\n",
+                "  allowedDomains: [api.nuget.org, registry.npmjs.org]\n  model: opus\n  timeoutMinutes: 90\n")
+            .Replace("kind: build }", "kind: build, agent: { type: claude-code } }")
+            .Replace("kind: deploy }", "kind: deploy, agent: { type: codex, model: opus } }");
+
+        var form = ProjectForm.From(Parse(text), Registry);
+
+        var build = form.Pipeline.Single(s => s.Id == "build");
+        Assert.Null(build.AgentType);
+        Assert.Null(build.AgentModel);
+        Assert.Null(build.AgentTimeoutMinutes);
+        // Another provider with the project's model name keeps it: the loader would not carry it across.
+        var deploy = form.Pipeline.Single(s => s.Id == "deploy");
+        Assert.Equal(AgentTypes.Codex, deploy.AgentType);
+        Assert.Equal("opus", deploy.AgentModel);
+        Assert.Equal("opus", Parse(ProjectYamlWriter.NewFile(form, Registry)).AgentFor("deploy").Model);
+    }
+
+    [Fact]
+    public void Review_and_evidence_agent_type_round_trip()
+    {
+        var form = Filled();
+        form.Agent.Model = "opus";
+        form.Review.Mode = ReviewMode.Shadow;
+        form.Review.AgentType = AgentTypes.Codex;
+        form.Review.Model = "opus";
+        form.Evidence.AgentType = AgentTypes.Codex;
+
+        var sections = ProjectYamlWriter.Sections(form, Registry);
+        var p = Parse(ProjectYamlWriter.NewFile(form, Registry));
+
+        Assert.Equal("review:\n  mode: shadow\n  agent: { type: codex, model: opus }\n", sections["review"]);
+        Assert.Equal("evidence:\n  agent: { type: codex }\n", sections["evidence"]);
+        Assert.Equal(AgentTypes.Codex, p.Review.Agent.Type);
+        Assert.Equal("opus", p.Review.Agent.Model);
+        Assert.Equal(AgentTypes.Codex, p.Evidence.Agent.Type);
+        Assert.Null(p.Evidence.Agent.Model);
+
+        var back = ProjectForm.From(p, Registry);
+        Assert.Equal(AgentTypes.Codex, back.Review.AgentType);
+        Assert.Equal("opus", back.Review.Model);
+        Assert.Equal(AgentTypes.Codex, back.Evidence.AgentType);
+        Assert.Null(back.Evidence.Model);
+        Assert.Equal(sections["review"], ProjectYamlWriter.Sections(back, Registry)["review"]);
+        Assert.Equal(sections["evidence"], ProjectYamlWriter.Sections(back, Registry)["evidence"]);
+    }
+
+    [Fact]
+    public void Validate_rejects_codex_with_host_isolation()
+    {
+        var form = Filled();
+        form.Agent.Isolation = Isolation.Host;
+        form.Agent.AllowedTools = ["Read"];
+        Assert.DoesNotContain(AgentRules.CodexNeedsContainer, form.Validate(Registry));
+
+        form.Evidence.AgentType = AgentTypes.Codex;
+        Assert.Contains(AgentRules.CodexNeedsContainer, form.Validate(Registry));
+
+        form.Evidence.AgentType = null;
+        form.Pipeline[1].AgentType = "gemini";
+        Assert.Contains(AgentRules.UnsupportedType("pipeline stage 'plan' agent.type", "gemini"), form.Validate(Registry));
+
+        form.Pipeline[1].AgentType = null;
+        form.Agent.Isolation = Isolation.Container;
+        form.Agent.Type = AgentTypes.Codex;
+        form.Agent.CodexAuth = CodexAuth.ChatGpt;
+        form.Agent.CodexApiKeySecret = "openai-orders";
+        Assert.Contains(AgentRules.ApiKeySecretNeedsApiKey, form.Validate(Registry));
+
+        form.Agent.CodexAuth = CodexAuth.ApiKey;
+        Assert.Empty(form.Validate(Registry));
+        form.Agent.CodexApiKeySecret = "Bad Name";
+        Assert.Contains(form.Validate(Registry), e => e.StartsWith("agent.codex.apiKeySecret: invalid secret name"));
+    }
+}

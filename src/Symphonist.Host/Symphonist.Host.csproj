@@ -11,6 +11,10 @@
     <InternalsVisibleTo Include="Symphonist.Host.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Notifications/toast.ps1" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

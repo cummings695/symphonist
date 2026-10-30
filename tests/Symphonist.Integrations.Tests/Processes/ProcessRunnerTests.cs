@@ -16,6 +16,14 @@ public class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task Refuses_specs_with_bind_mounts()
+    {
+        // Mounts only mean something to a container launcher; running such a spec directly would silently drop them.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new ProcessRunner().RunAsync(
+            new("dotnet", [SleeperDll, "echo", "x"], Mounts: [new BindMount("/tmp/run", "/symphonist-run")]), default));
+    }
+
+    [Fact]
     public async Task Times_out_and_kills()
     {
         var sw = Stopwatch.StartNew();

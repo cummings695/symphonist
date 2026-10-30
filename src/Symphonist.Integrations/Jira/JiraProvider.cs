@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
@@ -5,11 +6,11 @@ using Symphonist.Core.Integrations.Providers;
 
 namespace Symphonist.Integrations.Jira;
 
-public sealed record JiraTrackerConfig(string Type, string TokenSecret, Uri Site, string Email, string Jql)
-    : TrackerConfig(Type, TokenSecret);
+public sealed record JiraTrackerConfig(string Type, string TokenSecret, Uri Site, string Email, string Jql,
+    string? ProjectKey = null) : TrackerConfig(Type, TokenSecret);
 
 /// <summary>Jira Cloud: <c>tracker.type: jira</c> with <c>site</c>, <c>email</c> and <c>jql</c>.</summary>
-public sealed class JiraProvider : ITrackerProvider
+public sealed partial class JiraProvider : ITrackerProvider
 {
     public string Type => "jira";
 
@@ -20,12 +21,47 @@ public sealed class JiraProvider : ITrackerProvider
     public TrackerConfig Parse(TrackerSection section)
     {
         var dto = section.Bind<Dto>();
-        return new JiraTrackerConfig(section.Type, section.TokenSecret, new Uri(section.Required(dto.Site, "site")),
-            section.Required(dto.Email, "email"), section.Required(dto.Jql, "jql"));
+        if (dto.ProjectKey is not null && !ProjectKeyPattern().IsMatch(dto.ProjectKey))
+            throw new ProjectConfigException($"invalid tracker.projectKey '{dto.ProjectKey}'");
+        var site = section.Required(dto.Site, "site");
+        // The API token travels with every request: never over plain http.
+        if (!Uri.TryCreate(site, UriKind.Absolute, out var siteUri) || siteUri.Scheme != Uri.UriSchemeHttps)
+            throw new ProjectConfigException($"tracker.site must be an https:// URL (got '{site}')");
+        return new JiraTrackerConfig(section.Type, section.TokenSecret, siteUri,
+            section.Required(dto.Email, "email"), section.Required(dto.Jql, "jql"), dto.ProjectKey);
+    }
+
+    public IReadOnlyList<ProviderField> Fields { get; } =
+    [
+        new("site", "Site URL", ProviderFieldKind.Url, Required: true, Help: "Jira Cloud base URL, e.g. https://acme.atlassian.net"),
+        new("email", "Account email", ProviderFieldKind.Text, Required: true, Help: "Atlassian account email (basic auth with the API token)"),
+        new("projectKey", "Project key", ProviderFieldKind.Text, Help: "Optional; the setup screen reads statuses from it"),
+        new("jql", "JQL", ProviderFieldKind.MultilineText, Required: true, Help: "Tickets Symphonist works on"),
+        new("tokenSecret", "Token secret name", ProviderFieldKind.Secret, Required: true, Help: "Name of the secret holding the Atlassian API token"),
+    ];
+
+    public IReadOnlyDictionary<string, object?> ToValues(TrackerConfig config)
+    {
+        var c = (JiraTrackerConfig)config;
+        var values = new Dictionary<string, object?>
+        {
+            ["site"] = c.Site.ToString(),
+            ["email"] = c.Email,
+        };
+        if (c.ProjectKey is not null) values["projectKey"] = c.ProjectKey;
+        values["jql"] = c.Jql;
+        values["tokenSecret"] = c.TokenSecret;
+        return values;
     }
 
     public ITracker Create(ProjectConfig project, HttpClient http, string token, ILoggerFactory loggers) =>
         new JiraTracker(http, Config(project), token);
+
+    public Task<TrackerDiscovery> DiscoverAsync(ProjectConfig draft, HttpClient http, string token, CancellationToken ct)
+    {
+        var config = Config(draft);
+        return new JiraTracker(http, config, token).DiscoverAsync(config.ProjectKey, ct);
+    }
 
     public Uri? IssueUrl(ProjectConfig project, string key) =>
         new(Config(project).Site, "browse/" + Uri.EscapeDataString(key));
@@ -39,5 +75,9 @@ public sealed class JiraProvider : ITrackerProvider
         public string? Site { get; set; }
         public string? Email { get; set; }
         public string? Jql { get; set; }
+        public string? ProjectKey { get; set; }
     }
+
+    [GeneratedRegex(@"\A[A-Z][A-Z0-9_]{1,9}\z")]
+    private static partial Regex ProjectKeyPattern();
 }

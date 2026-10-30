@@ -2,6 +2,7 @@ using Symphonist.Integrations;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
+using Symphonist.Core.Storage;
 
 namespace Symphonist.Core.Tests.Pipeline;
 
@@ -20,6 +21,28 @@ public class PipelineEngineTests
     {
         Assert.Equal("plan", PipelineEngine.Create(P, "ORD-1", "t", "planned", Now).StageId);
         Assert.Equal("triage", PipelineEngine.Create(P, "ORD-2", "t", "Selected", Now).StageId);
+    }
+
+    [Theory]
+    [InlineData(StageStatus.AwaitingApproval)]
+    [InlineData(StageStatus.Blocked)]
+    [InlineData(StageStatus.Approved)]
+    public void Ticket_at_a_removed_stage_names_the_way_out(StageStatus status)
+    {
+        const string message = "stage 'qa' is no longer in the pipeline; send it back to an existing stage (--to)";
+        var t = At("qa", status);
+
+        var approve = PipelineEngine.Approve(P, t, Now);
+        var sendBack = PipelineEngine.SendBack(P, t, "fix", null, Now);
+
+        Assert.False(approve.Changed);
+        Assert.Equal(message, approve.Message);
+        Assert.False(sendBack.Changed);
+        Assert.Equal(message, sendBack.Message);
+        if (status == StageStatus.Approved)
+            Assert.Equal(message, PipelineEngine.PostApprovalCompleted(P, t, Now).Message);
+        Assert.True(PipelineEngine.SendBack(P, t, "fix", "plan", Now).Changed);
+        Assert.Equal("plan", t.StageId);
     }
 
     [Fact] public void Create_sets_initial_fields()
@@ -71,6 +94,14 @@ public class PipelineEngineTests
         Assert.Equal(StageStatus.Pending, t.Status);
         PipelineEngine.StageFailed(P, t, "boom", Now);
         Assert.Equal(StageStatus.Blocked, t.Status); Assert.Equal("plan failed 3 times: boom", t.BlockedReason);
+    }
+
+    [Fact] public void Usage_limit_returns_to_pending_without_an_attempt()
+    {
+        var t = At("plan", StageStatus.Running); t.Attempts = 2;
+        var o = PipelineEngine.StageLimited(t, "plan paused: Claude usage limit", Now);
+        Assert.Equal((StageStatus.Pending, 2, Now), (t.Status, t.Attempts, t.UpdatedAt));
+        Assert.Equal(new TransitionOutcome(true, null, "plan paused: Claude usage limit"), o);
     }
 
     [Fact] public void Approve_implement_goes_to_Approved_then_build()
@@ -477,6 +508,40 @@ public class PipelineEngineTests
         Assert.Null(PipelineEngine.PostApprovalCompleted(P, approved, Now).Decision);
     }
 
+    [Theory]
+    [InlineData(StageStatus.AwaitingApproval)]
+    [InlineData(StageStatus.Approved)]
+    [InlineData(StageStatus.Blocked)]
+    public void Send_back_from_gate_approved_or_blocked_is_a_touch(StageStatus status)
+    {
+        var o = PipelineEngine.SendBack(P, At("implement", status), "fix", null, Now);
+        Assert.True(o.Changed);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+    }
+
+    [Fact] public void Unblock_is_a_touch()
+    {
+        var o = PipelineEngine.Unblock(At("implement", StageStatus.Blocked), Now);
+        Assert.Equal(TouchKind.Unblock, o.Touch);
+        Assert.Null(PipelineEngine.Unblock(At("implement"), Now).Touch);
+    }
+
+    [Fact] public void Deferred_card_move_back_is_a_touch()
+    {
+        var t = At("implement", StageStatus.Running);
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", null, Now);
+        Assert.NotNull(t.PendingSourceStatus);
+        var done = PipelineEngine.StageSucceeded(P, t, Now);
+        Assert.Equal(TouchKind.SendBack, done.Touch);
+    }
+
+    [Fact] public void Stage_failure_and_merge_hold_are_not_touches()
+    {
+        Assert.Null(PipelineEngine.StageFailed(P, At("implement", StageStatus.Running), "boom", Now).Touch);
+        Assert.Null(PipelineEngine.StageSucceeded(P, At("implement", StageStatus.Running), Now).Touch);
+        Assert.Null(PipelineEngine.MergeHeld(P, At("implement", StageStatus.Approved), "dirty", Now).Touch);
+    }
+
     [Fact] public void Block_clears_waiting_since_and_review_due()
     {
         var t = Reviewing("implement");
@@ -584,5 +649,436 @@ public class PipelineEngineTests
 
         t.ReviewDue = false;
         Assert.False(PipelineEngine.WaitsOnReviewer(With("plan", GatePolicy.AutoWhenLowRisk, ReviewMode.Active), t));
+    }
+
+    private static ProjectConfig Evidence(EvidenceMode mode, ReviewMode review = ReviewMode.Off) =>
+        With("implement", GatePolicy.Human, review) with { Evidence = P.Evidence with { Mode = mode } };
+
+    [Fact] public void Gate_round_owes_evidence_for_gated_implement()
+    {
+        var on = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk, ReviewMode.Active), on, Now);
+        Assert.True(on.EvidenceDue);
+
+        var plan = At("plan");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), plan, Now);
+        Assert.False(plan.EvidenceDue);
+
+        var off = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.Off), off, Now);
+        Assert.False(off.EvidenceDue);
+    }
+
+    private static readonly RiskArea Pricing = new("pricing", "money", ["src/Pricing/**"]);
+
+    [Fact] public void Low_verdict_clears_evidence_due_in_high_risk_mode()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal((true, true), (t.ReviewDue, t.EvidenceDue));
+
+        PipelineEngine.ReviewCompleted(p, t, Low, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.Equal((StageStatus.AwaitingApproval, false), (t.Status, t.EvidenceDue));
+    }
+
+    [Fact] public void High_verdict_keeps_evidence_due()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+
+        PipelineEngine.ReviewCompleted(p, t, High, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.True(t.EvidenceDue);
+        t.PullRequestId = 7;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
+    [Fact] public void Always_mode_keeps_evidence_due_after_a_low_verdict()
+    {
+        var p = Evidence(EvidenceMode.Always, ReviewMode.Active);
+        var t = At("implement");
+        PipelineEngine.StageSucceeded(p, t, Now);
+
+        PipelineEngine.ReviewCompleted(p, t, Low, t.WaitingSince!.Value, allowAutoApprove: false, Now);
+
+        Assert.True(t.EvidenceDue);
+    }
+
+    [Fact] public void Review_off_owes_evidence_only_with_risk_areas_or_always()
+    {
+        var none = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk), none, Now);
+        Assert.False(none.EvidenceDue);
+
+        var areas = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.HighRisk) with { RiskAreas = [Pricing] }, areas, Now);
+        Assert.True(areas.EvidenceDue); // only a clone of the branch can tell
+
+        var always = At("implement");
+        PipelineEngine.StageSucceeded(Evidence(EvidenceMode.Always), always, Now);
+        Assert.True(always.EvidenceDue);
+
+        var held = At("implement", StageStatus.Approved); held.WaitingSince = Gate;
+        PipelineEngine.MergeHeld(Evidence(EvidenceMode.HighRisk), held, "moved", Now);
+        Assert.False(held.EvidenceDue);
+    }
+
+    [Fact] public void Evidence_waits_for_a_pull_request()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.PullRequestId = 7;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
+    [Fact] public void Waits_on_evidence_only_after_owed_review()
+    {
+        var p = Evidence(EvidenceMode.HighRisk, ReviewMode.Active);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true; t.ReviewDue = true; t.PullRequestId = 7;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.ReviewDue = false;
+        Assert.True(PipelineEngine.WaitsOnEvidence(p, t));
+        t.WaitingSince = null;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+        t.WaitingSince = Gate; t.EvidenceDue = false;
+        Assert.False(PipelineEngine.WaitsOnEvidence(p, t));
+    }
+
+    [Fact] public void Decisions_clear_evidence_due()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var approve = Awaiting("implement"); approve.WaitingSince = Gate; approve.EvidenceDue = true;
+        PipelineEngine.Approve(p, approve, Now);
+        Assert.False(approve.EvidenceDue);
+
+        var back = Awaiting("implement"); back.WaitingSince = Gate; back.EvidenceDue = true;
+        PipelineEngine.SendBack(p, back, "fix", null, Now);
+        Assert.False(back.EvidenceDue);
+
+        var block = Awaiting("implement"); block.WaitingSince = Gate; block.EvidenceDue = true;
+        PipelineEngine.Block(block, "no", Now);
+        Assert.False(block.EvidenceDue);
+    }
+
+    [Fact] public void Merge_hold_owes_evidence_again()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = At("implement", StageStatus.Approved); t.WaitingSince = Gate;
+        PipelineEngine.MergeHeld(p, t, "moved", Now);
+        Assert.True(t.EvidenceDue);
+
+        var off = At("implement", StageStatus.Approved); off.WaitingSince = Gate; off.EvidenceDue = true;
+        PipelineEngine.MergeHeld(Evidence(EvidenceMode.Off), off, "moved", Now);
+        Assert.False(off.EvidenceDue);
+    }
+
+    [Fact] public void Evidence_completed_applies_to_same_round_only()
+    {
+        var p = Evidence(EvidenceMode.Always);
+        var t = Awaiting("implement"); t.WaitingSince = Gate; t.EvidenceDue = true;
+
+        var other = PipelineEngine.EvidenceCompleted(p, t, Gate.AddSeconds(1), "done", Now);
+        Assert.False(other.Changed);
+        Assert.Equal("evidence for implement finished after the gate was decided; not applied", other.Message);
+        Assert.True(t.EvidenceDue);
+
+        var same = PipelineEngine.EvidenceCompleted(p, t, Gate, "evidence gathered", Now);
+        Assert.True(same.Changed);
+        Assert.False(t.EvidenceDue);
+        Assert.Equal("evidence gathered", same.Message);
+
+        var notWaiting = At("implement", StageStatus.Approved); notWaiting.WaitingSince = Gate;
+        Assert.False(PipelineEngine.EvidenceCompleted(p, notWaiting, Gate, "x", Now).Changed);
+    }
+
+    [Fact] public void Send_back_and_success_clear_pr_feedback()
+    {
+        var p = Evidence(EvidenceMode.Off);
+        var t = At("implement", StageStatus.Running); t.PrFeedbackJson = "[]";
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Null(t.PrFeedbackJson);
+
+        var back = Awaiting("implement"); back.WaitingSince = Gate; back.PrFeedbackJson = "[]";
+        PipelineEngine.SendBack(p, back, "fix", null, Now);
+        Assert.Null(back.PrFeedbackJson);
+    }
+
+    // Release batches
+
+    private static Ticket Member(string stageId, StageStatus status = StageStatus.Pending)
+    {
+        var t = At(stageId, status); t.ReleaseTicketId = Guid.NewGuid();
+        return t;
+    }
+
+    private static Ticket WaitingRelease(ProjectConfig p)
+    {
+        var t = PipelineEngine.CreateRelease(p, 1, "Release 1: ORD-1", "symphonist/release-1", "Tickets:", Now);
+        PipelineEngine.StageSucceeded(p, t, Now);
+        return t;
+    }
+
+    [Fact] public void Release_ticket_waits_for_approval_even_with_gate_none()
+    {
+        var p = With("release", GatePolicy.None, ReviewMode.Off);
+        var t = PipelineEngine.CreateRelease(p, 3, "Release 3: ORD-1", "symphonist/release-3", "Tickets:\n- ORD-1: t", Now);
+
+        Assert.Equal(TicketKind.Release, t.Kind);
+        Assert.Equal("_release-3", t.Key);
+        Assert.Equal("Release 3: ORD-1", t.Title);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("symphonist/release-3", t.Branch);
+        Assert.Equal("Tickets:\n- ORD-1: t", t.ReleaseSummary);
+        Assert.Equal("orders", t.ProjectId);
+        Assert.NotEqual(Guid.Empty, t.Id);
+
+        PipelineEngine.StageSucceeded(p, t, Now);
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+        Assert.Equal(Now, t.WaitingSince);
+    }
+
+    [Fact] public void Ready_to_release_excludes_batched_and_legacy_tickets()
+    {
+        Assert.True(PipelineEngine.IsReadyToRelease(P, At("release")));
+        Assert.Equal(TicketKind.Work, At("release").Kind);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, Member("release")));
+        var legacy = At("release"); legacy.ReleasePullRequestId = 7;
+        Assert.False(PipelineEngine.IsReadyToRelease(P, legacy));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, PipelineEngine.CreateRelease(P, 1, "R", "b", "s", Now)));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, At("build")));
+        Assert.False(PipelineEngine.IsReadyToRelease(P, At("release", StageStatus.Blocked)));
+        var noRelease = P with { Pipeline = P.Pipeline.Where(s => s.Kind != StageKind.Release).ToList() };
+        Assert.False(PipelineEngine.IsReadyToRelease(noRelease, At("deploy")));
+    }
+
+    [Fact] public void Release_completed_moves_member_past_release()
+    {
+        var t = Member("release");
+        var o = PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Null(o.Touch);
+    }
+
+    [Fact] public void Release_completed_without_later_stages_is_done()
+    {
+        var p = P with { Pipeline = P.Pipeline.TakeWhile(s => s.Kind != StageKind.Deploy).ToList() };
+        var t = Member("release");
+        var o = PipelineEngine.ReleaseCompleted(p, t, "abc123", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Null(t.ReleaseTicketId);
+    }
+
+    [Fact] public void Release_completed_applies_a_card_moved_back()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Planned"; t.PendingSourceStatus = "Planned";
+        var o = PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+        Assert.Equal("released; sent back to plan: card moved to 'Planned'", o.Message);
+        Assert.Null(o.Touch);
+        Assert.Null(o.Decision);
+    }
+
+    [Fact] public void Release_completed_ignores_a_card_moved_to_approved_status()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Id == "release" ? s with { ApprovedWhenStatus = "Released" } : s).ToList(),
+        };
+        var t = Member("release"); t.LastSourceStatus = "Released"; t.PendingSourceStatus = "Released";
+        PipelineEngine.ReleaseCompleted(p, t, "abc123", Now);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+    }
+
+    [Fact] public void Release_completed_finishes_an_also_shipped_member()
+    {
+        var t = Member("build", StageStatus.Running);
+        PipelineEngine.ReleaseCompleted(P, t, "abc123", Now);
+        Assert.Equal("deploy", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("abc123", t.ReleaseMergeCommit);
+    }
+
+    [Fact] public void Release_cancelled_returns_member_to_ready_or_its_own_progress()
+    {
+        var ready = Member("release");
+        var o = PipelineEngine.ReleaseCancelled(P, ready, "_release-2", Now);
+        Assert.True(o.Changed);
+        Assert.Null(ready.ReleaseTicketId);
+        Assert.Equal("_release-2 cancelled; ready to release again", o.Message);
+        Assert.True(PipelineEngine.IsReadyToRelease(P, ready));
+
+        var shipped = Member("build");
+        Assert.Equal("_release-2 cancelled; back to its own progress", PipelineEngine.ReleaseCancelled(P, shipped, "_release-2", Now).Message);
+        Assert.Null(shipped.ReleaseTicketId);
+        Assert.Equal("build", shipped.StageId);
+    }
+
+    [Fact] public void Release_cancelled_moves_a_ready_member_card_back_to_ready()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Kind == StageKind.Release
+                ? s with { OnEnterStatus = "Ready to Release", OnGateStatus = "Releasing" } : s).ToList(),
+        };
+        var ready = Member("release");
+
+        var o = PipelineEngine.ReleaseCancelled(p, ready, "_release-2", Now);
+
+        Assert.Equal("Ready to Release", o.SourceStatusToSet);
+        Assert.Null(PipelineEngine.ReleaseCancelled(p, Member("build"), "_release-2", Now).SourceStatusToSet);
+    }
+
+    [Fact] public void Ready_ticket_card_moved_back_is_sent_back_now()
+    {
+        var t = At("release"); t.LastSourceStatus = "Done";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", "rethink", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Equal("rethink", t.Feedback);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, t));
+    }
+
+    [Fact] public void Batch_member_card_moved_back_stays_deferred()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Done";
+        var o = PipelineEngine.SourceStatusChanged(P, t, "Planned", null, Now);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal("Planned", t.PendingSourceStatus);
+        Assert.Null(o.Touch);
+
+        var legacy = At("release"); legacy.ReleasePullRequestId = 7; legacy.LastSourceStatus = "Done";
+        PipelineEngine.SourceStatusChanged(P, legacy, "Planned", null, Now);
+        Assert.Equal("release", legacy.StageId);
+        Assert.Equal("Planned", legacy.PendingSourceStatus);
+    }
+
+    [Fact] public void Release_cancelled_applies_a_card_moved_back()
+    {
+        var t = Member("release"); t.LastSourceStatus = "Planned"; t.PendingSourceStatus = "Planned";
+        var o = PipelineEngine.ReleaseCancelled(P, t, "_release-2", Now);
+        Assert.True(o.Changed);
+        Assert.Equal("plan", t.StageId);
+        Assert.Equal(StageStatus.Pending, t.Status);
+        Assert.Null(t.PendingSourceStatus);
+        Assert.Null(t.ReleaseTicketId);
+        Assert.Equal("_release-2 cancelled; sent back to plan: card moved to 'Planned'", o.Message);
+        Assert.False(PipelineEngine.IsReadyToRelease(P, t));
+    }
+
+    [Fact] public void Send_back_of_release_ticket_cancels_it()
+    {
+        var t = WaitingRelease(P); t.ReviewDue = true;
+        var waiting = t.WaitingSince!.Value;
+        var o = PipelineEngine.SendBack(P, t, "not this week", "plan", Now.AddMinutes(1));
+        Assert.True(o.Changed);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("release", t.StageId);
+        Assert.Equal("not this week", t.Feedback);
+        Assert.Null(t.WaitingSince);
+        Assert.False(t.ReviewDue);
+        Assert.Equal("release cancelled", o.Message);
+        Assert.Equal(new GateDecisionInfo("release", waiting, GateDecision.SentBack, Auto: false), o.Decision);
+        Assert.Equal(TouchKind.SendBack, o.Touch);
+        Assert.Null(o.SourceStatusToSet);
+    }
+
+    [Fact] public void Send_back_of_a_release_with_nothing_to_merge_forgets_its_production_commit()
+    {
+        // "Nothing to release" records production's head before the gate; a cancelled release must not look merged.
+        var t = WaitingRelease(P);
+        t.ReleaseMergeCommit = "prod-head";
+        var o = PipelineEngine.SendBack(P, t, "no", null, Now);
+        Assert.True(o.Changed);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Null(t.ReleaseMergeCommit);
+    }
+
+    [Fact] public void Merged_release_ticket_is_done_not_advanced()
+    {
+        var t = WaitingRelease(P);
+        Assert.True(PipelineEngine.Approve(P, t, Now).Changed);
+        Assert.Equal(StageStatus.Approved, t.Status);
+        var o = PipelineEngine.PostApprovalCompleted(P, t, Now);
+        Assert.True(o.Changed);
+        Assert.Equal("release merged", o.Message);
+        Assert.Equal(StageStatus.Done, t.Status);
+        Assert.Equal("release", t.StageId);
+    }
+
+    [Fact] public void Card_moves_never_decide_a_release_ticket()
+    {
+        var p = P with
+        {
+            Pipeline = P.Pipeline.Select(s => s.Id == "release" ? s with { ApprovedWhenStatus = "Released" } : s).ToList(),
+        };
+        var t = WaitingRelease(p);
+        Assert.False(PipelineEngine.SourceStatusChanged(p, t, "Released", null, Now).Changed);
+        Assert.Equal(StageStatus.AwaitingApproval, t.Status);
+    }
+
+    // Reopened tickets
+
+    private static Ticket Finished()
+    {
+        var t = At("done", StageStatus.Done);
+        t.Branch = "symphonist/ORD-1"; t.PullRequestId = 7; t.MergeCommit = "m1"; t.ReleasePullRequestId = 9;
+        t.ReleaseMergeCommit = "m2"; t.ReleaseTicketId = Guid.NewGuid(); t.TrackerRetryStatus = "Done";
+        t.PrCommentsHandledAt = Now.AddDays(-1); t.ClaudeCommentsHandledAt = Now.AddDays(-1);
+        t.Attempts = 2; t.ReviewDue = true; t.Risk = RiskLevel.High; t.MergeHolds = 2; t.ApprovedHead = "h";
+        t.UpdatedAt = Now.AddDays(-1);
+        return t;
+    }
+
+    [Fact] public void Reopen_enters_the_matching_stage_with_a_fresh_branch()
+    {
+        var t = Finished();
+        var o = PipelineEngine.Reopen(P, t, "planned", Now)!;
+
+        Assert.True(o.Changed);
+        Assert.Equal("reopened at plan: card moved to 'planned'", o.Message);
+        Assert.Equal("Planned", o.SourceStatusToSet);
+        Assert.Null(o.Touch);
+        Assert.Equal(("plan", StageStatus.Pending, 0), (t.StageId, t.Status, t.Attempts));
+        Assert.Equal("symphonist/ORD-1-202610211000", t.Branch);
+        Assert.Null(t.PullRequestId); Assert.Null(t.MergeCommit); Assert.Null(t.ReleasePullRequestId);
+        Assert.Null(t.ReleaseMergeCommit); Assert.Null(t.ReleaseTicketId); Assert.Null(t.TrackerRetryStatus);
+        Assert.Equal((Now, Now), (t.PrCommentsHandledAt, t.ClaudeCommentsHandledAt));
+        Assert.False(t.ReviewDue); Assert.Null(t.Risk); Assert.Equal(0, t.MergeHolds); Assert.Null(t.ApprovedHead);
+        Assert.Equal(Now, t.UpdatedAt);
+    }
+
+    [Fact] public void Reopen_returns_null_without_a_matching_entry_status()
+    {
+        var t = Finished();
+        Assert.Null(PipelineEngine.Reopen(P, t, "In Progress", Now));
+        Assert.Equal(("done", StageStatus.Done, 7L), (t.StageId, t.Status, t.PullRequestId));
+        Assert.Null(PipelineEngine.Reopen(P, At("plan"), "Planned", Now)); // not done
+    }
+
+    [Fact] public void Release_tickets_never_reopen()
+    {
+        var t = PipelineEngine.CreateRelease(P, 1, "Release 1", "symphonist/release-1", "Tickets:", Now);
+        t.StageId = "done"; t.Status = StageStatus.Done;
+        Assert.Null(PipelineEngine.Reopen(P, t, "Planned", Now));
     }
 }

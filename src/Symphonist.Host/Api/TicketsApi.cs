@@ -1,3 +1,4 @@
+using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Risk;
@@ -27,6 +28,18 @@ public sealed record SendBackRequest(string? Feedback, string? ToStage);
 /// <param name="Problem">Why the project's last tick could not run (e.g. a missing secret); null when it ran.</param>
 public sealed record ProjectDto(string Id, string Name, bool Paused, Isolation Isolation, string? Problem,
     ReviewMode Review, IReadOnlyList<StageAgreement> Agreement);
+
+/// <param name="Projects">The projects loaded after the reload.</param>
+/// <param name="Errors">Each skipped project file (by file name) and why.</param>
+public sealed record ProjectReloadDto(IReadOnlyList<string> Projects, IReadOnlyDictionary<string, string> Errors);
+
+/// <summary>An agent provider paused by a usage limit (see <see cref="ProviderLimits"/>).</summary>
+/// <param name="Provider">"Claude" or "Codex".</param>
+/// <param name="NextProbeAt">With no known reset, when one job may next try the provider.</param>
+public sealed record ProviderPauseDto(string Key, string Provider, DateTimeOffset Since, DateTimeOffset? ResetsAt,
+    DateTimeOffset? NextProbeAt);
+
+public sealed record ResumeLimitRequest(string? Key);
 
 /// <param name="Url">Single-use sign-in link for the dashboard (see <see cref="DashboardLogin"/>).</param>
 public sealed record DashboardLinkDto(Uri Url);
@@ -81,6 +94,8 @@ public static class TicketsApi
                     ForgetResult.Forgotten => Results.NoContent(),
                     ForgetResult.Running => Results.Conflict(new ApiError(
                         $"ticket {key} has an agent run in progress; try again when it finishes")),
+                    ForgetResult.OpenRelease => Results.Conflict(new ApiError(
+                        $"{key} is an open release; send it back to cancel it (closing its pull request) before forgetting it")),
                     _ => TicketNotFound(project, key),
                 };
             }
@@ -104,8 +119,56 @@ public static class TicketsApi
                     p.Review.Mode, agreements[p.Id].ToList()));
         });
 
+        api.MapPost("/projects/reload", async (Orchestrator o, CancellationToken ct) =>
+        {
+            var reload = await o.ReloadProjectsAsync(ct);
+            return new ProjectReloadDto(reload.ProjectIds, reload.Errors);
+        });
+
         api.MapPost("/projects/{id}/pause", (string id, ProjectRegistry projects) => SetPaused(projects, id, true));
         api.MapPost("/projects/{id}/resume", (string id, ProjectRegistry projects) => SetPaused(projects, id, false));
+
+        api.MapGet("/projects/{id}/release", async (string id, Orchestrator o, CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Ok(await o.PreviewReleaseAsync(id, ct));
+            }
+            catch (KeyNotFoundException)
+            {
+                return ProjectNotFound(id);
+            }
+        });
+
+        // The body is the preview the developer confirmed; a changed release is refused (409) and nothing starts.
+        api.MapPost("/projects/{id}/release", async (string id, ReleasePreview? confirmed, Orchestrator o, CancellationToken ct) =>
+        {
+            // Lists the JSON left out or set to null deserialize as null despite their types.
+            if (confirmed?.Ready is null || confirmed.AlsoShipped is null)
+                return Results.BadRequest(new ApiError("the confirmed preview is required"));
+            try
+            {
+                var result = await o.ReleaseNowAsync(id, confirmed, ct);
+                return result.Started ? Results.Ok(result) : Results.Conflict(new ApiError(result.Message));
+            }
+            catch (KeyNotFoundException)
+            {
+                return ProjectNotFound(id);
+            }
+        });
+
+        api.MapGet("/limits", (ProviderLimits limits) =>
+            limits.Pauses.Select(p => new ProviderPauseDto(p.Key, UsageLimits.ProviderName(p.Key), p.Since, p.ResetsAt,
+                p.NextProbeAt)));
+
+        api.MapPost("/limits/resume", async (ResumeLimitRequest? body, ProviderLimits limits, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(body?.Key)) return Results.BadRequest(new ApiError("key is required"));
+            if (limits.Pauses.All(p => p.Key != body.Key))
+                return Results.NotFound(new ApiError($"'{body.Key}' is not paused by a usage limit"));
+            await limits.ResumeAsync(body.Key, ct);
+            return Results.NoContent();
+        });
 
         api.MapPost("/dashboard/login-code", (DashboardLogin login, DashboardAddress address) =>
             new DashboardLinkDto(address.LoginUrl(login.IssueCode())));

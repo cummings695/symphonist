@@ -1,30 +1,39 @@
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
 using Symphonist.Core.Config;
 using Symphonist.Core.Integrations;
 using Symphonist.Core.Pipeline;
 using Symphonist.Core.Prompts;
+using Symphonist.Core.Risk;
 using Symphonist.Core.Storage;
 
 namespace Symphonist.Host.Orchestration;
 
-public enum ExecutionStatus { Completed, InProgress, Failed }
+/// <summary>UsageLimited: the agent provider's usage limit stopped the run; nothing about the ticket failed.</summary>
+public enum ExecutionStatus { Completed, InProgress, Failed, UsageLimited }
 
 /// <param name="MergeStarted">Post-approval: the host accepted the merge request and is still merging.</param>
+/// <param name="Limit">The usage limit that stopped the run; set only for <see cref="ExecutionStatus.UsageLimited"/>.</param>
+/// <param name="LimitKey">The usage-limit key of the stage's agent (see <see cref="UsageLimits.KeyFor"/>), with <paramref name="Limit"/>.</param>
 public sealed record ExecutionResult(ExecutionStatus Status, string? Error = null, string? Event = null,
-    bool MergeStarted = false);
+    bool MergeStarted = false, UsageLimit? Limit = null, string? LimitKey = null);
 
 /// <summary>
 /// Performs each stage's side effects through the plug-in interfaces. Only mutates the ticket's artifact fields
 /// (spec/plan paths, PR ids, merge commits); the caller applies the engine transition for the returned result.
 /// </summary>
-public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicketStore store, TimeProvider time)
+public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITicketStore store, TimeProvider time)
 {
     private static readonly ExecutionResult Completed = new(ExecutionStatus.Completed);
     private static readonly ExecutionResult InProgress = new(ExecutionStatus.InProgress);
 
     public static bool IsAgentStage(StageKind kind) => kind is StageKind.Triage or StageKind.Plan or StageKind.Implement;
+
+    /// <summary>The workspace the stages run in (the orchestrator's release coordinator uses it too).</summary>
+    public IGitWorkspace Git => git;
 
     public async Task<ExecutionResult> ExecuteAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
@@ -109,7 +118,12 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
     private async Task<ExecutionResult> ImplementAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, io, t, source, StageKind.Implement, ct);
+        var feedback = PrFeedback.FromJson(t.PrFeedbackJson);
+        var fixRun = feedback.Count > 0 && t.PullRequestId is not null;
+        var run = fixRun
+            ? await RunAgentAsync(p, io, t, source, StageKind.Implement, ct, PromptLibrary.GetPrComments(),
+                PrFixOutputSchema.Json, (workspace, values) => AddPrValues(values, feedback, workspace))
+            : await RunAgentAsync(p, io, t, source, StageKind.Implement, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
@@ -118,10 +132,13 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         if (!await CommitAsync(p, run.Workspace, title, ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
 
-        if (t.PullRequestId is not null)
+        if (t.PullRequestId is { } existingPr)
         {
+            // The tracker comment first: if it throws the stage is retried, and replies already posted would be posted again.
             await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign("PR updated"), ct);
-            return Completed;
+            string? replyEvent = null;
+            if (fixRun) replyEvent = await ReplyAsync(p, io.SourceControl, existingPr, feedback, run, ct);
+            return new ExecutionResult(ExecutionStatus.Completed, Event: replyEvent);
         }
 
         var description = output.PrDescription ?? output.Summary;
@@ -130,6 +147,101 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         t.PullRequestId = pr.Id;
         await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"PR ready for review: {pr.WebUrl}"), ct);
         return Completed;
+    }
+
+    /// <summary>Replies, signed, to each comment the fix run addressed. Failures are returned as an event, not thrown.</summary>
+    private async Task<string?> ReplyAsync(ProjectConfig p, ISourceControl sc, long prId, IReadOnlyList<PrFeedbackComment> comments,
+        AgentStep run, CancellationToken ct)
+    {
+        string? head = null;
+        try { head = await git.ResolveCommitAsync(run.Workspace, $"refs/remotes/origin/{run.Branch}", ct); }
+        catch (Exception) when (!ct.IsCancellationRequested) { }
+        var fallback = $"Addressed in {(string.IsNullOrEmpty(head) ? "the latest commit" : head[..Math.Min(7, head.Length)])}";
+        var replies = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var r in PrFixOutputSchema.ReadReplies(run.Structured)) replies.TryAdd(r.CommentId, r.Reply);
+
+        var failures = new List<string>();
+        foreach (var c in comments)
+        {
+            var original = new PullRequestComment(c.Id, c.Author, c.IsMine, default, c.Request, c.Path, c.Line, c.ParentId);
+            try
+            {
+                await sc.ReplyToPullRequestCommentAsync(prId, original,
+                    TrackerComments.Sign(TrackerComments.EscapeMentions(replies.GetValueOrDefault(c.Id) ?? fallback, p.CommentMarker)), ct);
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested)
+            {
+                failures.Add($"{c.Id}: {ReviewerText.Line(e.Message, ReviewerText.MaxItemChars)}");
+            }
+        }
+        return failures.Count == 0 ? null : $"could not reply to PR comments: {string.Join("; ", failures)}";
+    }
+
+    private const int CodeContextLines = 10, MaxCodeLineChars = 400;
+
+    private static void AddPrValues(Dictionary<string, string?> values, IReadOnlyList<PrFeedbackComment> comments,
+        string workspace)
+    {
+        var nonce = UntrustedFence.NewNonce();
+        values["pr.fence_id"] = nonce;
+        values["ticket.description"] = UntrustedFence.Wrap(nonce, values["ticket.description"] ?? "");
+
+        var blocks = new List<string>();
+        var code = new List<string>();
+        foreach (var c in comments)
+        {
+            var safePath = c.Path is not null && GateReviewer.IsSafeRepoPath(c.Path);
+            var location = c.Path is null ? null
+                : !safePath ? "(invalid path)"
+                : c.Line is { } l ? $"{c.Path}:{l}" : c.Path;
+            var text = new StringBuilder()
+                .Append("id: ").Append(c.Id).Append('\n')
+                .Append("author: ").Append(c.Author).Append(c.IsMine ? "" : " (not the developer)").Append('\n');
+            if (location is not null) text.Append("location: ").Append(location).Append('\n');
+            text.Append("request: ").Append(c.Request.Length == 0 ? "(no text after the tag)" : c.Request);
+            blocks.Add(UntrustedFence.Wrap(nonce, text.ToString()));
+
+            if (safePath && c.Line is { } line && ReadCodeContext(workspace, c.Path!, line) is { } snippet)
+                code.Add(UntrustedFence.Wrap(nonce, $"comment {c.Id}: {c.Path}:{line}\n{snippet}"));
+        }
+        values["pr.comments"] = string.Join("\n\n", blocks);
+        values["pr.code"] = code.Count == 0 ? "(none)" : string.Join("\n\n", code);
+    }
+
+    /// <summary>Up to 10 numbered lines either side of <paramref name="line"/>; null when the file or line is missing or the path goes through a link.</summary>
+    private static string? ReadCodeContext(string workspace, string path, int line)
+    {
+        try
+        {
+            if (line < 1) return null;
+            var current = Path.GetFullPath(workspace);
+            FileSystemInfo info = new DirectoryInfo(current);
+            foreach (var part in path.Split('/', '\\'))
+            {
+                if (part.Length == 0) continue;
+                current = Path.Combine(current, part);
+                info = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
+                if (!info.Exists || info.LinkTarget is not null) return null;
+            }
+            if (info is not FileInfo) return null;
+
+            var first = Math.Max(1, line - CodeContextLines);
+            var last = line + CodeContextLines;
+            var sb = new StringBuilder();
+            var n = 0;
+            foreach (var text in File.ReadLines(info.FullName))
+            {
+                n++;
+                if (n < first) continue;
+                if (n > last) break;
+                sb.Append(n).Append(": ").Append(text.Length > MaxCodeLineChars ? text[..MaxCodeLineChars] : text).Append('\n');
+            }
+            return n < line ? null : sb.ToString().TrimEnd();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -169,48 +281,64 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         };
     }
 
+    /// <summary>
+    /// A release ticket opens (or finds) its batch's PR from its frozen release branch. A work ticket never opens one: it
+    /// ships in a batch, and only a ticket that opened its own release PR before batches finishes it the old way.
+    /// </summary>
     private static async Task<ExecutionResult> ReleaseAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, CancellationToken ct)
     {
-        var sc = io.SourceControl;
-        if (t.ReleasePullRequestId is { } existing && (await sc.GetPullRequestAsync(existing, ct)).State == PullRequestState.Open)
-            return Completed;
+        if (t.Kind == TicketKind.Release) return await ReleaseBatchAsync(p, io.SourceControl, t, ct);
 
-        // First release, or re-entered (send-back / unblock) after an earlier release finished: start over.
+        // The orchestrator never runs a ready ticket's release stage; a PR from main here would ship unnamed tickets.
+        if (t.ReleasePullRequestId is not { } existing)
+            return new ExecutionResult(ExecutionStatus.InProgress, Event: "ready to release: waits for a release batch");
+        if ((await io.SourceControl.GetPullRequestAsync(existing, ct)).State == PullRequestState.Open) return Completed;
+
+        // Its own release PR was merged or closed before it got here again (send-back, unblock): it now ships in a batch.
         t.ReleasePullRequestId = null;
         t.ReleaseMergeCommit = null;
+        return new ExecutionResult(ExecutionStatus.InProgress,
+            Event: $"release PR {existing} is no longer open; ready to release in the next batch");
+    }
 
-        var (main, production) = (p.Repo.MainBranch, p.Repo.ProductionBranch);
-        var title = $"Release {t.Key}";
+    /// <summary>
+    /// Opens the release PR from <see cref="Ticket.Branch"/> (frozen at Release now) to production, describing every
+    /// ticket it ships. No tracker comment: a release ticket has no card. A PR already recorded is left as it is; the
+    /// orchestrator checks at the gate whether it was merged or closed meanwhile.
+    /// </summary>
+    private static async Task<ExecutionResult> ReleaseBatchAsync(ProjectConfig p, ISourceControl sc, Ticket t, CancellationToken ct)
+    {
+        if (t.ReleasePullRequestId is not null) return Completed;
+        if (t.Branch is not { } branch) return Failed("the release has no branch");
+        var production = p.Repo.ProductionBranch;
         PullRequestInfo pr;
         try
         {
-            pr = await FindOrOpenAsync(sc, main, production, title, $"{title}: {t.Title}", ct);
+            pr = await FindOrOpenAsync(sc, branch, production, t.Title, t.ReleaseSummary ?? t.Title, ct);
         }
         catch (NoChangesToPullException e)
         {
-            // Production already contains main (e.g. released together with another ticket): deploy watches its head.
-            // Fail closed: completing here moves the ticket towards Done, so check the host's claim independently.
+            // Production already contains the release branch (e.g. merged by hand): deploy watches its head.
+            // Fail closed: completing here finishes every member, so check the host's claim independently.
             string? doubt;
             try
             {
-                doubt = await sc.BranchContainsAsync(production, main, ct) ? null : $"{production} does not contain {main}";
+                doubt = await sc.BranchContainsAsync(production, branch, ct) ? null : $"{production} does not contain {branch}";
             }
             catch (Exception verify) when (!ct.IsCancellationRequested)
             {
-                doubt = $"could not verify that {production} contains {main}: {verify.Message}";
+                doubt = $"could not verify that {production} contains {branch}: {verify.Message}";
             }
             if (doubt is not null) return Failed($"{e.Message} (but {doubt})");
 
             var head = await sc.GetBranchHeadAsync(production, ct);
             t.ReleaseMergeCommit = head;
-            await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Nothing to release: {production} already contains {main}."), ct);
             return new ExecutionResult(ExecutionStatus.Completed,
-                Event: $"already in production: {production} already contains {main} (at {head})");
+                Event: $"already in production: {production} already contains {branch} (at {head})");
         }
 
         t.ReleasePullRequestId = pr.Id;
-        await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign($"Release PR: {pr.WebUrl}"), ct);
-        return Completed;
+        return new ExecutionResult(ExecutionStatus.Completed, Event: $"release PR: {pr.WebUrl}");
     }
 
     private static async Task<PullRequestInfo> FindOrOpenAsync(ISourceControl sc, string sourceBranch, string destination,
@@ -250,10 +378,11 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
 
     /// <param name="Attachments">The ticket's attachments as synced for this run.</param>
     private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure,
-        AttachmentSet Attachments);
+        AttachmentSet Attachments, JsonElement? Structured = null);
 
     private async Task<AgentStep> RunAgentAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
-        StageKind kind, CancellationToken ct)
+        StageKind kind, CancellationToken ct, string? template = null, string schema = StageOutputSchema.Json,
+        Action<string, Dictionary<string, string?>>? extra = null)
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
@@ -267,14 +396,16 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
             // Missing attachments degrade the run, never block it.
             attachments = TicketAttachments.Unavailable(p.Id, t.Key, source, $"could not sync attachments: {e.Message}");
         }
-        var prompt = PromptRenderer.Render(PromptLibrary.Get(p, kind),
-            PromptValues.For(p, t, source, branch, t.Feedback ?? "", attachments));
+        var values = PromptValues.For(p, t, source, branch, t.Feedback ?? "", attachments);
+        extra?.Invoke(workspace, values);
+        var prompt = PromptRenderer.Render(template ?? PromptLibrary.Get(p, kind), values);
 
+        var settings = p.AgentFor(t.StageId);
         var startedAt = time.GetUtcNow();
         AgentRunResult result;
         try
         {
-            result = await agent.RunAsync(new AgentRunRequest(workspace, prompt, p.Agent,
+            result = await agents.For(settings.Type).RunAsync(new AgentRunRequest(workspace, prompt, settings, schema,
                 AttachmentsDirectory: attachments.HasFiles ? attachments.Directory : null), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -290,11 +421,16 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunner agent, ITicket
         await store.AddAgentRunAsync(new AgentRunRecord(t.Id, t.StageId, startedAt, result.Duration, result.Succeeded,
             result.CostUsd, result.Error, logPath, result.Output?.Summary), ct);
 
+        // The runner only fills Output for the stage schema; other schemas carry the stage fields in Structured.
+        var output = schema == StageOutputSchema.Json ? result.Output : StageOutputSchema.Read(result.Structured);
         ExecutionResult? failure =
-            !result.Succeeded ? Failed(result.Error ?? "agent run failed")
-            : result.Output is null ? Failed("agent returned no structured output")
+            !result.Succeeded && result.Limit is { } limit
+                ? new ExecutionResult(ExecutionStatus.UsageLimited, result.Error, Limit: limit, LimitKey: UsageLimits.KeyFor(settings))
+            : !result.Succeeded ? Failed(result.Error ?? "agent run failed")
+            : output is null ? Failed("agent returned no structured output")
+            : output.Status != "completed" ? Failed(string.IsNullOrWhiteSpace(output.Summary) ? $"stage status '{output.Status}'" : output.Summary)
             : null;
-        return new AgentStep(workspace, branch, result.Output, failure, attachments);
+        return new AgentStep(workspace, branch, output, failure, attachments, result.Structured);
     }
 
     private static ExecutionResult Failed(string error) => new(ExecutionStatus.Failed, error);
