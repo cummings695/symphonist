@@ -21,6 +21,12 @@ public interface IGitWorkspace
     /// </summary>
     Task<IReadOnlyList<string>> ChangedFilesAsync(string workspace, string range, CancellationToken ct);
 
+    /// <summary>
+    /// Modified, added, deleted and untracked (not ignored) files in the working tree and index ('/'-separated, exactly
+    /// as stored), i.e. what <c>git add -A</c> would commit.
+    /// </summary>
+    Task<IReadOnlyList<string>> UncommittedFilesAsync(string workspace, CancellationToken ct);
+
     /// <summary>The patch of <c>git diff {range}</c>; renames show as delete plus add.</summary>
     Task<string> DiffAsync(string workspace, string range, CancellationToken ct);
 

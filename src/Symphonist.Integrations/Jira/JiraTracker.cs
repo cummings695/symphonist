@@ -26,7 +26,7 @@ public sealed partial class JiraTracker(HttpClient http, JiraTrackerConfig confi
             var body = new Dictionary<string, object>
             {
                 ["jql"] = config.Jql,
-                ["fields"] = new[] { "summary", "description", "status", "comment" },
+                ["fields"] = new[] { "summary", "description", "status", "comment", "attachment" },
                 ["maxResults"] = PageSize,
             };
             if (pageToken is not null) body["nextPageToken"] = pageToken;
@@ -108,7 +108,55 @@ public sealed partial class JiraTracker(HttpClient http, JiraTrackerConfig confi
             fields.TryGetProperty("description", out var d) ? Adf.ToPlainText(d) : "",
             fields.TryGetProperty("status", out var st) && st.TryGetProperty("name", out var sn) ? sn.GetString() ?? "" : "",
             comments.OrderBy(x => x.Created).ToList(),
-            new Uri($"{config.Site.ToString().TrimEnd('/')}/browse/{key}"));
+            new Uri($"{config.Site.ToString().TrimEnd('/')}/browse/{key}"),
+            MapAttachments(fields));
+    }
+
+    private static List<SourceAttachment> MapAttachments(JsonElement fields)
+    {
+        var result = new List<SourceAttachment>();
+        if (!fields.TryGetProperty("attachment", out var list) || list.ValueKind != JsonValueKind.Array) return result;
+        foreach (var a in list.EnumerateArray())
+            result.Add(new SourceAttachment(
+                a.GetProperty("id").GetString()!,
+                a.TryGetProperty("filename", out var fn) ? fn.GetString() ?? "" : "",
+                a.TryGetProperty("mimeType", out var mt) ? mt.GetString() ?? "" : "",
+                a.TryGetProperty("size", out var sz) && sz.ValueKind == JsonValueKind.Number ? sz.GetInt64() : 0,
+                ParseJiraDate(a.GetProperty("created").GetString()!)));
+        return result;
+    }
+
+    public async Task DownloadAttachmentAsync(string key, SourceAttachment attachment, Stream destination, CancellationToken ct)
+    {
+        http.BaseAddress ??= config.Site;
+        var path = $"rest/api/3/attachment/content/{Uri.EscapeDataString(attachment.Id)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+            Convert.ToBase64String(Encoding.UTF8.GetBytes($"{config.Email}:{apiToken}")));
+        var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        try
+        {
+            // The content endpoint redirects to a signed media URL; follow it by hand so the
+            // Authorization header is never sent there. If the client already followed, this is a 200.
+            if ((int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is { } location)
+            {
+                var target = location.IsAbsoluteUri ? location : new Uri(http.BaseAddress!, location);
+                response.Dispose();
+                using var redirected = new HttpRequestMessage(HttpMethod.Get, target);
+                response = await http.SendAsync(redirected, HttpCompletionOption.ResponseHeadersRead, ct);
+            }
+
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException(
+                    $"Jira attachment {attachment.Id} download failed: {(int)response.StatusCode} {response.ReasonPhrase}.",
+                    null, response.StatusCode);
+
+            await response.Content.CopyToAsync(destination, ct);
+        }
+        finally
+        {
+            response.Dispose();
+        }
     }
 
     private static void AddComment(JsonElement cm, string myAccountId, HashSet<string> seen, List<SourceComment> comments)

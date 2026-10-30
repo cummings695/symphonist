@@ -23,6 +23,7 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
     {
         var settings = request.Settings;
         var args = new List<string> { "-p", "--output-format", "json", "--json-schema", request.OutputSchema };
+        var denied = new List<string>(request.ReadOnlyWorkspace ? ReadOnlyDeniedTools : []);
         // Bypass permission prompts only when the launcher actually sandboxes the run; config alone is not enough.
         if (settings.Isolation == Isolation.Container && launcher.ProvidesIsolation(request))
             args.Add(HostLauncher.PermissionBypassFlag);
@@ -34,10 +35,18 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
                 return new AgentRunResult(false, null, null, TimeSpan.Zero,
                     $"read-only run refuses write-capable tool '{tool}'", "");
             args.Add("--allowedTools"); args.Add(string.Join(",", settings.AllowedTools));
+            if (request.AttachmentsDirectory is { } attachments)
+            {
+                // --add-dir makes the directory a working directory, which pre-approved Edit/Write could change:
+                // attachments must stay as the ticket author attached them.
+                args.Add("--add-dir"); args.Add(attachments);
+                var rule = $"/{PermissionPath(attachments)}/**";
+                denied.Add($"Edit({rule})"); denied.Add($"Write({rule})");
+            }
         }
+        if (denied.Count > 0) { args.Add("--disallowedTools"); args.Add(string.Join(",", denied)); }
         if (request.ReadOnlyWorkspace)
         {
-            args.Add("--disallowedTools"); args.Add(string.Join(",", ReadOnlyDeniedTools));
             // The workspace is what is being reviewed: its .claude settings (permissions, hooks), CLAUDE.md / AGENTS.md
             // (loaded only with the project and local sources) and .mcp.json servers must not steer or widen the run.
             args.Add("--setting-sources"); args.Add("user");
@@ -65,6 +74,18 @@ public sealed class ClaudeCodeRunner(IProcessRunner runner, IAgentLauncher launc
 
         var rawLog = result.StandardOutput + "\n--- stderr ---\n" + result.StandardError;
         return Parse(result, request, sw.Elapsed, rawLog);
+    }
+
+    /// <summary>
+    /// An absolute path as Claude Code matches permission rules: POSIX form, with a Windows drive as a lowercase first
+    /// segment (<c>C:\Users\me</c> becomes <c>/c/Users/me</c>) and no trailing separator.
+    /// </summary>
+    private static string PermissionPath(string path)
+    {
+        var posix = path.Replace('\\', '/').TrimEnd('/');
+        return posix.Length >= 2 && char.IsAsciiLetter(posix[0]) && posix[1] == ':'
+            ? $"/{char.ToLowerInvariant(posix[0])}{posix[2..]}"
+            : posix;
     }
 
     private AgentRunResult Parse(ProcessResult result, AgentRunRequest request, TimeSpan duration, string rawLog)

@@ -135,10 +135,11 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         try { Directory.Delete(workspace, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
-    private ProcessSpec Wrap(string fileName, string[] args, TimeSpan timeout)
+    private ProcessSpec Wrap(string fileName, string[] args, TimeSpan timeout, string? attachments = null)
     {
         var request = new AgentRunRequest(workspace, "",
-            new AgentSettings("claude-code", Isolation.Container, ["api.nuget.org"], [], 5, null, null));
+            new AgentSettings("claude-code", Isolation.Container, ["api.nuget.org"], [], 5, null, null),
+            AttachmentsDirectory: attachments);
         return fixture.Launcher.Wrap(new ProcessSpec(fileName, args, Timeout: timeout), request);
     }
 
@@ -160,6 +161,8 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         AssertExit(0, await RunInContainer("dotnet", "--version"));
         AssertExit(0, await RunInContainer("git", "--version"));
         AssertExit(0, await RunInContainer("chromium", "--version"));
+        AssertExit(0, await RunInContainer("node", "-e", "process.exit(process.versions.node.split('.')[0] === '22' ? 0 : 1)"));
+        AssertExit(0, await RunInContainer("npm", "--version"));
     }
 
     [DockerFact]
@@ -192,6 +195,22 @@ public class AgentImageTests(AgentImageFixture fixture) : IClassFixture<AgentIma
         Assert.NotEqual(0, r.ExitCode);
         Assert.False(File.Exists(Path.Combine(workspace, ".git", "hooks", "pre-commit")));
         AssertExit(0, await RunInContainer("touch", "/workspace/still-writable"));
+    }
+
+    [DockerFact]
+    public async Task Attachments_mount_is_read_only_inside_the_container()
+    {
+        var dir = Directory.CreateTempSubdirectory("symphonist-att-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+            Task<ProcessResult> Run(string file, params string[] args) =>
+                fixture.Runner.RunAsync(Wrap(file, args, TimeSpan.FromMinutes(3), dir), CancellationToken.None);
+            AssertExit(0, await Run("cat", "/attachments/a.txt"));
+            Assert.NotEqual(0, (await Run("touch", "/attachments/b")).ExitCode);
+            Assert.False(File.Exists(Path.Combine(dir, "b")));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
     }
 
     [DockerFact]

@@ -20,6 +20,10 @@
           ]
         },
         "status": { "id": "10000", "name": "Planned" },
+        "attachment": [
+          { "id": "10001", "filename": "screen shot.png", "mimeType": "image/png", "size": 2048, "created": "2026-10-20T09:00:00.000+0000" },
+          { "id": "10002", "filename": "orders.csv", "mimeType": "text/csv", "size": 512, "created": "2026-10-20T09:05:00.000+0000" }
+        ],
         "comment": {
           "comments": [
             {

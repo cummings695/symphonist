@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Symphonist.Core.Config;
+using Symphonist.Core.Integrations;
 using Symphonist.Integrations.Jira;
 using Symphonist.Tests.Http;
 
@@ -202,5 +203,72 @@ public class JiraTrackerTests
         Assert.All(stub.Authorizations, a => Assert.Equal(expected, a));
         Assert.Null(client.DefaultRequestHeaders.Authorization);
         Assert.Equal(Config.Site, client.BaseAddress);
+    }
+
+    [Fact]
+    public async Task Query_requests_and_maps_attachments()
+    {
+        var (tracker, stub) = Create(PagedStub());
+
+        var tickets = await tracker.QueryAsync(CancellationToken.None);
+
+        Assert.Contains("\"attachment\"", stub.Requests.First(r => r.PathAndQuery.StartsWith("/rest/api/3/search/jql")).Body);
+        var list = tickets[0].AttachmentList;
+        Assert.Equal(2, list.Count);
+        Assert.Equal(new SourceAttachment("10001", "screen shot.png", "image/png", 2048,
+            new DateTimeOffset(2026, 10, 20, 9, 0, 0, TimeSpan.Zero)), list[0]);
+        Assert.Equal(new SourceAttachment("10002", "orders.csv", "text/csv", 512,
+            new DateTimeOffset(2026, 10, 20, 9, 5, 0, TimeSpan.Zero)), list[1]);
+        Assert.Empty(tickets[1].AttachmentList);
+    }
+
+    private static readonly SourceAttachment Csv = new("10002", "orders.csv", "text/csv", 8, DateTimeOffset.UnixEpoch);
+
+    [Fact]
+    public async Task Download_streams_content_with_basic_auth()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/attachment/content/10002", HttpStatusCode.OK, "a,b\n1,2\n");
+        var (tracker, _) = Create(stub);
+        using var dest = new MemoryStream();
+
+        await tracker.DownloadAttachmentAsync("PROJ-1", Csv, dest, CancellationToken.None);
+
+        Assert.Equal("a,b\n1,2\n", Encoding.UTF8.GetString(dest.ToArray()));
+        Assert.StartsWith("Basic ", stub.Authorizations[^1]);
+    }
+
+    private static readonly Dictionary<string, string> Redirect = new() { ["Location"] = "https://api.media.atlassian.com/file/abc?token=x" };
+
+    [Fact]
+    public async Task Download_follows_redirect_without_authorization()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/attachment/content/10002", HttpStatusCode.SeeOther, "", headers: Redirect)
+            .On(HttpMethod.Get, "/file/abc", HttpStatusCode.OK, "data");
+        var (tracker, _) = Create(stub);
+        using var dest = new MemoryStream();
+
+        await tracker.DownloadAttachmentAsync("PROJ-1", Csv, dest, CancellationToken.None);
+
+        Assert.Equal("data", Encoding.UTF8.GetString(dest.ToArray()));
+        Assert.Equal(2, stub.Requests.Count);
+        Assert.Null(stub.Authorizations[^1]);
+    }
+
+    [Fact]
+    public async Task Download_failure_throws_without_leaking_url_query()
+    {
+        var stub = new StubHttpHandler()
+            .On(HttpMethod.Get, "/rest/api/3/attachment/content/10002", HttpStatusCode.SeeOther, "", headers: Redirect)
+            .On(HttpMethod.Get, "/file/abc", HttpStatusCode.Forbidden, "denied");
+        var (tracker, _) = Create(stub);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            tracker.DownloadAttachmentAsync("PROJ-1", Csv, new MemoryStream(), CancellationToken.None));
+
+        Assert.DoesNotContain("token=x", ex.Message);
+        Assert.Contains("10002", ex.Message);
+        Assert.Contains("403", ex.Message);
     }
 }

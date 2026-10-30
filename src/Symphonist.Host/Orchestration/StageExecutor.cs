@@ -86,7 +86,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
     private async Task<ExecutionResult> TriageAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Triage, ct);
+        var run = await RunAgentAsync(p, io, t, source, StageKind.Triage, ct);
         if (run.Failure is not null) return run.Failure;
 
         await io.Tracker.CommentAsync(t.Key, TrackerComments.Sign(run.Output!.CommentMarkdown ?? run.Output.Summary), ct);
@@ -96,12 +96,13 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
     private async Task<ExecutionResult> PlanAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
         CancellationToken ct)
     {
-        var run = await RunAgentAsync(p, t, source, StageKind.Plan, ct);
+        var run = await RunAgentAsync(p, io, t, source, StageKind.Plan, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         if (string.IsNullOrWhiteSpace(output.SpecPath) || string.IsNullOrWhiteSpace(output.PlanPath))
             return Failed("agent did not report spec_path and plan_path");
 
+        if (await FindAttachmentCopyAsync(p, run, ct) is { } copied) return Failed(copied);
         if (!await CommitAsync(p, run.Workspace, $"{t.Key}: spec and plan", ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
         t.SpecPath = output.SpecPath;
@@ -120,13 +121,14 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         var feedback = PrFeedback.FromJson(t.PrFeedbackJson);
         var fixRun = feedback.Count > 0 && t.PullRequestId is not null;
         var run = fixRun
-            ? await RunAgentAsync(p, t, source, StageKind.Implement, ct, PromptLibrary.GetPrComments(),
+            ? await RunAgentAsync(p, io, t, source, StageKind.Implement, ct, PromptLibrary.GetPrComments(),
                 PrFixOutputSchema.Json, (workspace, values) => AddPrValues(values, feedback, workspace))
-            : await RunAgentAsync(p, t, source, StageKind.Implement, ct);
+            : await RunAgentAsync(p, io, t, source, StageKind.Implement, ct);
         if (run.Failure is not null) return run.Failure;
         var output = run.Output!;
         var title = $"{t.Key}: {output.PrTitle ?? t.Title}";
 
+        if (await FindAttachmentCopyAsync(p, run, ct) is { } copied) return Failed(copied);
         if (!await CommitAsync(p, run.Workspace, title, ct)) return Failed("agent made no changes");
         await git.PushAsync(run.Workspace, run.Branch, ct);
 
@@ -250,6 +252,19 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         await git.CommitAllAsync(workspace, message, ct)
         || await git.HasCommitsAheadAsync(workspace, p.Repo.MainBranch, ct);
 
+    /// <summary>
+    /// Ticket attachments (customer data, screenshots) must never reach the repository: checks what this commit would add
+    /// and what earlier attempts already committed on the branch for a byte-identical copy of one.
+    /// </summary>
+    private async Task<string?> FindAttachmentCopyAsync(ProjectConfig p, AgentStep run, CancellationToken ct)
+    {
+        if (!run.Attachments.HasFiles) return null;
+        var uncommitted = await git.UncommittedFilesAsync(run.Workspace, ct);
+        var committed = await git.ChangedFilesAsync(run.Workspace, $"refs/remotes/origin/{p.Repo.MainBranch}...HEAD", ct);
+        return await TicketAttachments.FindCopyAsync(run.Attachments, run.Workspace,
+            uncommitted.Concat(committed).Distinct(StringComparer.Ordinal), ct);
+    }
+
     private async Task<ExecutionResult> WatchBuildAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, string? commit,
         BuildPurpose purpose, CancellationToken ct)
     {
@@ -361,16 +376,27 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         return Completed;
     }
 
+    /// <param name="Attachments">The ticket's attachments as synced for this run.</param>
     private sealed record AgentStep(string Workspace, string Branch, StageOutput? Output, ExecutionResult? Failure,
-        JsonElement? Structured = null);
+        AttachmentSet Attachments, JsonElement? Structured = null);
 
-    private async Task<AgentStep> RunAgentAsync(ProjectConfig p, Ticket t, SourceTicket? source, StageKind kind,
-        CancellationToken ct, string? template = null, string schema = StageOutputSchema.Json,
+    private async Task<AgentStep> RunAgentAsync(ProjectConfig p, ProjectIntegrations io, Ticket t, SourceTicket? source,
+        StageKind kind, CancellationToken ct, string? template = null, string schema = StageOutputSchema.Json,
         Action<string, Dictionary<string, string?>>? extra = null)
     {
         var branch = t.Branch ?? $"symphonist/{t.Key}";
         var workspace = await git.PrepareAsync(p, t.Key, branch, ct);
-        var values = PromptValues.For(p, t, source, branch, t.Feedback ?? "");
+        AttachmentSet attachments;
+        try
+        {
+            attachments = await TicketAttachments.SyncAsync(io.Tracker, p.Id, t.Key, source, ct);
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            // Missing attachments degrade the run, never block it.
+            attachments = TicketAttachments.Unavailable(p.Id, t.Key, source, $"could not sync attachments: {e.Message}");
+        }
+        var values = PromptValues.For(p, t, source, branch, t.Feedback ?? "", attachments);
         extra?.Invoke(workspace, values);
         var prompt = PromptRenderer.Render(template ?? PromptLibrary.Get(p, kind), values);
 
@@ -379,7 +405,8 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
         AgentRunResult result;
         try
         {
-            result = await agents.For(settings.Type).RunAsync(new AgentRunRequest(workspace, prompt, settings, schema), ct);
+            result = await agents.For(settings.Type).RunAsync(new AgentRunRequest(workspace, prompt, settings, schema,
+                AttachmentsDirectory: attachments.HasFiles ? attachments.Directory : null), ct);
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -403,7 +430,7 @@ public sealed class StageExecutor(IGitWorkspace git, IAgentRunners agents, ITick
             : output is null ? Failed("agent returned no structured output")
             : output.Status != "completed" ? Failed(string.IsNullOrWhiteSpace(output.Summary) ? $"stage status '{output.Status}'" : output.Summary)
             : null;
-        return new AgentStep(workspace, branch, output, failure, result.Structured);
+        return new AgentStep(workspace, branch, output, failure, attachments, result.Structured);
     }
 
     private static ExecutionResult Failed(string error) => new(ExecutionStatus.Failed, error);

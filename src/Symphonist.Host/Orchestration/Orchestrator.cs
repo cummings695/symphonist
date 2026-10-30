@@ -220,7 +220,8 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
     }
 
     /// <summary>
-    /// Removes a ticket (with its events and runs) from Symphonist only; the tracker, repo and workspace are untouched.
+    /// Removes a ticket (with its events, runs and downloaded attachments) from Symphonist only; the tracker, repo and
+    /// workspace are untouched.
     /// Refused while an agent or review run for it is in flight, since the run's completion would write to the deleted
     /// ticket, and for a release that is not done, whose pull request only sending it back closes.
     /// </summary>
@@ -235,7 +236,9 @@ public sealed class Orchestrator(ProjectRegistry projects, ITicketStore store, I
             // Forgetting an open release would orphan its pull request (and leave nothing to close it).
             if (t is { Kind: TicketKind.Release } && t.Status != StageStatus.Done) return ForgetResult.OpenRelease;
             retryFailureRecorded.Remove(t.Id);
-            return await store.DeleteAsync(projectId, key, ct) ? ForgetResult.Forgotten : ForgetResult.NotFound;
+            if (!await store.DeleteAsync(projectId, key, ct)) return ForgetResult.NotFound;
+            TicketAttachments.Delete(projectId, key);
+            return ForgetResult.Forgotten;
         }
         finally
         {

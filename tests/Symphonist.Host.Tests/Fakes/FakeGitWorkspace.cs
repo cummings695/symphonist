@@ -31,6 +31,9 @@ public sealed class FakeGitWorkspace : IGitWorkspace
     /// <summary>Thrown from ChangedFilesAsync when set.</summary>
     public Exception? ChangedFilesError { get; set; }
 
+    /// <summary>Returned by UncommittedFilesAsync; default none.</summary>
+    public List<string> UncommittedFiles { get; set; } = [];
+
     /// <summary>Returned by DiffAsync; default a one-line patch.</summary>
     public string Diff { get; set; } = "diff --git a/x b/x\n+change\n";
     public List<(string Workspace, string Range)> DiffCalls { get; } = [];
@@ -89,6 +92,9 @@ public sealed class FakeGitWorkspace : IGitWorkspace
         if (ChangedFilesError is not null) throw ChangedFilesError;
         return Task.FromResult<IReadOnlyList<string>>(ChangedFiles.ToList());
     }
+
+    public Task<IReadOnlyList<string>> UncommittedFilesAsync(string workspace, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<string>>(UncommittedFiles.ToList());
 
     public Task<string> DiffAsync(string workspace, string range, CancellationToken ct)
     {

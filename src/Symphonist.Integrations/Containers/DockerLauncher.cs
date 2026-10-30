@@ -22,6 +22,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
     public const string DefaultImage = "symphonist/agent:2";
     /// <summary>Repository of the images built from <c>agent.packages</c>; the tag is a hash of their Dockerfile.</summary>
     public const string PackagesRepository = "symphonist/agent-packages";
+    /// <summary>Where the ticket's attachments directory appears, read-only, inside the container.</summary>
+    public const string AttachmentsMount = "/attachments";
     public const string TokenSecretName = "claude-code-token";
     /// <summary>The variable Codex reads its OpenAI API key from in <c>exec</c> mode.</summary>
     public const string CodexApiKeyVar = "CODEX_API_KEY";
@@ -226,6 +228,8 @@ public sealed class DockerLauncher(IProcessRunner runner, string agentContextDir
             ]);
         foreach (var mount in agentCommand.Mounts ?? [])
             args.AddRange(["-v", $"{mount.HostPath}:{mount.ContainerPath}{(mount.ReadOnly ? ":ro" : "")}"]);
+        if (request.AttachmentsDirectory is { } attachments)
+            args.AddRange(["-v", $"{attachments}:{AttachmentsMount}:ro"]);
         args.AddRange(["-w", WorkspacePath]);
         // A null value removes the variable from the docker CLI's environment, so `-e NAME` passes nothing.
         var env = new Dictionary<string, string?>();

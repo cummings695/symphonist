@@ -1,4 +1,7 @@
 # Sandbox image for unattended Claude Code and Codex runs. Built by DockerLauncher.EnsureImageAsync as symphonist/agent:2.
+# Node 22 LTS comes from the official image: the SDK base (Ubuntu 24.04) only ships Node 18 via apt.
+FROM node:22.23.4-bookworm-slim AS node
+
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -7,8 +10,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git curl ca-certificates iptables ipset dnsutils jq nodejs npm \
+ && apt-get install -y --no-install-recommends git curl ca-certificates iptables ipset dnsutils jq \
  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/ /usr/local/bin/
+COPY --from=node /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+COPY --from=node /usr/local/include/node/ /usr/local/include/node/
+RUN node --version | grep -q '^v22\.' && npm --version
 
 # Codex is pinned: CodexRunner's read-only guards (-c project_doc_max_bytes=0, -c web_search="disabled", and a fresh
 # CODEX_HOME that trusts no project) were verified against this version. Bump it only after re-running the AGENTS.md /

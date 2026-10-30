@@ -129,5 +129,6 @@ review:
 #                       # that pushes under your account, so enable it only for a team you trust
 
 # Optional prompt overrides per stage kind, as files relative to this file. Uncomment once the file exists.
+# A custom prompt must include {{ticket.attachments}} for the agent to see the ticket's downloaded attachments.
 # prompts:
 #   plan: prompts/plan.md

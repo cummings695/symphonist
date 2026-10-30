@@ -65,7 +65,7 @@ public static class Cli
         {
             var (project, key) = (r.GetValue(forgetProject)!, r.GetValue(forgetKey)!);
             await client.ForgetAsync(project, key, ct);
-            stdout.WriteLine($"Forgot {project}/{key}. Jira, Bitbucket and the workspace are unchanged; " +
+            stdout.WriteLine($"Forgot {project}/{key}. Its downloaded attachments were removed; Jira, Bitbucket and the workspace are unchanged; " +
                 "if it still matches the tracker query it will be picked up again as new.");
         });
         root.Add(forget);
