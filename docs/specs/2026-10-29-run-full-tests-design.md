@@ -39,3 +39,7 @@ None are configured for this project, so the change touches none.
 - `dotnet test Symphonist.slnx --filter "Category!=Docker&Category!=Live"` reports 0 failures on Linux.
 - Each Host.Tests class passes in isolation and in the full run.
 - The Core.Tests test passes with both LF and CRLF checkouts of the samples.
+
+## Review notes (2026-10-31)
+- Re-read the Host.Tests fixtures: `TicketsApiTests`, `DashboardAuthTests` and `EvidenceFilesTests` each construct a `WebApplicationFactory<Program>` in the constructor (after `TestHome`, which sets `SYMPHONIST_HOME`) and dispose it in `Dispose()`. `DashboardAuthTests` also calls `factory.Dispose()` inside a test body (line ~336) while the same factory is shared by that class's other helpers; check that this test creates its own factory rather than disposing the shared one, since it is a candidate cause of `ObjectDisposedException`.
+- Tests were not run in this planning pass; all failure counts remain the triage's.
