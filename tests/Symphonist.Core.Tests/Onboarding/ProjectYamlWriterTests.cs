@@ -275,7 +275,7 @@ public class ProjectYamlWriterTests
     [Fact]
     public void Update_rewrites_only_changed_sections()
     {
-        var text = File.ReadAllText(SamplePath("orders.example.yaml"));
+        var text = File.ReadAllText(SamplePath("orders.example.yaml")).ReplaceLineEndings("\n");
         var original = Sample("orders.example.yaml");
         var edited = original.Clone();
         edited.RiskAreas.Add(new RiskAreaForm { Name = "auth", Description = "Sign-in and tokens.", Paths = ["src/Auth/**"] });

@@ -3,6 +3,7 @@ using System.Net;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Http.Resilience;
 using Symphonist.Core;
 using Symphonist.Core.Agents;
@@ -152,8 +153,11 @@ static int ApiPort(string? value)
 // Defense in depth: the API must never be reachable from another machine.
 static void VerifyLoopbackOnly(WebApplication app, int port)
 {
-    var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses;
-    if (addresses is null || addresses.Count == 0) return; // in-memory test server
+    // The in-memory test server reports addresses from ASPNETCORE_HTTP_PORTS / URLS (for example 8080 in containers), not a socket.
+    var server = app.Services.GetRequiredService<IServer>();
+    if (server is not KestrelServer) return;
+    var addresses = server.Features.Get<IServerAddressesFeature>()?.Addresses;
+    if (addresses is null || addresses.Count == 0) return;
 
     var expected = $"http://127.0.0.1:{port}";
     if (addresses.All(a => a.TrimEnd('/') == expected))
